@@ -18,16 +18,32 @@ fi
 
 echo "✅ Node.js version: $(node --version)"
 
-# Check if npm is installed
-if ! command -v npm &> /dev/null; then
-    echo "❌ Error: npm is not installed"
-    exit 1
-fi
-
 # Install ws module if not present
 if ! node -e "require('ws')" 2>/dev/null; then
     echo "📦 Installing 'ws' module..."
-    npm install ws --no-save
+    
+    # Use pnpm if available (this repo uses pnpm workspaces)
+    if command -v pnpm &> /dev/null; then
+        echo "   Using pnpm..."
+        pnpm add -w ws
+    # Otherwise use npm with --legacy-peer-deps to avoid workspace issues
+    elif command -v npm &> /dev/null; then
+        echo "   Using npm..."
+        npm install ws --no-save --legacy-peer-deps 2>/dev/null || \
+        npm install ws --legacy-peer-deps 2>/dev/null || \
+        npm install --global ws 2>/dev/null || {
+            echo ""
+            echo "⚠️  Could not install 'ws' automatically."
+            echo "Please install it manually:"
+            echo "  pnpm add -w ws"
+            echo "  OR"
+            echo "  npm install -g ws"
+            exit 1
+        }
+    else
+        echo "❌ Error: Neither pnpm nor npm is installed"
+        exit 1
+    fi
     echo ""
 fi
 
