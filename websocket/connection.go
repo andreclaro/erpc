@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/erpc/erpc/subscription"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
 )
@@ -19,12 +20,15 @@ type Connection struct {
 	manager *ConnectionManager
 	config  *Config
 
-	subscriptions sync.Map // subId → bool (placeholder for Phase 2)
-
 	send   chan []byte
 	done   chan struct{}
 	logger *zerolog.Logger
 	mu     sync.RWMutex
+}
+
+// subManager returns the subscription manager from the connection manager
+func (c *Connection) subManager() *subscription.Manager {
+	return c.manager.subManager
 }
 
 // NewConnection creates a new WebSocket connection
@@ -170,26 +174,86 @@ func (c *Connection) handleMessage(data []byte) error {
 }
 
 // handleSubscribe handles eth_subscribe requests
-// TODO: Phase 2 - Implement full subscription logic
 func (c *Connection) handleSubscribe(req *JsonRpcRequest) error {
-	c.logger.Debug().Interface("params", req.Params).Msg("subscribe request")
+	// Parse params
+	var params []interface{}
+	if err := sonic.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
+		resp := NewErrorResponse(req.Id, ErrCodeInvalidParams,
+			"Invalid params", "Expected array with subscription type")
+		return c.sendResponse(resp)
+	}
 
-	// For now, return not implemented
-	resp := NewErrorResponse(req.Id, ErrCodeInternalError,
-		"Subscriptions not yet implemented",
-		"Phase 2 implementation pending")
+	subTypeStr, ok := params[0].(string)
+	if !ok {
+		resp := NewErrorResponse(req.Id, ErrCodeInvalidParams,
+			"Invalid subscription type", "Expected string")
+		return c.sendResponse(resp)
+	}
+
+	var subType subscription.Type
+	switch subTypeStr {
+	case "newHeads":
+		subType = subscription.TypeNewHeads
+	case "logs":
+		subType = subscription.TypeLogs
+		// TODO: Phase 3 - Parse filter params for logs
+		resp := NewErrorResponse(req.Id, ErrCodeInternalError,
+			"logs subscription not yet implemented",
+			"Phase 3 implementation pending")
+		return c.sendResponse(resp)
+	default:
+		resp := NewErrorResponse(req.Id, ErrCodeInvalidParams,
+			"Unsupported subscription type",
+			"Only newHeads and logs are supported")
+		return c.sendResponse(resp)
+	}
+
+	// Create subscription
+	subID, err := c.subManager().Subscribe(subType, nil, c)
+	if err != nil {
+		c.logger.Error().Err(err).Msg("failed to create subscription")
+		resp := NewErrorResponse(req.Id, ErrCodeInternalError,
+			"Failed to create subscription", err.Error())
+		return c.sendResponse(resp)
+	}
+
+	c.logger.Info().
+		Str("subId", subID).
+		Str("type", string(subType)).
+		Msg("subscription created")
+
+	// Send success response with subscription ID
+	resp := NewSuccessResponse(req.Id, subID)
 	return c.sendResponse(resp)
 }
 
 // handleUnsubscribe handles eth_unsubscribe requests
-// TODO: Phase 2 - Implement full unsubscribe logic
 func (c *Connection) handleUnsubscribe(req *JsonRpcRequest) error {
-	c.logger.Debug().Interface("params", req.Params).Msg("unsubscribe request")
+	// Parse params
+	var params []interface{}
+	if err := sonic.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
+		resp := NewErrorResponse(req.Id, ErrCodeInvalidParams,
+			"Invalid params", "Expected array with subscription ID")
+		return c.sendResponse(resp)
+	}
 
-	// For now, return not implemented
-	resp := NewErrorResponse(req.Id, ErrCodeInternalError,
-		"Subscriptions not yet implemented",
-		"Phase 2 implementation pending")
+	subID, ok := params[0].(string)
+	if !ok {
+		resp := NewErrorResponse(req.Id, ErrCodeInvalidParams,
+			"Invalid subscription ID", "Expected string")
+		return c.sendResponse(resp)
+	}
+
+	// Unsubscribe
+	success := c.subManager().Unsubscribe(subID)
+
+	c.logger.Info().
+		Str("subId", subID).
+		Bool("success", success).
+		Msg("unsubscribe request processed")
+
+	// Send response
+	resp := NewSuccessResponse(req.Id, success)
 	return c.sendResponse(resp)
 }
 
@@ -209,20 +273,28 @@ func (c *Connection) sendResponse(resp *JsonRpcResponse) error {
 }
 
 // SendNotification sends a subscription notification to the client
-// TODO: Phase 2 - Use this for actual notifications
-func (c *Connection) SendNotification(subId string, result interface{}) error {
-	notification := NewNotification(subId, result)
+// This implements the subscription.Subscriber interface
+func (c *Connection) SendNotification(subID string, result interface{}) error {
+	notification := NewNotification(subID, result)
 	data, err := json.Marshal(notification)
 	if err != nil {
 		return err
 	}
 
-	select {
+	select{
 	case c.send <- data:
+		c.logger.Debug().
+			Str("subId", subID).
+			Msg("notification sent to client")
 		return nil
 	case <-c.done:
 		return websocket.ErrCloseSent
 	}
+}
+
+// ConnectionID returns the connection ID (implements subscription.Subscriber)
+func (c *Connection) ConnectionID() string {
+	return c.id
 }
 
 // Close gracefully closes the connection

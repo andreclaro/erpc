@@ -62,6 +62,15 @@ func NewRpcError(code int, message string, data interface{}) *RpcError {
 	}
 }
 
+// NewSuccessResponse creates a success response
+func NewSuccessResponse(id interface{}, result interface{}) *JsonRpcResponse {
+	return &JsonRpcResponse{
+		Jsonrpc: "2.0",
+		Id:      id,
+		Result:  result,
+	}
+}
+
 // NewErrorResponse creates an error response
 func NewErrorResponse(id interface{}, code int, message string, data interface{}) *JsonRpcResponse {
 	return &JsonRpcResponse{

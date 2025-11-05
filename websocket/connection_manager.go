@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/erpc/erpc/subscription"
 	"github.com/rs/zerolog"
 )
 
@@ -18,8 +19,7 @@ type ConnectionManager struct {
 	connections sync.Map // *Connection → bool
 	connCount   atomic.Int32
 
-	// TODO: Will be initialized in Phase 2
-	// subManager    *subscription.Manager
+	subManager *subscription.Manager
 
 	logger *zerolog.Logger
 	ctx    context.Context
@@ -34,6 +34,7 @@ func NewConnectionManager(
 	forwardFunc ForwardFunc,
 	logger *zerolog.Logger,
 	config *Config,
+	subManager *subscription.Manager,
 ) *ConnectionManager {
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -49,6 +50,7 @@ func NewConnectionManager(
 		logger:      &lg,
 		ctx:         ctx,
 		cancel:      cancel,
+		subManager:  subManager,
 	}
 }
 
@@ -73,10 +75,10 @@ func (cm *ConnectionManager) RemoveConnection(conn *Connection) {
 		Int("totalConnections", int(cm.connCount.Load())).
 		Msg("connection removed")
 
-	// TODO: Phase 2 - Remove all subscriptions for this connection
-	// if cm.subManager != nil {
-	//     cm.subManager.UnregisterCallback(conn.ID())
-	// }
+	// Remove all subscriptions for this connection
+	if cm.subManager != nil {
+		cm.subManager.UnsubscribeConnection(conn.ID())
+	}
 }
 
 // ConnectionCount returns the current number of active connections
@@ -91,10 +93,10 @@ func (cm *ConnectionManager) Shutdown() {
 	// Cancel context to stop all operations
 	cm.cancel()
 
-	// TODO: Phase 2 - Stop subscription manager
-	// if cm.subManager != nil {
-	//     cm.subManager.Shutdown()
-	// }
+	// Stop subscription manager
+	if cm.subManager != nil {
+		cm.subManager.Stop()
+	}
 
 	// Close all connections
 	var wg sync.WaitGroup

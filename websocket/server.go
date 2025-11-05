@@ -6,17 +6,19 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/erpc/erpc/subscription"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
 )
 
 // Server manages WebSocket connections and ConnectionManagers
 type Server struct {
-	config       *Config
-	upgrader     websocket.Upgrader
-	connManagers sync.Map // networkId → *ConnectionManager
-	logger       *zerolog.Logger
-	mu           sync.RWMutex
+	config        *Config
+	subConfig     *subscription.Config
+	upgrader      websocket.Upgrader
+	connManagers  sync.Map // networkId → *ConnectionManager
+	logger        *zerolog.Logger
+	mu            sync.RWMutex
 }
 
 // NewServer creates a new WebSocket server
@@ -25,8 +27,12 @@ func NewServer(logger *zerolog.Logger, config *Config) *Server {
 		config = DefaultConfig()
 	}
 
+	// Default subscription config (2 second poll interval)
+	subConfig := subscription.DefaultConfig()
+
 	return &Server{
-		config: config,
+		config:    config,
+		subConfig: subConfig,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  config.ReadBufferSize,
 			WriteBufferSize: config.WriteBufferSize,
@@ -115,12 +121,37 @@ func (s *Server) GetOrCreateManager(
 		return val.(*ConnectionManager)
 	}
 
-	manager := NewConnectionManager(ctx, networkInfo, forwardFunc, s.logger, s.config)
+	// Create subscription manager
+	subManager := subscription.NewManager(ctx, s.logger)
+	
+	// Create broadcaster
+	broadcaster := subscription.NewBroadcaster(subManager.Registry(), s.logger)
+	
+	// Create and register HeadPoller
+	// Convert ForwardFunc to subscription.ForwardFunc
+	subForwardFunc := subscription.ForwardFunc(forwardFunc)
+	headPoller := subscription.NewHeadPoller(
+		ctx,
+		subManager.Registry(),
+		broadcaster,
+		subForwardFunc,
+		s.subConfig.PollInterval,
+		s.logger,
+	)
+	subManager.RegisterPoller(headPoller)
+	
+	// Start subscription manager
+	if err := subManager.Start(); err != nil {
+		s.logger.Error().Err(err).Msg("failed to start subscription manager")
+		// Return manager anyway, subscriptions just won't work
+	}
+
+	manager := NewConnectionManager(ctx, networkInfo, forwardFunc, s.logger, s.config, subManager)
 	s.connManagers.Store(networkId, manager)
 
 	s.logger.Info().
 		Str("networkId", networkId).
-		Msg("created connection manager for network")
+		Msg("created connection manager for network with subscriptions")
 
 	return manager
 }
