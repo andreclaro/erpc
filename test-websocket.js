@@ -194,6 +194,56 @@ async function testLogsSubscription() {
   });
 }
 
+async function testRpcCall(method, params = [], label = null) {
+  return new Promise((resolve) => {
+    const displayLabel = label || method;
+    info(`Testing JSON-RPC call: ${displayLabel}...`);
+    
+    const reqId = messageId++;
+    
+    const timeout = setTimeout(() => {
+      error(`${displayLabel}: No response (timeout)`);
+      resolve({ success: false, timeout: true });
+    }, 10000);
+    
+    const messageHandler = (data) => {
+      try {
+        const msg = JSON.parse(data);
+        
+        if (msg.id === reqId) {
+          clearTimeout(timeout);
+          ws.off('message', messageHandler);
+          
+          if (msg.result !== undefined) {
+            const resultStr = typeof msg.result === 'object' 
+              ? JSON.stringify(msg.result).substring(0, 100) 
+              : String(msg.result);
+            success(`${displayLabel}: ${resultStr}${resultStr.length >= 100 ? '...' : ''}`);
+            resolve({ success: true, result: msg.result });
+          } else if (msg.error) {
+            error(`${displayLabel}: ${JSON.stringify(msg.error)}`);
+            resolve({ success: false, error: msg.error });
+          } else {
+            warning(`${displayLabel}: Unexpected response format`);
+            resolve({ success: false, unexpected: true });
+          }
+        }
+      } catch (e) {
+        error(`Failed to parse message: ${e.message}`);
+      }
+    };
+    
+    ws.on('message', messageHandler);
+    
+    send({
+      jsonrpc: '2.0',
+      id: reqId,
+      method,
+      params
+    });
+  });
+}
+
 async function testUnsubscribe(subId) {
   return new Promise((resolve) => {
     info(`Testing unsubscribe for ${subId}...`);
@@ -275,8 +325,40 @@ async function runTests() {
       info('Waiting 3 seconds...');
       await new Promise(resolve => setTimeout(resolve, 3000));
       
-      // Test 3: Unsubscribe
-      console.log(`\n${COLORS.bright}--- Test 3: Unsubscribe ---${COLORS.reset}`);
+      // Test 3: Regular JSON-RPC calls over WebSocket
+      console.log(`\n${COLORS.bright}--- Test 3: JSON-RPC Calls over WebSocket ---${COLORS.reset}`);
+      
+      const rpcTests = [
+        { method: 'eth_blockNumber', params: [], label: 'eth_blockNumber' },
+        { method: 'eth_chainId', params: [], label: 'eth_chainId' },
+        { method: 'eth_gasPrice', params: [], label: 'eth_gasPrice' },
+        { method: 'net_version', params: [], label: 'net_version' },
+      ];
+      
+      const rpcResults = [];
+      for (const test of rpcTests) {
+        const result = await testRpcCall(test.method, test.params, test.label);
+        rpcResults.push({ ...test, success: result.success });
+        await new Promise(resolve => setTimeout(resolve, 500)); // Small delay between calls
+      }
+      
+      // Test eth_getBlockByNumber with latest block
+      info('Testing eth_getBlockByNumber with "latest"...');
+      const blockResult = await testRpcCall('eth_getBlockByNumber', ['latest', false], 'eth_getBlockByNumber(latest)');
+      rpcResults.push({ method: 'eth_getBlockByNumber', success: blockResult.success });
+      
+      // Test eth_getBalance
+      const testAddress = '0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045'; // vitalik.eth
+      info(`Testing eth_getBalance for ${testAddress}...`);
+      const balanceResult = await testRpcCall('eth_getBalance', [testAddress, 'latest'], 'eth_getBalance');
+      rpcResults.push({ method: 'eth_getBalance', success: balanceResult.success });
+      
+      // Summary of RPC tests
+      const rpcSuccessCount = rpcResults.filter(r => r.success).length;
+      info(`JSON-RPC tests: ${rpcSuccessCount}/${rpcResults.length} passed`);
+      
+      // Test 4: Unsubscribe
+      console.log(`\n${COLORS.bright}--- Test 4: Unsubscribe ---${COLORS.reset}`);
       for (const subId of subscriptionIds) {
         await testUnsubscribe(subId);
       }
@@ -287,9 +369,12 @@ async function runTests() {
       console.log(`${COLORS.bright}  Test Summary${COLORS.reset}`);
       console.log(`${COLORS.bright}========================================${COLORS.reset}`);
       console.log(`Duration: ${elapsed}ms`);
-      console.log(`newHeads notifications: ${notificationCount.newHeads}`);
-      console.log(`logs notifications: ${notificationCount.logs}`);
-      console.log(`Subscriptions created: ${subscriptionIds.length}`);
+      console.log(`\nSubscriptions:`);
+      console.log(`  - newHeads notifications: ${notificationCount.newHeads}`);
+      console.log(`  - logs notifications: ${notificationCount.logs}`);
+      console.log(`  - Subscriptions created: ${subscriptionIds.length}`);
+      console.log(`\nJSON-RPC Calls:`);
+      console.log(`  - Tests passed: ${rpcSuccessCount}/${rpcResults.length}`);
       
       if (notificationCount.newHeads > 0) {
         success('✅ All tests passed!');
