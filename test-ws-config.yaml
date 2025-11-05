@@ -5,11 +5,11 @@ server:
 
 projects:
   - id: main
+    upstreams:
+      - id: mainnet-public
+        endpoint: https://eth.llamarpc.com
     networks:
       - architecture: evm
         evm:
           chainId: 1
-        upstreams:
-          - id: mainnet-public
-            endpoint: https://eth.llamarpc.com
 
