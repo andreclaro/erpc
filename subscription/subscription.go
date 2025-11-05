@@ -324,4 +324,3 @@ func (m *Manager) UnsubscribeConnection(connectionID string) {
 		Int("count", count).
 		Msg("removed all subscriptions for connection")
 }
-

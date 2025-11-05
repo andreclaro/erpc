@@ -191,16 +191,18 @@ func (c *Connection) handleSubscribe(req *JsonRpcRequest) error {
 	}
 
 	var subType subscription.Type
+	var filterParams interface{}
+
 	switch subTypeStr {
 	case "newHeads":
 		subType = subscription.TypeNewHeads
+		// newHeads has no filter parameters
 	case "logs":
 		subType = subscription.TypeLogs
-		// TODO: Phase 3 - Parse filter params for logs
-		resp := NewErrorResponse(req.Id, ErrCodeInternalError,
-			"logs subscription not yet implemented",
-			"Phase 3 implementation pending")
-		return c.sendResponse(resp)
+		// Parse filter parameters (optional)
+		if len(params) > 1 {
+			filterParams = params[1]
+		}
 	default:
 		resp := NewErrorResponse(req.Id, ErrCodeInvalidParams,
 			"Unsupported subscription type",
@@ -209,7 +211,7 @@ func (c *Connection) handleSubscribe(req *JsonRpcRequest) error {
 	}
 
 	// Create subscription
-	subID, err := c.subManager().Subscribe(subType, nil, c)
+	subID, err := c.subManager().Subscribe(subType, filterParams, c)
 	if err != nil {
 		c.logger.Error().Err(err).Msg("failed to create subscription")
 		resp := NewErrorResponse(req.Id, ErrCodeInternalError,
@@ -281,7 +283,7 @@ func (c *Connection) SendNotification(subID string, result interface{}) error {
 		return err
 	}
 
-	select{
+	select {
 	case c.send <- data:
 		c.logger.Debug().
 			Str("subId", subID).

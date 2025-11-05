@@ -15,32 +15,32 @@ type ForwardFunc func(ctx context.Context, req *common.NormalizedRequest) (*comm
 
 // HeadPoller polls for new block headers
 type HeadPoller struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	registry    *Registry
-	broadcaster *Broadcaster
-	forward     ForwardFunc
+	ctx          context.Context
+	cancel       context.CancelFunc
+	registry     *Registry
+	broadcaster  *Broadcaster
+	forward      ForwardFunc
 	pollInterval time.Duration
-	logger      *zerolog.Logger
-	
-	mu          sync.Mutex
-	lastBlock   *BlockHeader
-	running     bool
+	logger       *zerolog.Logger
+
+	mu        sync.Mutex
+	lastBlock *BlockHeader
+	running   bool
 }
 
 // BlockHeader represents a simplified block header for newHeads
 type BlockHeader struct {
-	Number           string   `json:"number"`
-	Hash             string   `json:"hash"`
-	ParentHash       string   `json:"parentHash"`
-	Timestamp        string   `json:"timestamp"`
-	Miner            string   `json:"miner,omitempty"`
-	GasLimit         string   `json:"gasLimit,omitempty"`
-	GasUsed          string   `json:"gasUsed,omitempty"`
-	BaseFeePerGas    string   `json:"baseFeePerGas,omitempty"`
-	TransactionsRoot string   `json:"transactionsRoot,omitempty"`
-	StateRoot        string   `json:"stateRoot,omitempty"`
-	ReceiptsRoot     string   `json:"receiptsRoot,omitempty"`
+	Number           string `json:"number"`
+	Hash             string `json:"hash"`
+	ParentHash       string `json:"parentHash"`
+	Timestamp        string `json:"timestamp"`
+	Miner            string `json:"miner,omitempty"`
+	GasLimit         string `json:"gasLimit,omitempty"`
+	GasUsed          string `json:"gasUsed,omitempty"`
+	BaseFeePerGas    string `json:"baseFeePerGas,omitempty"`
+	TransactionsRoot string `json:"transactionsRoot,omitempty"`
+	StateRoot        string `json:"stateRoot,omitempty"`
+	ReceiptsRoot     string `json:"receiptsRoot,omitempty"`
 }
 
 // NewHeadPoller creates a new head poller
@@ -232,4 +232,3 @@ func getString(m map[string]interface{}, key string) string {
 	}
 	return ""
 }
-

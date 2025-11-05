@@ -13,12 +13,12 @@ import (
 
 // Server manages WebSocket connections and ConnectionManagers
 type Server struct {
-	config        *Config
-	subConfig     *subscription.Config
-	upgrader      websocket.Upgrader
-	connManagers  sync.Map // networkId → *ConnectionManager
-	logger        *zerolog.Logger
-	mu            sync.RWMutex
+	config       *Config
+	subConfig    *subscription.Config
+	upgrader     websocket.Upgrader
+	connManagers sync.Map // networkId → *ConnectionManager
+	logger       *zerolog.Logger
+	mu           sync.RWMutex
 }
 
 // NewServer creates a new WebSocket server
@@ -123,10 +123,10 @@ func (s *Server) GetOrCreateManager(
 
 	// Create subscription manager
 	subManager := subscription.NewManager(ctx, s.logger)
-	
+
 	// Create broadcaster
 	broadcaster := subscription.NewBroadcaster(subManager.Registry(), s.logger)
-	
+
 	// Create and register HeadPoller
 	// Convert ForwardFunc to subscription.ForwardFunc
 	subForwardFunc := subscription.ForwardFunc(forwardFunc)
@@ -139,7 +139,7 @@ func (s *Server) GetOrCreateManager(
 		s.logger,
 	)
 	subManager.RegisterPoller(headPoller)
-	
+
 	// Start subscription manager
 	if err := subManager.Start(); err != nil {
 		s.logger.Error().Err(err).Msg("failed to start subscription manager")

@@ -16,4 +16,3 @@ func generateSubscriptionID() string {
 	}
 	return "0x" + hex.EncodeToString(b)
 }
-

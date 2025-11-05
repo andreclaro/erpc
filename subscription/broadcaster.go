@@ -61,4 +61,3 @@ func (b *Broadcaster) BroadcastToType(subType Type, result interface{}) {
 func (b *Broadcaster) Wait() {
 	b.wg.Wait()
 }
-

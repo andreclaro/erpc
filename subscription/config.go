@@ -13,4 +13,3 @@ func DefaultConfig() *Config {
 		PollInterval: 2 * time.Second, // Default 2 seconds as specified
 	}
 }
-
