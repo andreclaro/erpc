@@ -127,9 +127,10 @@ func (s *Server) GetOrCreateManager(
 	// Create broadcaster
 	broadcaster := subscription.NewBroadcaster(subManager.Registry(), s.logger)
 
-	// Create and register HeadPoller
 	// Convert ForwardFunc to subscription.ForwardFunc
 	subForwardFunc := subscription.ForwardFunc(forwardFunc)
+	
+	// Create and register HeadPoller
 	headPoller := subscription.NewHeadPoller(
 		ctx,
 		subManager.Registry(),
@@ -139,6 +140,17 @@ func (s *Server) GetOrCreateManager(
 		s.logger,
 	)
 	subManager.RegisterPoller(headPoller)
+	
+	// Create and register LogsPoller
+	logsPoller := subscription.NewLogsPoller(
+		ctx,
+		subManager.Registry(),
+		broadcaster,
+		subForwardFunc,
+		s.subConfig.PollInterval,
+		s.logger,
+	)
+	subManager.RegisterPoller(logsPoller)
 
 	// Start subscription manager
 	if err := subManager.Start(); err != nil {
