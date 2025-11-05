@@ -1,0 +1,15 @@
+logLevel: debug
+
+server:
+  httpPort: 4000
+
+projects:
+  - id: main
+    networks:
+      - architecture: evm
+        evm:
+          chainId: 1
+        upstreams:
+          - id: mainnet-public
+            endpoint: https://eth.llamarpc.com
+
