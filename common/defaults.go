@@ -662,6 +662,16 @@ func (s *ServerConfig) SetDefaults() error {
 		s.TrustedIPHeaders = []string{}
 	}
 
+	// WebSocket defaults (enabled by default)
+	if s.WebSocket == nil {
+		s.WebSocket = &WebSocketConfig{
+			Enabled: util.BoolPtr(true),
+		}
+	}
+	if s.WebSocket.Enabled == nil {
+		s.WebSocket.Enabled = util.BoolPtr(true)
+	}
+
 	return nil
 }
 
