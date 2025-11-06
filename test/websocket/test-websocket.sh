@@ -69,6 +69,10 @@ echo ""
 echo "🚀 Starting WebSocket tests..."
 echo ""
 
-# Run the test script
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Run the test script from the correct directory
+cd "$SCRIPT_DIR"
 node test-websocket.js "$@"
 
