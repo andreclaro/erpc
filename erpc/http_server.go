@@ -224,12 +224,59 @@ func (s *HttpServer) createRequestHandler() http.Handler {
 
 		// Check for WebSocket upgrade BEFORE setting response headers
 		if websocket.IsWebSocketUpgrade(r) && s.wsServer != nil {
-			// Parse URL to get project/network info
-			tempProjectId, tempArchitecture, tempChainId, tempIsAdmin, tempIsHealthCheck, tempErr := s.parseUrlPath(r, projectId, architecture, chainId)
-			if tempErr != nil || tempIsAdmin || tempIsHealthCheck {
-				http.Error(w, "WebSocket upgrade not available for this endpoint", http.StatusBadRequest)
+			// Simple URL parsing for WebSocket upgrades (don't use parseUrlPath as it treats GET as healthcheck)
+			ps := path.Clean(r.URL.Path)
+			segments := strings.Split(ps, "/")
+			segments = segments[1:] // Remove empty first segment from leading slash
+			
+			// Apply aliasing if any
+			tempProjectId := projectId
+			tempArchitecture := architecture
+			tempChainId := chainId
+			
+			// Parse segments based on what's aliased
+			if tempProjectId == "" && tempArchitecture == "" && tempChainId == "" {
+				// Nothing aliased, expect /<project>/<architecture>/<chainId>
+				if len(segments) != 3 {
+					http.Error(w, "WebSocket upgrade requires path: /<project>/<architecture>/<chainId>", http.StatusBadRequest)
+					return
+				}
+				tempProjectId = segments[0]
+				tempArchitecture = segments[1]
+				tempChainId = segments[2]
+			} else if tempProjectId != "" && tempArchitecture == "" && tempChainId == "" {
+				// Project aliased, expect /<architecture>/<chainId>
+				if len(segments) != 2 {
+					http.Error(w, "WebSocket upgrade requires path: /<architecture>/<chainId>", http.StatusBadRequest)
+					return
+				}
+				tempArchitecture = segments[0]
+				tempChainId = segments[1]
+			} else if tempProjectId != "" && tempArchitecture != "" && tempChainId == "" {
+				// Project and architecture aliased, expect /<chainId>
+				if len(segments) != 1 {
+					http.Error(w, "WebSocket upgrade requires path: /<chainId>", http.StatusBadRequest)
+					return
+				}
+				tempChainId = segments[0]
+			} else if tempProjectId != "" && tempArchitecture != "" && tempChainId != "" {
+				// All aliased, expect /
+				if len(segments) > 1 || (len(segments) == 1 && segments[0] != "") {
+					http.Error(w, "WebSocket upgrade requires path: /", http.StatusBadRequest)
+					return
+				}
+			} else {
+				http.Error(w, "WebSocket upgrade: invalid combination of aliasing rules", http.StatusBadRequest)
 				return
 			}
+			
+			s.logger.Debug().
+				Str("path", r.URL.Path).
+				Str("projectId", tempProjectId).
+				Str("architecture", tempArchitecture).
+				Str("chainId", tempChainId).
+				Msg("websocket upgrade request")
+			
 			s.handleWebSocketUpgrade(w, r, tempProjectId, tempArchitecture, tempChainId)
 			return
 		}
@@ -1574,6 +1621,13 @@ func gzipHandler(next http.Handler) http.Handler {
 	var gzPool = util.NewGzipWriterPool()
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip gzip for WebSocket upgrade requests
+		// WebSocket connections need direct access to the underlying connection via Hijacker
+		if websocket.IsWebSocketUpgrade(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Check if client accepts gzip encoding
 		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 			next.ServeHTTP(w, r)

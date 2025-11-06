@@ -1,15 +1,16 @@
 package erpc
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"sync"
 	"time"
-
-	"bytes"
 
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/telemetry"
@@ -167,4 +168,14 @@ func (tw *timeoutWriter) WriteHeader(code int) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 	tw.writeHeaderLocked(code)
+}
+
+// Hijack implements the http.Hijacker interface to support WebSocket upgrades
+func (tw *timeoutWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	tw.mu.Lock()
+	defer tw.mu.Unlock()
+	if hijacker, ok := tw.w.(http.Hijacker); ok {
+		return hijacker.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
 }
