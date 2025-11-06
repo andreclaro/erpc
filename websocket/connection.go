@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/subscription"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog"
@@ -166,10 +168,8 @@ func (c *Connection) handleMessage(data []byte) error {
 	case "eth_unsubscribe":
 		return c.handleUnsubscribe(&req)
 	default:
-		// Unknown method
-		resp := NewErrorResponse(req.Id, ErrCodeMethodNotFound, "Method not found",
-			"Only eth_subscribe and eth_unsubscribe are supported over WebSocket")
-		return c.sendResponse(resp)
+		// Forward all other methods to the network
+		return c.handleForward(&req)
 	}
 }
 
@@ -257,6 +257,77 @@ func (c *Connection) handleUnsubscribe(req *JsonRpcRequest) error {
 	// Send response
 	resp := NewSuccessResponse(req.Id, success)
 	return c.sendResponse(resp)
+}
+
+// handleForward forwards a regular JSON-RPC request to the network
+func (c *Connection) handleForward(req *JsonRpcRequest) error {
+	// Convert WebSocket request to normalized request
+	reqData, err := sonic.Marshal(req)
+	if err != nil {
+		c.logger.Error().Err(err).Msg("failed to marshal request")
+		resp := NewErrorResponse(req.Id, ErrCodeInternalError, "Internal error", err.Error())
+		return c.sendResponse(resp)
+	}
+
+	normalizedReq := common.NewNormalizedRequest(reqData)
+
+	// Forward to network
+	ctx := context.Background() // Use background context for the request
+	normalizedResp, err := c.manager.forwardFunc(ctx, normalizedReq)
+	
+	if err != nil {
+		c.logger.Error().Err(err).Str("method", req.Method).Msg("failed to forward request")
+		resp := NewErrorResponse(req.Id, ErrCodeInternalError, "Request failed", err.Error())
+		return c.sendResponse(resp)
+	}
+
+	// Convert normalized response back to WebSocket response
+	var wsResp JsonRpcResponse
+	
+	// Get the JSON-RPC response
+	jrr, err := normalizedResp.JsonRpcResponse()
+	if err != nil {
+		c.logger.Error().Err(err).Msg("failed to get JSON-RPC response")
+		resp := NewErrorResponse(req.Id, ErrCodeInternalError, "Internal error", err.Error())
+		return c.sendResponse(resp)
+	}
+	if jrr != nil {
+		// Handle successful response or JSON-RPC error
+		if jrr.Error != nil {
+			wsResp = JsonRpcResponse{
+				Jsonrpc: "2.0",
+				Id:      req.Id,
+				Error: &RpcError{
+					Code:    jrr.Error.Code,
+					Message: jrr.Error.Message,
+					Data:    jrr.Error.Data,
+				},
+			}
+		} else {
+			// Get result
+			resultBytes := jrr.GetResultBytes()
+			var result interface{}
+			if len(resultBytes) > 0 {
+				if err := sonic.Unmarshal(resultBytes, &result); err != nil {
+					c.logger.Error().Err(err).Msg("failed to unmarshal result")
+					resp := NewErrorResponse(req.Id, ErrCodeInternalError, "Internal error", err.Error())
+					return c.sendResponse(resp)
+				}
+			}
+			
+			wsResp = JsonRpcResponse{
+				Jsonrpc: "2.0",
+				Id:      req.Id,
+				Result:  result,
+			}
+		}
+	} else {
+		// No JSON-RPC response, return internal error
+		resp := NewErrorResponse(req.Id, ErrCodeInternalError, "No response", "Empty response from network")
+		return c.sendResponse(resp)
+	}
+
+	return c.sendResponse(&wsResp)
 }
 
 // sendResponse sends a JSON-RPC response to the client
