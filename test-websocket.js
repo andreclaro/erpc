@@ -8,7 +8,7 @@
 const WebSocket = require('ws');
 
 // Configuration
-const WS_URL = process.env.WS_URL || 'ws://localhost:4000/main/evm/1';
+const WS_URL = process.env.WS_URL || 'ws://localhost:4000/main/evm/84532'; // Base Sepolia
 const TEST_DURATION = parseInt(process.env.TEST_DURATION || '30000'); // 30 seconds
 const COLORS = {
   reset: '\x1b[0m',
