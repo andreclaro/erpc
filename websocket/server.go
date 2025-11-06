@@ -63,7 +63,8 @@ func (s *Server) Upgrade(
 	}
 
 	// Get or create ConnectionManager for this network
-	manager := s.GetOrCreateManager(r.Context(), networkInfo, forwardFunc)
+	// Use background context for long-lived managers, not the request context
+	manager := s.GetOrCreateManager(context.Background(), networkInfo, forwardFunc)
 
 	// Check connection limit
 	if manager.ConnectionCount() >= s.config.MaxConnectionsPerNetwork {

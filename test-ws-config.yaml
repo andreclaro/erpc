@@ -6,10 +6,10 @@ server:
 projects:
   - id: main
     upstreams:
-      - id: mainnet-public
-        endpoint: https://eth.llamarpc.com
+      - id: base-sepolia
+        endpoint: https://base-sepolia-rpc.publicnode.com
     networks:
       - architecture: evm
         evm:
-          chainId: 1
+          chainId: 84532
 
