@@ -274,7 +274,7 @@ func (c *Connection) handleForward(req *JsonRpcRequest) error {
 	// Forward to network
 	ctx := context.Background() // Use background context for the request
 	normalizedResp, err := c.manager.forwardFunc(ctx, normalizedReq)
-	
+
 	if err != nil {
 		c.logger.Error().Err(err).Str("method", req.Method).Msg("failed to forward request")
 		resp := NewErrorResponse(req.Id, ErrCodeInternalError, "Request failed", err.Error())
@@ -283,7 +283,7 @@ func (c *Connection) handleForward(req *JsonRpcRequest) error {
 
 	// Convert normalized response back to WebSocket response
 	var wsResp JsonRpcResponse
-	
+
 	// Get the JSON-RPC response
 	jrr, err := normalizedResp.JsonRpcResponse()
 	if err != nil {
@@ -314,7 +314,7 @@ func (c *Connection) handleForward(req *JsonRpcRequest) error {
 					return c.sendResponse(resp)
 				}
 			}
-			
+
 			wsResp = JsonRpcResponse{
 				Jsonrpc: "2.0",
 				Id:      req.Id,

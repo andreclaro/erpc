@@ -112,10 +112,11 @@ async function testNewHeadsSubscription() {
           const blockHash = msg.params.result?.hash || 'unknown';
           notification(`newHeads: Block ${blockNum} (${blockHash.substring(0, 10)}...)`);
           
+          // After first notification, resolve but keep the handler for continued notifications
           if (notificationCount.newHeads === 1) {
             success('newHeads: First notification received!');
             clearTimeout(timeout);
-            ws.off('message', messageHandler);
+            // Don't remove the handler - let it continue receiving notifications
             resolve({ success: true, notifications: 1, subscriptionId: subId });
           }
         }
@@ -314,8 +315,8 @@ async function runTests() {
       }
       
       // Wait a bit to collect more notifications
-      info('Waiting 5 seconds to collect more newHeads notifications...');
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      info('Waiting 20 seconds to collect more newHeads notifications...');
+      await new Promise(resolve => setTimeout(resolve, 20000));
       
       // Test 2: logs subscription
       console.log(`\n${COLORS.bright}--- Test 2: logs Subscription ---${COLORS.reset}`);
