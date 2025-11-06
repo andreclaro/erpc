@@ -7,6 +7,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/telemetry"
 	"github.com/rs/zerolog"
 )
 
@@ -22,6 +23,8 @@ type HeadPoller struct {
 	forward      ForwardFunc
 	pollInterval time.Duration
 	logger       *zerolog.Logger
+	projectId    string
+	networkId    string
 
 	mu        sync.Mutex
 	lastBlock *BlockHeader
@@ -50,6 +53,8 @@ func NewHeadPoller(
 	broadcaster *Broadcaster,
 	forward ForwardFunc,
 	pollInterval time.Duration,
+	projectId string,
+	networkId string,
 	logger *zerolog.Logger,
 ) *HeadPoller {
 	ctx, cancel := context.WithCancel(ctx)
@@ -61,6 +66,8 @@ func NewHeadPoller(
 		forward:      forward,
 		pollInterval: pollInterval,
 		logger:       logger,
+		projectId:    projectId,
+		networkId:    networkId,
 	}
 }
 
@@ -114,6 +121,8 @@ func (p *HeadPoller) Stop() {
 
 // poll fetches the latest block and notifies subscribers if it's new
 func (p *HeadPoller) poll() {
+	startTime := time.Now()
+	
 	// Check if there are any subscribers
 	count := p.registry.CountByType(TypeNewHeads)
 	if count == 0 {
@@ -139,11 +148,25 @@ func (p *HeadPoller) poll() {
 		p.logger.Error().
 			Err(err).
 			Msg("failed to fetch latest block")
+		
+		// Track error
+		telemetry.MetricWebSocketPollErrors.WithLabelValues(
+			p.projectId,
+			p.networkId,
+			string(TypeNewHeads),
+			"fetch_failed",
+		).Inc()
 		return
 	}
 
 	if resp.IsResultEmptyish() {
 		p.logger.Debug().Msg("empty response for latest block")
+		telemetry.MetricWebSocketPollsTotal.WithLabelValues(
+			p.projectId,
+			p.networkId,
+			string(TypeNewHeads),
+			"empty",
+		).Inc()
 		return
 	}
 
@@ -153,6 +176,14 @@ func (p *HeadPoller) poll() {
 		p.logger.Error().
 			Err(err).
 			Msg("failed to extract block header")
+		
+		// Track error
+		telemetry.MetricWebSocketPollErrors.WithLabelValues(
+			p.projectId,
+			p.networkId,
+			string(TypeNewHeads),
+			"parse_failed",
+		).Inc()
 		return
 	}
 
@@ -168,6 +199,14 @@ func (p *HeadPoller) poll() {
 		p.logger.Debug().
 			Str("blockNumber", header.Number).
 			Msg("block already processed")
+		
+		// Track poll but no new block
+		telemetry.MetricWebSocketPollsTotal.WithLabelValues(
+			p.projectId,
+			p.networkId,
+			string(TypeNewHeads),
+			"no_change",
+		).Inc()
 		return
 	}
 
@@ -179,6 +218,22 @@ func (p *HeadPoller) poll() {
 
 	// Broadcast to all newHeads subscribers
 	p.broadcaster.BroadcastToType(TypeNewHeads, header)
+	
+	// Track successful poll with new block
+	telemetry.MetricWebSocketPollsTotal.WithLabelValues(
+		p.projectId,
+		p.networkId,
+		string(TypeNewHeads),
+		"new_block",
+	).Inc()
+	
+	// Track poll duration
+	duration := time.Since(startTime).Seconds()
+	telemetry.MetricWebSocketPollDuration.WithLabelValues(
+		p.projectId,
+		p.networkId,
+		string(TypeNewHeads),
+	).Observe(duration)
 }
 
 // extractBlockHeader extracts block header from the response

@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/erpc/erpc/telemetry"
 	"github.com/rs/zerolog"
 )
 
@@ -202,12 +203,14 @@ func (r *Registry) removeFromSliceValue(slice []string, item string) []string {
 
 // Manager manages subscriptions and coordinates pollers
 type Manager struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	registry *Registry
-	pollers  map[Type]Poller
-	logger   *zerolog.Logger
-	wg       sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	registry  *Registry
+	pollers   map[Type]Poller
+	logger    *zerolog.Logger
+	wg        sync.WaitGroup
+	projectId string
+	networkId string
 }
 
 // Poller is the interface for subscription pollers
@@ -218,14 +221,16 @@ type Poller interface {
 }
 
 // NewManager creates a new subscription manager
-func NewManager(ctx context.Context, logger *zerolog.Logger) *Manager {
+func NewManager(ctx context.Context, projectId, networkId string, logger *zerolog.Logger) *Manager {
 	ctx, cancel := context.WithCancel(ctx)
 	return &Manager{
-		ctx:      ctx,
-		cancel:   cancel,
-		registry: NewRegistry(logger),
-		pollers:  make(map[Type]Poller),
-		logger:   logger,
+		ctx:       ctx,
+		cancel:    cancel,
+		registry:  NewRegistry(logger),
+		pollers:   make(map[Type]Poller),
+		logger:    logger,
+		projectId: projectId,
+		networkId: networkId,
 	}
 }
 
@@ -292,6 +297,18 @@ func (m *Manager) Subscribe(subType Type, params interface{}, subscriber Subscri
 		return "", err
 	}
 
+	// Update metrics
+	telemetry.MetricWebSocketSubscriptionsActive.WithLabelValues(
+		m.projectId,
+		m.networkId,
+		string(subType),
+	).Inc()
+	telemetry.MetricWebSocketSubscriptionsCreated.WithLabelValues(
+		m.projectId,
+		m.networkId,
+		string(subType),
+	).Inc()
+
 	m.logger.Info().
 		Str("subId", subID).
 		Str("type", string(subType)).
@@ -302,12 +319,26 @@ func (m *Manager) Subscribe(subType Type, params interface{}, subscriber Subscri
 
 // Unsubscribe removes a subscription
 func (m *Manager) Unsubscribe(subID string) bool {
-	_, exists := m.registry.Get(subID)
+	sub, exists := m.registry.Get(subID)
 	if !exists {
 		return false
 	}
 
 	m.registry.Remove(subID)
+
+	// Update metrics
+	telemetry.MetricWebSocketSubscriptionsActive.WithLabelValues(
+		m.projectId,
+		m.networkId,
+		string(sub.Type),
+	).Dec()
+	telemetry.MetricWebSocketSubscriptionsRemoved.WithLabelValues(
+		m.projectId,
+		m.networkId,
+		string(sub.Type),
+		"unsubscribe", // reason
+	).Inc()
+
 	m.logger.Info().
 		Str("subId", subID).
 		Msg("subscription removed")

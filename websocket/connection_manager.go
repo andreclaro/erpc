@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/erpc/erpc/subscription"
+	"github.com/erpc/erpc/telemetry"
 	"github.com/rs/zerolog"
 )
 
@@ -59,6 +60,16 @@ func (cm *ConnectionManager) AddConnection(conn *Connection) {
 	cm.connections.Store(conn, true)
 	cm.connCount.Add(1)
 
+	// Update metrics
+	telemetry.MetricWebSocketConnectionsActive.WithLabelValues(
+		cm.networkInfo.ProjectId(),
+		cm.networkInfo.Id(),
+	).Inc()
+	telemetry.MetricWebSocketConnectionsTotal.WithLabelValues(
+		cm.networkInfo.ProjectId(),
+		cm.networkInfo.Id(),
+	).Inc()
+
 	cm.logger.Debug().
 		Str("connId", conn.ID()).
 		Int("totalConnections", int(cm.connCount.Load())).
@@ -69,6 +80,17 @@ func (cm *ConnectionManager) AddConnection(conn *Connection) {
 func (cm *ConnectionManager) RemoveConnection(conn *Connection) {
 	cm.connections.Delete(conn)
 	cm.connCount.Add(-1)
+
+	// Update metrics
+	telemetry.MetricWebSocketConnectionsActive.WithLabelValues(
+		cm.networkInfo.ProjectId(),
+		cm.networkInfo.Id(),
+	).Dec()
+	telemetry.MetricWebSocketConnectionsClosed.WithLabelValues(
+		cm.networkInfo.ProjectId(),
+		cm.networkInfo.Id(),
+		"normal", // reason - can be enhanced with actual close reason
+	).Inc()
 
 	cm.logger.Debug().
 		Str("connId", conn.ID()).

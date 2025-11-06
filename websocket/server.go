@@ -123,10 +123,10 @@ func (s *Server) GetOrCreateManager(
 	}
 
 	// Create subscription manager
-	subManager := subscription.NewManager(ctx, s.logger)
+	subManager := subscription.NewManager(ctx, networkInfo.ProjectId(), networkInfo.Id(), s.logger)
 
 	// Create broadcaster
-	broadcaster := subscription.NewBroadcaster(subManager.Registry(), s.logger)
+	broadcaster := subscription.NewBroadcaster(subManager.Registry(), networkInfo.ProjectId(), networkInfo.Id(), s.logger)
 
 	// Convert ForwardFunc to subscription.ForwardFunc
 	subForwardFunc := subscription.ForwardFunc(forwardFunc)
@@ -138,6 +138,8 @@ func (s *Server) GetOrCreateManager(
 		broadcaster,
 		subForwardFunc,
 		s.subConfig.PollInterval,
+		networkInfo.ProjectId(),
+		networkInfo.Id(),
 		s.logger,
 	)
 	subManager.RegisterPoller(headPoller)
@@ -149,6 +151,8 @@ func (s *Server) GetOrCreateManager(
 		broadcaster,
 		subForwardFunc,
 		s.subConfig.PollInterval,
+		networkInfo.ProjectId(),
+		networkInfo.Id(),
 		s.logger,
 	)
 	subManager.RegisterPoller(logsPoller)

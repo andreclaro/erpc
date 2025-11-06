@@ -8,6 +8,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/telemetry"
 	"github.com/rs/zerolog"
 )
 
@@ -20,6 +21,8 @@ type LogsPoller struct {
 	forward      ForwardFunc
 	pollInterval time.Duration
 	logger       *zerolog.Logger
+	projectId    string
+	networkId    string
 
 	mu              sync.Mutex
 	lastBlockNumber string
@@ -33,6 +36,8 @@ func NewLogsPoller(
 	broadcaster *Broadcaster,
 	forward ForwardFunc,
 	pollInterval time.Duration,
+	projectId string,
+	networkId string,
 	logger *zerolog.Logger,
 ) *LogsPoller {
 	ctx, cancel := context.WithCancel(ctx)
@@ -44,6 +49,8 @@ func NewLogsPoller(
 		forward:      forward,
 		pollInterval: pollInterval,
 		logger:       logger,
+		projectId:    projectId,
+		networkId:    networkId,
 	}
 }
 
@@ -97,6 +104,8 @@ func (p *LogsPoller) Stop() {
 
 // poll fetches logs and notifies subscribers
 func (p *LogsPoller) poll() {
+	startTime := time.Now()
+	
 	// Check if there are any subscribers
 	subIDs := p.registry.GetByType(TypeLogs)
 	if len(subIDs) == 0 {
@@ -112,6 +121,12 @@ func (p *LogsPoller) poll() {
 	currentBlockNum, err := p.getCurrentBlockNumber()
 	if err != nil {
 		p.logger.Error().Err(err).Msg("failed to get current block number")
+		telemetry.MetricWebSocketPollErrors.WithLabelValues(
+			p.projectId,
+			p.networkId,
+			string(TypeLogs),
+			"fetch_block_number_failed",
+		).Inc()
 		return
 	}
 
@@ -165,6 +180,22 @@ func (p *LogsPoller) poll() {
 				Msg("sent log notifications")
 		}
 	}
+	
+	// Track successful poll
+	telemetry.MetricWebSocketPollsTotal.WithLabelValues(
+		p.projectId,
+		p.networkId,
+		string(TypeLogs),
+		"success",
+	).Inc()
+	
+	// Track poll duration
+	duration := time.Since(startTime).Seconds()
+	telemetry.MetricWebSocketPollDuration.WithLabelValues(
+		p.projectId,
+		p.networkId,
+		string(TypeLogs),
+	).Observe(duration)
 }
 
 // getCurrentBlockNumber fetches the current block number

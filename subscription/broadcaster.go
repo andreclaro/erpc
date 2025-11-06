@@ -3,21 +3,26 @@ package subscription
 import (
 	"sync"
 
+	"github.com/erpc/erpc/telemetry"
 	"github.com/rs/zerolog"
 )
 
 // Broadcaster broadcasts notifications to subscribers
 type Broadcaster struct {
-	registry *Registry
-	logger   *zerolog.Logger
-	wg       sync.WaitGroup
+	registry  *Registry
+	logger    *zerolog.Logger
+	wg        sync.WaitGroup
+	projectId string
+	networkId string
 }
 
 // NewBroadcaster creates a new broadcaster
-func NewBroadcaster(registry *Registry, logger *zerolog.Logger) *Broadcaster {
+func NewBroadcaster(registry *Registry, projectId, networkId string, logger *zerolog.Logger) *Broadcaster {
 	return &Broadcaster{
-		registry: registry,
-		logger:   logger,
+		registry:  registry,
+		logger:    logger,
+		projectId: projectId,
+		networkId: networkId,
 	}
 }
 
@@ -31,6 +36,9 @@ func (b *Broadcaster) Broadcast(subID string, result interface{}) {
 		return
 	}
 
+	// Get subscription for type info
+	sub, _ := b.registry.Get(subID)
+
 	b.wg.Add(1)
 	go func() {
 		defer b.wg.Done()
@@ -39,6 +47,25 @@ func (b *Broadcaster) Broadcast(subID string, result interface{}) {
 				Err(err).
 				Str("subId", subID).
 				Msg("failed to send notification")
+			
+			// Track error
+			if sub != nil {
+				telemetry.MetricWebSocketNotificationErrors.WithLabelValues(
+					b.projectId,
+					b.networkId,
+					string(sub.Type),
+					"send_failed",
+				).Inc()
+			}
+		} else {
+			// Track successful send
+			if sub != nil {
+				telemetry.MetricWebSocketNotificationsSent.WithLabelValues(
+					b.projectId,
+					b.networkId,
+					string(sub.Type),
+				).Inc()
+			}
 		}
 	}()
 }
