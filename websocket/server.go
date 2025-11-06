@@ -130,7 +130,7 @@ func (s *Server) GetOrCreateManager(
 
 	// Convert ForwardFunc to subscription.ForwardFunc
 	subForwardFunc := subscription.ForwardFunc(forwardFunc)
-	
+
 	// Create and register HeadPoller
 	headPoller := subscription.NewHeadPoller(
 		ctx,
@@ -141,7 +141,7 @@ func (s *Server) GetOrCreateManager(
 		s.logger,
 	)
 	subManager.RegisterPoller(headPoller)
-	
+
 	// Create and register LogsPoller
 	logsPoller := subscription.NewLogsPoller(
 		ctx,
