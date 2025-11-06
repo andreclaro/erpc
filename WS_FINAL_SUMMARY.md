@@ -1,4 +1,4 @@
-# eRPC WebSocket Implementation - COMPLETE ✅
+# eRPC WebSocket Implementation - PRODUCTION READY ✅
 
 ## Overview
 Successfully implemented WebSocket subscription support for eRPC, enabling real-time blockchain event streaming to clients via `eth_subscribe` and `eth_unsubscribe` methods.
@@ -28,6 +28,17 @@ Successfully implemented WebSocket subscription support for eRPC, enabling real-
 - Configurable limits: connections per network, subscriptions per connection
 - Configurable intervals: ping/pong, polling
 - 2-second poll interval (future: dynamic based on chain blocktime)
+
+### Observability & Metrics (Phase 4.1)
+- ✅ **13 Prometheus Metrics**: Comprehensive monitoring for all WS operations
+- ✅ **Connection Metrics**: Active, total, closed (with reasons)
+- ✅ **Subscription Metrics**: Active, created, removed (by type)
+- ✅ **Notification Metrics**: Sent, errors (with error types)
+- ✅ **Poll Metrics**: Total (by result), errors, duration histograms
+- ✅ **Message Metrics**: Received (by method), sent (by type)
+- ✅ **Full Labeling**: All metrics tagged with project, network, and type
+- ✅ **Production Ready**: Integrated into all components
+- See [WS_METRICS.md](WS_METRICS.md) for complete documentation
 
 ## Test Results
 
