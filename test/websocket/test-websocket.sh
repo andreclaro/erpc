@@ -54,7 +54,7 @@ if ! curl -s http://localhost:4000/healthcheck > /dev/null 2>&1; then
     echo "⚠️  Warning: eRPC doesn't seem to be running on localhost:4000"
     echo ""
     echo "Start eRPC with:"
-    echo "  ./bin/erpc-server -config test-ws-config.yaml"
+    echo "  ./bin/erpc-server -config test/websocket/test-ws-config.yaml"
     echo ""
     read -p "Continue anyway? (y/N) " -n 1 -r
     echo

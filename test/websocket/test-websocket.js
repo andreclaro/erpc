@@ -304,30 +304,43 @@ async function runTests() {
     testStartTime = Date.now();
     
     try {
-      // Test 1: newHeads subscription
-      console.log(`\n${COLORS.bright}--- Test 1: newHeads Subscription ---${COLORS.reset}`);
+      // Test Flow:
+      // 1. Create all subscriptions (newHeads + logs)
+      // 2. Test JSON-RPC calls (verify non-subscription methods work)
+      // 3. Wait 120 seconds to collect notifications from active subscriptions
+      // 4. Unsubscribe from everything and cleanup
+      
+      // Step 1: Subscribe to all subscriptions
+      console.log(`\n${COLORS.bright}========================================${COLORS.reset}`);
+      console.log(`${COLORS.bright}  Step 1: Create Subscriptions${COLORS.reset}`);
+      console.log(`${COLORS.bright}========================================${COLORS.reset}\n`);
+      
+      // Subscribe to newHeads
+      console.log(`${COLORS.bright}--- Subscribing to newHeads ---${COLORS.reset}`);
       const newHeadsResult = await testNewHeadsSubscription();
       
       if (!newHeadsResult.success) {
-        error('newHeads test failed, aborting remaining tests');
+        error('newHeads subscription failed, aborting remaining tests');
         ws.close();
         process.exit(1);
       }
       
-      // Wait a bit to collect more notifications
-      info('Waiting 20 seconds to collect more newHeads notifications...');
-      await new Promise(resolve => setTimeout(resolve, 20000));
+      await new Promise(resolve => setTimeout(resolve, 1000)); // Small delay between subscriptions
       
-      // Test 2: logs subscription
-      console.log(`\n${COLORS.bright}--- Test 2: logs Subscription ---${COLORS.reset}`);
+      // Subscribe to logs
+      console.log(`\n${COLORS.bright}--- Subscribing to logs ---${COLORS.reset}`);
       const logsResult = await testLogsSubscription();
       
-      // Wait a bit
-      info('Waiting 3 seconds...');
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      if (!logsResult.success) {
+        error('logs subscription failed, aborting remaining tests');
+        ws.close();
+        process.exit(1);
+      }
       
-      // Test 3: Regular JSON-RPC calls over WebSocket
-      console.log(`\n${COLORS.bright}--- Test 3: JSON-RPC Calls over WebSocket ---${COLORS.reset}`);
+      // Step 2: Test JSON-RPC calls over WebSocket (while subscriptions are active)
+      console.log(`\n${COLORS.bright}========================================${COLORS.reset}`);
+      console.log(`${COLORS.bright}  Step 2: JSON-RPC Calls over WebSocket${COLORS.reset}`);
+      console.log(`${COLORS.bright}========================================${COLORS.reset}\n`);
       
       const rpcTests = [
         { method: 'eth_blockNumber', params: [], label: 'eth_blockNumber' },
@@ -358,10 +371,37 @@ async function runTests() {
       const rpcSuccessCount = rpcResults.filter(r => r.success).length;
       info(`JSON-RPC tests: ${rpcSuccessCount}/${rpcResults.length} passed`);
       
-      // Test 4: Unsubscribe
-      console.log(`\n${COLORS.bright}--- Test 4: Unsubscribe ---${COLORS.reset}`);
-      for (const subId of subscriptionIds) {
-        await testUnsubscribe(subId);
+      // Step 3: Wait and collect notifications
+      console.log(`\n${COLORS.bright}========================================${COLORS.reset}`);
+      console.log(`${COLORS.bright}  Step 3: Collecting Notifications${COLORS.reset}`);
+      console.log(`${COLORS.bright}========================================${COLORS.reset}\n`);
+      info('Waiting 120 seconds to collect notifications from both subscriptions...');
+      info('(Press Ctrl+C to stop early)');
+      console.log();
+      
+      // Show periodic updates during the wait
+      const startCount = { newHeads: notificationCount.newHeads, logs: notificationCount.logs };
+      for (let i = 0; i < 12; i++) {
+        await new Promise(resolve => setTimeout(resolve, 10000)); // Wait 10 seconds
+        const elapsed = (i + 1) * 10;
+        info(`[${elapsed}s] Received ${notificationCount.newHeads - startCount.newHeads} newHeads, ${notificationCount.logs - startCount.logs} logs`);
+      }
+      
+      console.log();
+      success(`Collection complete! Total: ${notificationCount.newHeads} newHeads, ${notificationCount.logs} logs notifications`);
+      
+      // Step 4: Unsubscribe from all subscriptions
+      console.log(`\n${COLORS.bright}========================================${COLORS.reset}`);
+      console.log(`${COLORS.bright}  Step 4: Unsubscribe All${COLORS.reset}`);
+      console.log(`${COLORS.bright}========================================${COLORS.reset}\n`);
+      
+      if (subscriptionIds.length > 0) {
+        info(`Unsubscribing from ${subscriptionIds.length} active subscription(s)...`);
+        for (const subId of subscriptionIds) {
+          await testUnsubscribe(subId);
+        }
+      } else {
+        warning('No active subscriptions to unsubscribe from');
       }
       
       // Summary
@@ -369,11 +409,10 @@ async function runTests() {
       console.log(`\n${COLORS.bright}========================================${COLORS.reset}`);
       console.log(`${COLORS.bright}  Test Summary${COLORS.reset}`);
       console.log(`${COLORS.bright}========================================${COLORS.reset}`);
-      console.log(`Duration: ${elapsed}ms`);
+      console.log(`Duration: ${(elapsed / 1000).toFixed(1)}s`);
       console.log(`\nSubscriptions:`);
       console.log(`  - newHeads notifications: ${notificationCount.newHeads}`);
       console.log(`  - logs notifications: ${notificationCount.logs}`);
-      console.log(`  - Subscriptions created: ${subscriptionIds.length}`);
       console.log(`\nJSON-RPC Calls:`);
       console.log(`  - Tests passed: ${rpcSuccessCount}/${rpcResults.length}`);
       
