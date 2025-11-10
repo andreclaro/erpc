@@ -1,0 +1,15 @@
+logLevel: debug
+
+server:
+  httpPort: 4000
+
+projects:
+  - id: main
+    upstreams:
+      - id: base-sepolia
+        endpoint: https://base-sepolia-rpc.publicnode.com
+    networks:
+      - architecture: evm
+        evm:
+          chainId: 84532
+

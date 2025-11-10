@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>eRPC WebSocket Test</title>
+    <style>
+        body { font-family: monospace; padding: 20px; }
+        button { margin: 5px; padding: 10px; }
+        #log { 
+            border: 1px solid #ccc; 
+            padding: 10px; 
+            height: 400px; 
+            overflow-y: scroll; 
+            background: #f5f5f5;
+            white-space: pre-wrap;
+        }
+        .error { color: red; }
+        .success { color: green; }
+        .info { color: blue; }
+    </style>
+</head>
+<body>
+    <h1>eRPC WebSocket Subscription Test</h1>
+    
+    <div>
+        <h3>Connection</h3>
+        <input type="text" id="wsUrl" value="ws://localhost:4000/main/evm/1" size="50">
+        <button onclick="connect()">Connect</button>
+        <button onclick="disconnect()">Disconnect</button>
+        <span id="status">Disconnected</span>
+    </div>
+
+    <div>
+        <h3>Subscriptions</h3>
+        <button onclick="subscribeNewHeads()">Subscribe newHeads</button>
+        <button onclick="subscribeLogs()">Subscribe Logs (all)</button>
+        <button onclick="subscribeLogsFiltered()">Subscribe Logs (filtered)</button>
+        <button onclick="unsubscribe()">Unsubscribe</button>
+    </div>
+
+    <div>
+        <h3>Log</h3>
+        <button onclick="clearLog()">Clear Log</button>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        let ws = null;
+        let messageId = 1;
+        let subscriptionId = null;
+
+        function log(message, type = 'info') {
+            const logDiv = document.getElementById('log');
+            const timestamp = new Date().toISOString().substr(11, 12);
+            const className = type;
+            logDiv.innerHTML += `<span class="${className}">[${timestamp}] ${message}</span>\n`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+        }
+
+        function updateStatus(status, color) {
+            const statusSpan = document.getElementById('status');
+            statusSpan.textContent = status;
+            statusSpan.style.color = color;
+        }
+
+        function connect() {
+            const url = document.getElementById('wsUrl').value;
+            log(`Connecting to ${url}...`, 'info');
+            
+            ws = new WebSocket(url);
+            
+            ws.onopen = () => {
+                log('✅ WebSocket connected!', 'success');
+                updateStatus('Connected', 'green');
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.method === 'eth_subscription') {
+                        // Subscription notification
+                        log(`📬 Notification: ${JSON.stringify(data.params, null, 2)}`, 'success');
+                    } else if (data.result !== undefined) {
+                        // Response to our request
+                        log(`✅ Response: ${JSON.stringify(data, null, 2)}`, 'success');
+                        if (data.id && typeof data.result === 'string' && data.result.startsWith('0x')) {
+                            subscriptionId = data.result;
+                            log(`📝 Stored subscription ID: ${subscriptionId}`, 'info');
+                        }
+                    } else if (data.error) {
+                        // Error response
+                        log(`❌ Error: ${JSON.stringify(data.error, null, 2)}`, 'error');
+                    } else {
+                        log(`📨 Message: ${JSON.stringify(data, null, 2)}`, 'info');
+                    }
+                } catch (e) {
+                    log(`❌ Failed to parse message: ${event.data}`, 'error');
+                }
+            };
+            
+            ws.onerror = (error) => {
+                log(`❌ WebSocket error: ${error}`, 'error');
+                updateStatus('Error', 'red');
+            };
+            
+            ws.onclose = () => {
+                log('🔌 WebSocket disconnected', 'info');
+                updateStatus('Disconnected', 'gray');
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function send(message) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('❌ WebSocket not connected', 'error');
+                return;
+            }
+            
+            const msg = JSON.stringify(message);
+            log(`📤 Sending: ${msg}`, 'info');
+            ws.send(msg);
+        }
+
+        function subscribeNewHeads() {
+            send({
+                jsonrpc: '2.0',
+                id: messageId++,
+                method: 'eth_subscribe',
+                params: ['newHeads']
+            });
+        }
+
+        function subscribeLogs() {
+            send({
+                jsonrpc: '2.0',
+                id: messageId++,
+                method: 'eth_subscribe',
+                params: ['logs']
+            });
+        }
+
+        function subscribeLogsFiltered() {
+            // Example: filter for a specific contract address
+            send({
+                jsonrpc: '2.0',
+                id: messageId++,
+                method: 'eth_subscribe',
+                params: ['logs', {
+                    address: '0xdAC17F958D2ee523a2206206994597C13D831ec7', // USDT on Ethereum
+                    topics: []
+                }]
+            });
+        }
+
+        function unsubscribe() {
+            if (!subscriptionId) {
+                log('❌ No subscription ID stored', 'error');
+                return;
+            }
+            
+            send({
+                jsonrpc: '2.0',
+                id: messageId++,
+                method: 'eth_unsubscribe',
+                params: [subscriptionId]
+            });
+        }
+    </script>
+</body>
+</html>
+

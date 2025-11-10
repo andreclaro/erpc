@@ -1,0 +1,411 @@
+package websocket
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"sync"
+	"time"
+
+	"github.com/bytedance/sonic"
+	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/subscription"
+	"github.com/gorilla/websocket"
+	"github.com/rs/zerolog"
+)
+
+// Connection represents a single WebSocket client connection
+type Connection struct {
+	id      string
+	conn    *websocket.Conn
+	manager *ConnectionManager
+	config  *Config
+
+	send   chan []byte
+	done   chan struct{}
+	logger *zerolog.Logger
+	mu     sync.RWMutex
+}
+
+// subManager returns the subscription manager from the connection manager
+func (c *Connection) subManager() *subscription.Manager {
+	return c.manager.subManager
+}
+
+// NewConnection creates a new WebSocket connection
+func NewConnection(
+	conn *websocket.Conn,
+	manager *ConnectionManager,
+	logger *zerolog.Logger,
+	config *Config,
+) *Connection {
+	id := generateConnectionId()
+
+	lg := logger.With().
+		Str("component", "ws_connection").
+		Str("connId", id).
+		Logger()
+
+	return &Connection{
+		id:      id,
+		conn:    conn,
+		manager: manager,
+		config:  config,
+		send:    make(chan []byte, 256),
+		done:    make(chan struct{}),
+		logger:  &lg,
+	}
+}
+
+// ID returns the connection ID
+func (c *Connection) ID() string {
+	return c.id
+}
+
+// Start begins reading and writing to the connection
+func (c *Connection) Start() {
+	defer func() {
+		c.manager.RemoveConnection(c)
+		c.cleanup()
+	}()
+
+	// Start writer goroutine
+	go c.writer()
+
+	// Start reader (blocking)
+	c.reader()
+}
+
+// reader reads messages from the WebSocket connection
+func (c *Connection) reader() {
+	defer func() {
+		close(c.done)
+	}()
+
+	// Set pong handler for ping/pong
+	c.conn.SetReadDeadline(time.Now().Add(c.config.PongTimeout))
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(c.config.PongTimeout))
+		return nil
+	})
+
+	// Set max message size (1MB)
+	c.conn.SetReadLimit(1024 * 1024)
+
+	for {
+		_, message, err := c.conn.ReadMessage()
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure, websocket.CloseNormalClosure) {
+				c.logger.Warn().Err(err).Msg("websocket read error")
+			} else {
+				c.logger.Debug().Err(err).Msg("websocket connection closed")
+			}
+			return
+		}
+
+		// Handle the message
+		if err := c.handleMessage(message); err != nil {
+			c.logger.Error().Err(err).RawJSON("message", message).Msg("failed to handle message")
+		}
+	}
+}
+
+// writer writes messages to the WebSocket connection
+func (c *Connection) writer() {
+	ticker := time.NewTicker(c.config.PingInterval)
+	defer func() {
+		ticker.Stop()
+		c.conn.Close()
+	}()
+
+	for {
+		select {
+		case message, ok := <-c.send:
+			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if !ok {
+				// Channel closed
+				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+
+			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				c.logger.Error().Err(err).Msg("failed to write message")
+				return
+			}
+
+		case <-ticker.C:
+			c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				c.logger.Debug().Err(err).Msg("failed to write ping")
+				return
+			}
+
+		case <-c.done:
+			return
+		}
+	}
+}
+
+// handleMessage processes incoming JSON-RPC messages
+func (c *Connection) handleMessage(data []byte) error {
+	var req JsonRpcRequest
+	if err := sonic.Unmarshal(data, &req); err != nil {
+		c.logger.Error().Err(err).RawJSON("data", data).Msg("failed to parse message")
+		resp := NewErrorResponse(nil, ErrCodeParseError, "Parse error", err.Error())
+		return c.sendResponse(resp)
+	}
+
+	c.logger.Debug().
+		Str("method", req.Method).
+		Interface("id", req.Id).
+		Msg("received message")
+
+	// Route based on method
+	switch req.Method {
+	case "eth_subscribe":
+		return c.handleSubscribe(&req)
+	case "eth_unsubscribe":
+		return c.handleUnsubscribe(&req)
+	default:
+		// Forward all other methods to the network
+		return c.handleForward(&req)
+	}
+}
+
+// handleSubscribe handles eth_subscribe requests
+func (c *Connection) handleSubscribe(req *JsonRpcRequest) error {
+	// Parse params
+	var params []interface{}
+	if err := sonic.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
+		resp := NewErrorResponse(req.Id, ErrCodeInvalidParams,
+			"Invalid params", "Expected array with subscription type")
+		return c.sendResponse(resp)
+	}
+
+	subTypeStr, ok := params[0].(string)
+	if !ok {
+		resp := NewErrorResponse(req.Id, ErrCodeInvalidParams,
+			"Invalid subscription type", "Expected string")
+		return c.sendResponse(resp)
+	}
+
+	var subType subscription.Type
+	var filterParams interface{}
+
+	switch subTypeStr {
+	case "newHeads":
+		subType = subscription.TypeNewHeads
+		// newHeads has no filter parameters
+	case "logs":
+		subType = subscription.TypeLogs
+		// Parse filter parameters (optional)
+		if len(params) > 1 {
+			filterParams = params[1]
+		}
+	default:
+		resp := NewErrorResponse(req.Id, ErrCodeInvalidParams,
+			"Unsupported subscription type",
+			"Only newHeads and logs are supported")
+		return c.sendResponse(resp)
+	}
+
+	// Create subscription
+	subID, err := c.subManager().Subscribe(subType, filterParams, c)
+	if err != nil {
+		c.logger.Error().Err(err).Msg("failed to create subscription")
+		resp := NewErrorResponse(req.Id, ErrCodeInternalError,
+			"Failed to create subscription", err.Error())
+		return c.sendResponse(resp)
+	}
+
+	c.logger.Info().
+		Str("subId", subID).
+		Str("type", string(subType)).
+		Msg("subscription created")
+
+	// Send success response with subscription ID
+	resp := NewSuccessResponse(req.Id, subID)
+	return c.sendResponse(resp)
+}
+
+// handleUnsubscribe handles eth_unsubscribe requests
+func (c *Connection) handleUnsubscribe(req *JsonRpcRequest) error {
+	// Parse params
+	var params []interface{}
+	if err := sonic.Unmarshal(req.Params, &params); err != nil || len(params) == 0 {
+		resp := NewErrorResponse(req.Id, ErrCodeInvalidParams,
+			"Invalid params", "Expected array with subscription ID")
+		return c.sendResponse(resp)
+	}
+
+	subID, ok := params[0].(string)
+	if !ok {
+		resp := NewErrorResponse(req.Id, ErrCodeInvalidParams,
+			"Invalid subscription ID", "Expected string")
+		return c.sendResponse(resp)
+	}
+
+	// Unsubscribe
+	success := c.subManager().Unsubscribe(subID)
+
+	c.logger.Info().
+		Str("subId", subID).
+		Bool("success", success).
+		Msg("unsubscribe request processed")
+
+	// Send response
+	resp := NewSuccessResponse(req.Id, success)
+	return c.sendResponse(resp)
+}
+
+// handleForward forwards a regular JSON-RPC request to the network
+func (c *Connection) handleForward(req *JsonRpcRequest) error {
+	// Convert WebSocket request to normalized request
+	reqData, err := sonic.Marshal(req)
+	if err != nil {
+		c.logger.Error().Err(err).Msg("failed to marshal request")
+		resp := NewErrorResponse(req.Id, ErrCodeInternalError, "Internal error", err.Error())
+		return c.sendResponse(resp)
+	}
+
+	normalizedReq := common.NewNormalizedRequest(reqData)
+
+	// Forward to network
+	ctx := context.Background() // Use background context for the request
+	normalizedResp, err := c.manager.forwardFunc(ctx, normalizedReq)
+
+	if err != nil {
+		c.logger.Error().Err(err).Str("method", req.Method).Msg("failed to forward request")
+		resp := NewErrorResponse(req.Id, ErrCodeInternalError, "Request failed", err.Error())
+		return c.sendResponse(resp)
+	}
+
+	// Convert normalized response back to WebSocket response
+	var wsResp JsonRpcResponse
+
+	// Get the JSON-RPC response
+	jrr, err := normalizedResp.JsonRpcResponse()
+	if err != nil {
+		c.logger.Error().Err(err).Msg("failed to get JSON-RPC response")
+		resp := NewErrorResponse(req.Id, ErrCodeInternalError, "Internal error", err.Error())
+		return c.sendResponse(resp)
+	}
+	if jrr != nil {
+		// Handle successful response or JSON-RPC error
+		if jrr.Error != nil {
+			wsResp = JsonRpcResponse{
+				Jsonrpc: "2.0",
+				Id:      req.Id,
+				Error: &RpcError{
+					Code:    jrr.Error.Code,
+					Message: jrr.Error.Message,
+					Data:    jrr.Error.Data,
+				},
+			}
+		} else {
+			// Get result
+			resultBytes := jrr.GetResultBytes()
+			var result interface{}
+			if len(resultBytes) > 0 {
+				if err := sonic.Unmarshal(resultBytes, &result); err != nil {
+					c.logger.Error().Err(err).Msg("failed to unmarshal result")
+					resp := NewErrorResponse(req.Id, ErrCodeInternalError, "Internal error", err.Error())
+					return c.sendResponse(resp)
+				}
+			}
+
+			wsResp = JsonRpcResponse{
+				Jsonrpc: "2.0",
+				Id:      req.Id,
+				Result:  result,
+			}
+		}
+	} else {
+		// No JSON-RPC response, return internal error
+		resp := NewErrorResponse(req.Id, ErrCodeInternalError, "No response", "Empty response from network")
+		return c.sendResponse(resp)
+	}
+
+	return c.sendResponse(&wsResp)
+}
+
+// sendResponse sends a JSON-RPC response to the client
+func (c *Connection) sendResponse(resp *JsonRpcResponse) error {
+	data, err := sonic.Marshal(resp)
+	if err != nil {
+		return err
+	}
+
+	select {
+	case c.send <- data:
+		return nil
+	case <-c.done:
+		return websocket.ErrCloseSent
+	}
+}
+
+// SendNotification sends a subscription notification to the client
+// This implements the subscription.Subscriber interface
+func (c *Connection) SendNotification(subID string, result interface{}) error {
+	notification := NewNotification(subID, result)
+	data, err := json.Marshal(notification)
+	if err != nil {
+		return err
+	}
+
+	select {
+	case c.send <- data:
+		c.logger.Debug().
+			Str("subId", subID).
+			Msg("notification sent to client")
+		return nil
+	case <-c.done:
+		return websocket.ErrCloseSent
+	}
+}
+
+// ConnectionID returns the connection ID (implements subscription.Subscriber)
+func (c *Connection) ConnectionID() string {
+	return c.id
+}
+
+// Close gracefully closes the connection
+func (c *Connection) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	select {
+	case <-c.done:
+		// Already closed
+		return
+	default:
+		c.logger.Info().Msg("closing websocket connection")
+
+		// Send close message
+		c.conn.SetWriteDeadline(time.Now().Add(time.Second))
+		c.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+
+		// Close send channel to stop writer
+		close(c.send)
+
+		// Wait a bit for graceful close
+		time.Sleep(time.Second)
+
+		// Force close
+		c.conn.Close()
+	}
+}
+
+// cleanup cleans up connection resources
+func (c *Connection) cleanup() {
+	c.logger.Debug().Msg("cleaning up connection")
+	// TODO: Phase 2 - Clean up subscriptions
+}
+
+// generateConnectionId generates a unique connection ID
+func generateConnectionId() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}

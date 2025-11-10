@@ -385,6 +385,86 @@ var (
 		Help:      "Total number of context cancellations during consensus.",
 	}, []string{"project", "network", "category", "phase", "finality"})
 
+	// WebSocket subscription metrics
+	MetricWebSocketConnectionsActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "websocket_connections_active",
+		Help:      "Current number of active WebSocket connections.",
+	}, []string{"project", "network"})
+
+	MetricWebSocketConnectionsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "websocket_connections_total",
+		Help:      "Total number of WebSocket connections established.",
+	}, []string{"project", "network"})
+
+	MetricWebSocketConnectionsClosed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "websocket_connections_closed_total",
+		Help:      "Total number of WebSocket connections closed.",
+	}, []string{"project", "network", "reason"})
+
+	MetricWebSocketSubscriptionsActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "websocket_subscriptions_active",
+		Help:      "Current number of active WebSocket subscriptions.",
+	}, []string{"project", "network", "type"})
+
+	MetricWebSocketSubscriptionsCreated = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "websocket_subscriptions_created_total",
+		Help:      "Total number of WebSocket subscriptions created.",
+	}, []string{"project", "network", "type"})
+
+	MetricWebSocketSubscriptionsRemoved = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "websocket_subscriptions_removed_total",
+		Help:      "Total number of WebSocket subscriptions removed.",
+	}, []string{"project", "network", "type", "reason"})
+
+	MetricWebSocketNotificationsSent = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "websocket_notifications_sent_total",
+		Help:      "Total number of subscription notifications sent to clients.",
+	}, []string{"project", "network", "type"})
+
+	MetricWebSocketNotificationErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "websocket_notification_errors_total",
+		Help:      "Total number of errors sending notifications to clients.",
+	}, []string{"project", "network", "type", "error"})
+
+	MetricWebSocketPollsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "websocket_polls_total",
+		Help:      "Total number of upstream polls for subscriptions.",
+	}, []string{"project", "network", "type", "result"})
+
+	MetricWebSocketPollErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "websocket_poll_errors_total",
+		Help:      "Total number of errors during subscription polling.",
+	}, []string{"project", "network", "type", "error"})
+
+	MetricWebSocketMessagesReceived = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "websocket_messages_received_total",
+		Help:      "Total number of messages received from WebSocket clients.",
+	}, []string{"project", "network", "method"})
+
+	MetricWebSocketMessagesSent = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "erpc",
+		Name:      "websocket_messages_sent_total",
+		Help:      "Total number of messages sent to WebSocket clients.",
+	}, []string{"project", "network", "type"})
+
+	MetricWebSocketPollDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "erpc",
+		Name:      "websocket_poll_duration_seconds",
+		Help:      "Duration of upstream polls for subscriptions.",
+		Buckets:   DefaultHistogramBuckets,
+	}, []string{"project", "network", "type"})
+
 	MetricNetworkEvmBlockRangeRequested = promauto.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "erpc",
 		Name:      "network_evm_block_range_requested_total",
