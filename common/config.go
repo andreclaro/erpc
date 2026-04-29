@@ -1773,8 +1773,9 @@ type SvmUpstreamConfig struct {
 	Cluster string `yaml:"cluster,omitempty" json:"cluster"`
 
 	// CheckGenesisHash opts unknown clusters in to runtime validation via getGenesisHash
-	// at bootstrap. Known clusters (mainnet-beta, devnet, testnet) are always validated
-	// against the hardcoded table with no RPC call.
+	// at bootstrap. Known clusters (mainnet-beta, devnet, testnet) are always validated:
+	// a single getGenesisHash RPC runs at bootstrap and is compared against the
+	// hardcoded genesis-hash table, catching upstreams mis-pointed at the wrong cluster.
 	CheckGenesisHash bool `yaml:"checkGenesisHash,omitempty" json:"checkGenesisHash"`
 }
 

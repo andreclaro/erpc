@@ -12,10 +12,12 @@ import (
 // at the wrong cluster (e.g. an upstream listed under mainnet-beta that actually
 // serves devnet). It runs once at bootstrap.
 //
-// Known clusters (mainnet-beta, devnet, testnet) are matched against the local
-// genesis-hash table without an RPC call. Unknown clusters are verified via
-// getGenesisHash only when CheckGenesisHash:true is set — otherwise we skip
-// silently to support private/local clusters.
+// Known clusters (mainnet-beta, devnet, testnet) issue one getGenesisHash RPC
+// at bootstrap and compare the result against the hardcoded genesis-hash
+// table — this catches mis-pointed upstreams that a purely local check would
+// miss. Unknown clusters are verified via the same RPC only when
+// CheckGenesisHash:true is set; otherwise we skip silently to support
+// private/local clusters where no genesis hash is known up front.
 func (u *Upstream) svmVerifyGenesisHash(ctx context.Context) error {
 	cfg := u.config
 	if cfg == nil || cfg.Svm == nil {

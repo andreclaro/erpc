@@ -8,8 +8,19 @@ import (
 )
 
 // neverCacheMethods returns realtime finality — forcing the cache layer to skip
-// these entirely. These are either transient (latest blockhash, priority fees)
-// or mutating (sendTransaction, requestAirdrop).
+// these entirely. Two categories, all cross-checked against the Solana JSON-RPC
+// reference at https://solana.com/docs/rpc/http:
+//
+//   - Mutating or effectful: sendTransaction, sendRawTransaction,
+//     simulateTransaction, requestAirdrop. Caching these would break
+//     at-least-once semantics callers expect.
+//   - Transient realtime snapshots: getLatestBlockhash, getRecentBlockhash
+//     (deprecated but still live on older validators), getFeeForMessage,
+//     getSignatureStatuses, getVoteAccounts, getLeaderSchedule, getEpochInfo,
+//     getEpochSchedule, getSlotLeaders, getRecentPerformanceSamples,
+//     getRecentPrioritizationFees. These all reflect "now" and go stale in
+//     under one slot (~400ms); caching them would surface stale state to the
+//     caller without detection.
 var neverCacheMethods = map[string]bool{
 	"getLatestBlockhash":          true,
 	"getRecentBlockhash":          true,
@@ -30,7 +41,15 @@ var neverCacheMethods = map[string]bool{
 
 // alwaysFinalizedMethods return finalized data by their nature — regardless of
 // the request's commitment param, the response is safe to treat as final.
-// getBlock/getTransaction in particular only return confirmed/finalized rollups.
+// Per the Solana JSON-RPC reference (https://solana.com/docs/rpc/http) all of
+// these operate over confirmed/finalized ledger rollups only:
+//
+//   - getBlock, getBlocks, getBlockTime, getTransaction: the validator only
+//     surfaces these past the confirmed/finalized threshold — the "commitment"
+//     param is a floor, not a ceiling, and responses are always ≥ confirmed.
+//   - getInflationReward: only defined on finalized epochs.
+//   - getSignaturesForAddress: walks the block index, which is finalized by
+//     construction.
 var alwaysFinalizedMethods = map[string]bool{
 	"getBlock":                true,
 	"getTransaction":          true,

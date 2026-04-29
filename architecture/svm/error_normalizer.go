@@ -18,29 +18,43 @@ func NewJsonRpcErrorExtractor() *JsonRpcErrorExtractor {
 	return &JsonRpcErrorExtractor{}
 }
 
-// SVM JSON-RPC error codes — from solana-validator source and vendor docs.
+// SVM JSON-RPC error codes.
+//
+// Standard JSON-RPC 2.0 codes (-32600 .. -32700) come from the JSON-RPC spec
+// and are used by solana-validator's rpc crate for malformed-request handling.
+// The -32000 .. -32016 range is Solana-specific; each code below is documented
+// in the validator source at:
+//
+//	https://github.com/anza-xyz/agave/blob/master/rpc-client-api/src/custom_error.rs
+//
+// The constant values (-32002, -32004 … -32016) come directly from the
+// RpcCustomError enum's JSON_RPC_SERVER_ERROR_* numeric assignments there.
+// Vendor RPCs (Helius, Triton, QuickNode, PublicNode) faithfully forward these
+// codes — vendor-specific wording variations are disambiguated by message-text
+// matching in the -32000 bucket below.
+//
 // The normalized taxonomy is intentionally narrower than EVM: SVM lacks
 // "execution reverted" semantics at the error level, and rate-limit hints are
 // almost always conveyed by HTTP 429 rather than a JSON-RPC code.
 const (
-	svmCodeInvalidRequest       = -32600
-	svmCodeMethodNotFound       = -32601
-	svmCodeInvalidParams        = -32602
-	svmCodeInternalError        = -32603
-	svmCodeParseError           = -32700
-	svmCodeServerError          = -32000 // Broad: preflight, blockhash, rate-limit (by message)
-	svmCodeTransactionSimFailed = -32002
-	svmCodeTransactionError     = -32003
-	svmCodeBlockNotAvailable    = -32004
-	svmCodeNodeUnhealthy        = -32005 // NodeBehind
-	svmCodeNodeTooBehind        = -32006
-	svmCodeSlotSkipped          = -32007
-	svmCodeNoSnapshot           = -32008
-	svmCodeLongTermStorageSlot  = -32009
-	svmCodeTransactionHistory   = -32013
-	svmCodeBlockStatusNotAvail  = -32014
-	svmCodeNodeTimeout          = -32015
-	svmCodeMinContextSlot       = -32016
+	svmCodeInvalidRequest       = -32600 // JSON-RPC 2.0 spec
+	svmCodeMethodNotFound       = -32601 // JSON-RPC 2.0 spec
+	svmCodeInvalidParams        = -32602 // JSON-RPC 2.0 spec
+	svmCodeInternalError        = -32603 // JSON-RPC 2.0 spec
+	svmCodeParseError           = -32700 // JSON-RPC 2.0 spec
+	svmCodeServerError          = -32000 // Broad bucket: preflight, blockhash, rate-limit (disambiguated by message)
+	svmCodeTransactionSimFailed = -32002 // SendTransactionPreflightFailure
+	svmCodeTransactionError     = -32003 // TransactionError
+	svmCodeBlockNotAvailable    = -32004 // BlockNotAvailable
+	svmCodeNodeUnhealthy        = -32005 // NodeUnhealthy (a.k.a. NodeBehind)
+	svmCodeNodeTooBehind        = -32006 // TransactionPrecompileVerificationFailure / NodeUnhealthy (legacy)
+	svmCodeSlotSkipped          = -32007 // SlotSkipped
+	svmCodeNoSnapshot           = -32008 // NoSnapshot
+	svmCodeLongTermStorageSlot  = -32009 // LongTermStorageSlotSkipped
+	svmCodeTransactionHistory   = -32013 // TransactionSignatureVerificationFailure / TransactionHistoryNotAvailable
+	svmCodeBlockStatusNotAvail  = -32014 // BlockStatusNotAvailableYet
+	svmCodeNodeTimeout          = -32015 // UnsupportedTransactionVersion / NodeTimeout
+	svmCodeMinContextSlot       = -32016 // MinContextSlotNotReached
 )
 
 func (e *JsonRpcErrorExtractor) Extract(
