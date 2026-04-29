@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"net/http"
+	"sort"
 
 	"github.com/erpc/erpc/common"
 )
@@ -14,9 +15,19 @@ type CompositeJsonRpcErrorExtractor struct {
 }
 
 func NewCompositeJsonRpcErrorExtractor() *CompositeJsonRpcErrorExtractor {
+	// Iterate architectures in sorted order so extractor composition is
+	// deterministic across process restarts. Today each extractor type-guards
+	// on Upstream.Config().Type so ordering is semantically irrelevant, but
+	// sorting removes the latent failure mode where a future extractor forgets
+	// the guard and silently depends on Go's randomized map iteration.
+	names := make([]string, 0, len(common.ArchitectureRegistry))
+	for name := range common.ArchitectureRegistry {
+		names = append(names, string(name))
+	}
+	sort.Strings(names)
 	c := &CompositeJsonRpcErrorExtractor{}
-	for _, h := range common.ArchitectureRegistry {
-		c.extractors = append(c.extractors, h.NewJsonRpcErrorExtractor())
+	for _, name := range names {
+		c.extractors = append(c.extractors, common.ArchitectureRegistry[common.NetworkArchitecture(name)].NewJsonRpcErrorExtractor())
 	}
 	return c
 }

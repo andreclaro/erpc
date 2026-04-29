@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/erpc/erpc/architecture/evm"
 	"github.com/erpc/erpc/clients"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/health"
@@ -326,7 +325,7 @@ func GenerateValidationReport(ctx context.Context, cfg *common.Config) *Validati
 				continue
 			}
 		}
-		clReg := clients.NewClientRegistry(&silent, project.Id, prxPool, evm.NewJsonRpcErrorExtractor())
+		clReg := clients.NewClientRegistry(&silent, project.Id, prxPool, upstream.NewCompositeJsonRpcErrorExtractor())
 		vndReg := thirdparty.NewVendorsRegistry()
 		rlr, err := upstream.NewRateLimitersRegistry(ctx, cfg.RateLimiters, &silent)
 		if err != nil {
@@ -1004,7 +1003,7 @@ func validateUpstreamEndpoints(ctx context.Context, cfg *common.Config, logger z
 			&logger,
 			project.Id,
 			prxPool,
-			evm.NewJsonRpcErrorExtractor(),
+			upstream.NewCompositeJsonRpcErrorExtractor(),
 		)
 		vndReg := thirdparty.NewVendorsRegistry()
 		rlr, err := upstream.NewRateLimitersRegistry(
