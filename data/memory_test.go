@@ -284,6 +284,35 @@ func TestMemoryConnector_ReverseIndex_EvmStillWorks(t *testing.T) {
 	require.Equal(t, []byte("evm-payload"), got)
 }
 
+// TestMemoryConnector_ReverseIndex_SvmDelete guards against the reverse-index
+// leak that shipped with the initial SVM pass: Set() wrote companion entries
+// for any reverse-indexable key, but Delete() only cleared them when the key
+// started with "evm:". SVM (and any future arch) entries accumulated until
+// Ristretto's LRU reclaimed them.
+func TestMemoryConnector_ReverseIndex_SvmDelete(t *testing.T) {
+	logger := zerolog.New(io.Discard)
+	ctx := context.Background()
+	connector, err := NewMemoryConnector(ctx, &logger, "test", &common.MemoryConnectorConfig{
+		MaxItems: 1000, MaxTotalSize: "1MB",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, connector.Set(ctx, "svm:mainnet-beta:12345", "hash-abc", []byte("payload"), nil))
+	time.Sleep(50 * time.Millisecond)
+
+	got, err := connector.Get(ctx, ConnectorReverseIndex, "svm:mainnet-beta:*", "hash-abc", nil)
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload"), got)
+
+	require.NoError(t, connector.Delete(ctx, "svm:mainnet-beta:12345", "hash-abc"))
+	time.Sleep(50 * time.Millisecond)
+
+	_, err = connector.Get(ctx, ConnectorReverseIndex, "svm:mainnet-beta:*", "hash-abc", nil)
+	require.Error(t, err, "reverse-index entry must be cleared when the concrete key is deleted")
+	require.True(t, common.HasErrorCode(err, common.ErrCodeRecordNotFound),
+		"expected ErrRecordNotFound, got %T %v", err, err)
+}
+
 // TestIsReverseIndexable_Filters validates the predicate's rejection rules so
 // single-segment keys (e.g. internal bookkeeping) don't pollute the reverse
 // index and wildcard writes don't recursively index themselves.

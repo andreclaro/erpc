@@ -324,8 +324,10 @@ func (m *MemoryConnector) Delete(ctx context.Context, partitionKey, rangeKey str
 	// Delete main entry
 	m.cache.Del(key)
 
-	// Clean up reverse index if it exists
-	if strings.HasPrefix(partitionKey, "evm:") && !strings.HasSuffix(partitionKey, "*") {
+	// Clean up reverse index if Set would have written one. Must mirror Set
+	// exactly — anything Set writes, Delete must clear, or wildcard lookups
+	// will return stale pointers to evicted partition keys.
+	if isReverseIndexable(partitionKey) {
 		parts := strings.SplitAfterN(partitionKey, ":", 3)
 		if len(parts) >= 2 {
 			wildcardPartitionKey := parts[0] + parts[1] + "*"
