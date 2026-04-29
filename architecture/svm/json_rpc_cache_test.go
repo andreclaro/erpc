@@ -221,13 +221,8 @@ func (finalizedNetwork) Architecture() common.NetworkArchitecture          { ret
 func (finalizedNetwork) Config() *common.NetworkConfig                     { return &common.NetworkConfig{Architecture: common.ArchitectureSvm} }
 func (finalizedNetwork) Logger() *zerolog.Logger                           { l := log.Logger; return &l }
 func (finalizedNetwork) GetMethodMetrics(string) common.TrackedMetrics     { return nil }
-func (finalizedNetwork) EvmHighestLatestBlockNumber(context.Context) int64 { return 0 }
-func (finalizedNetwork) EvmHighestFinalizedBlockNumber(context.Context) int64 {
-	return 0
-}
-func (finalizedNetwork) EvmLeaderUpstream(context.Context) common.Upstream { return nil }
-func (finalizedNetwork) SvmHighestLatestSlot(context.Context) int64        { return 0 }
-func (finalizedNetwork) SvmHighestFinalizedSlot(context.Context) int64     { return 0 }
+func (finalizedNetwork) SvmHighestLatestSlot(context.Context) int64    { return 0 }
+func (finalizedNetwork) SvmHighestFinalizedSlot(context.Context) int64 { return 0 }
 func (finalizedNetwork) Forward(context.Context, *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	return nil, nil
 }

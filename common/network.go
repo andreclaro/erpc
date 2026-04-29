@@ -26,22 +26,55 @@ type Network interface {
 	GetMethodMetrics(method string) TrackedMetrics
 	Forward(ctx context.Context, nq *NormalizedRequest) (*NormalizedResponse, error)
 	GetFinality(ctx context.Context, req *NormalizedRequest, resp *NormalizedResponse) DataFinalityState
+}
 
-	// TODO: migrate these to an EvmNetwork sub-interface (mirroring SvmNetwork
-	// below) so test mocks and non-EVM callers don't carry EVM-specific methods.
+// EvmNetwork is the EVM-specific view of a Network. Callers that need
+// block-number accessors or leader-upstream selection should go through the
+// EvmHighestLatestBlockNumber / EvmHighestFinalizedBlockNumber / EvmLeaderUpstream
+// helpers below, which type-assert and degrade to zero-value on mismatch.
+type EvmNetwork interface {
+	Network
 	EvmHighestLatestBlockNumber(ctx context.Context) int64
 	EvmHighestFinalizedBlockNumber(ctx context.Context) int64
 	EvmLeaderUpstream(ctx context.Context) Upstream
 }
 
-// SvmNetwork is the SVM-specific view of a Network. Callers that need slot
-// accessors should type-assert: if svm, ok := n.(common.SvmNetwork); ok { ... }.
-// Production Network implementations satisfy this automatically when the
-// underlying network is SVM; EVM networks correctly fail the assertion.
+// SvmNetwork is the SVM-specific view of a Network. Production Network
+// implementations satisfy this automatically when the underlying network is
+// SVM; EVM networks correctly fail the assertion.
 type SvmNetwork interface {
 	Network
 	SvmHighestLatestSlot(ctx context.Context) int64
 	SvmHighestFinalizedSlot(ctx context.Context) int64
+}
+
+// EvmHighestLatestBlockNumber returns the highest observed "latest" block
+// across EVM upstreams of n, or 0 if n is not an EVM network or no upstream
+// has reported a block yet. Use in place of a direct method call so callers
+// don't need to type-assert inline.
+func EvmHighestLatestBlockNumber(n Network, ctx context.Context) int64 {
+	if e, ok := n.(EvmNetwork); ok {
+		return e.EvmHighestLatestBlockNumber(ctx)
+	}
+	return 0
+}
+
+// EvmHighestFinalizedBlockNumber mirrors EvmHighestLatestBlockNumber for the
+// finalized tip.
+func EvmHighestFinalizedBlockNumber(n Network, ctx context.Context) int64 {
+	if e, ok := n.(EvmNetwork); ok {
+		return e.EvmHighestFinalizedBlockNumber(ctx)
+	}
+	return 0
+}
+
+// EvmLeaderUpstream returns the currently-elected leader EVM upstream for n,
+// or nil if n is not EVM-shaped or no leader has been elected.
+func EvmLeaderUpstream(n Network, ctx context.Context) Upstream {
+	if e, ok := n.(EvmNetwork); ok {
+		return e.EvmLeaderUpstream(ctx)
+	}
+	return nil
 }
 
 func IsValidArchitecture(architecture string) bool {

@@ -9,32 +9,23 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// fakeNetwork satisfies common.Network with only the methods the finality
-// resolver touches (Config). The finality code path never calls Forward or
-// the EVM-specific methods, so this minimal stub is enough.
-//
-// latestSlot is exposed via the EvmHighestLatestBlockNumber accessor until a
-// dedicated SVM accessor lands — the slot-range validator relies on this to
-// compute the implicit (minContextSlot, latest] window.
+// fakeNetwork satisfies common.SvmNetwork with only the methods SVM code
+// paths touch. EVM accessors don't need to be implemented anymore — they're
+// behind common.EvmNetwork, which this type deliberately does not satisfy.
 type fakeNetwork struct {
 	cfg        *common.NetworkConfig
 	latestSlot int64
 }
 
-func (f *fakeNetwork) Id() string                                       { return "svm:mainnet-beta" }
-func (f *fakeNetwork) Label() string                                    { return "" }
-func (f *fakeNetwork) ProjectId() string                                { return "test" }
-func (f *fakeNetwork) Architecture() common.NetworkArchitecture         { return common.ArchitectureSvm }
-func (f *fakeNetwork) Config() *common.NetworkConfig                 { return f.cfg }
-func (f *fakeNetwork) Logger() *zerolog.Logger                       { l := zerolog.Nop(); return &l }
+func (f *fakeNetwork) Id() string                                   { return "svm:mainnet-beta" }
+func (f *fakeNetwork) Label() string                                { return "" }
+func (f *fakeNetwork) ProjectId() string                            { return "test" }
+func (f *fakeNetwork) Architecture() common.NetworkArchitecture     { return common.ArchitectureSvm }
+func (f *fakeNetwork) Config() *common.NetworkConfig                { return f.cfg }
+func (f *fakeNetwork) Logger() *zerolog.Logger                      { l := zerolog.Nop(); return &l }
 func (f *fakeNetwork) GetMethodMetrics(string) common.TrackedMetrics { return nil }
-func (f *fakeNetwork) EvmHighestLatestBlockNumber(context.Context) int64 { return f.latestSlot }
-func (f *fakeNetwork) EvmHighestFinalizedBlockNumber(context.Context) int64 {
-	return 0
-}
-func (f *fakeNetwork) EvmLeaderUpstream(context.Context) common.Upstream { return nil }
-func (f *fakeNetwork) SvmHighestLatestSlot(context.Context) int64        { return f.latestSlot }
-func (f *fakeNetwork) SvmHighestFinalizedSlot(context.Context) int64     { return 0 }
+func (f *fakeNetwork) SvmHighestLatestSlot(context.Context) int64    { return f.latestSlot }
+func (f *fakeNetwork) SvmHighestFinalizedSlot(context.Context) int64 { return 0 }
 func (f *fakeNetwork) Forward(context.Context, *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	return nil, nil
 }
