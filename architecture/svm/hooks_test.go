@@ -33,7 +33,7 @@ func TestHandleProjectPreForward_GetGenesisHashShortCircuitsForKnownCluster(t *t
 		t.Fatalf("read jsonrpc response: %v", err)
 	}
 	got := strings.Trim(string(jrr.GetResultBytes()), `"`)
-	want, _ := common.KnownGenesisHash("mainnet-beta")
+	want, _ := common.KnownGenesisHash("", "mainnet-beta")
 	if got != want {
 		t.Fatalf("short-circuited hash mismatch: got %q want %q", got, want)
 	}

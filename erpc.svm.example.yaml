@@ -11,9 +11,21 @@ metrics:
   port: 4001
 
 # SVM example: Solana mainnet-beta and testnet fronted by multiple upstreams.
-# Networks are identified as svm:<cluster>. Known clusters (mainnet-beta, devnet,
-# testnet) have their genesis hash validated at bootstrap against a hardcoded
-# table — no extra RPC call. For unknown/custom clusters set checkGenesisHash:true.
+#
+# Network-ID format:
+#   - Solana (or chain unset): svm:<cluster>           — e.g. svm:mainnet-beta
+#   - Other SVM chains:        svm:<chain>:<cluster>   — e.g. svm:fogo:mainnet
+#
+# Known (chain, cluster) pairs — currently just Solana mainnet-beta / devnet /
+# testnet — have their genesis hash validated at bootstrap via a single
+# getGenesisHash RPC compared against a hardcoded table, catching upstreams
+# mis-pointed at the wrong cluster. For unknown/custom (chain, cluster) pairs
+# set checkGenesisHash:true so bootstrap fetches and cross-validates across
+# upstreams in the same network.
+#
+# To host multiple SVM chains side by side (e.g. Solana + Fogo + Eclipse),
+# add a separate `networks` entry per chain with distinct `svm.chain` values;
+# their network IDs and cache partitions won't collide.
 #
 # Multiple upstreams per cluster give you score-based routing, failover, and
 # consensus (if you enable a consensus policy) for free. Requests land on the

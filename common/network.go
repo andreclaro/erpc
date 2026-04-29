@@ -94,25 +94,46 @@ func IsValidNetwork(network string) bool {
 		return chainId > 0
 	}
 	if strings.HasPrefix(network, "svm:") {
-		cluster := strings.TrimPrefix(network, "svm:")
+		rest := strings.TrimPrefix(network, "svm:")
+		if rest == "" {
+			return false
+		}
+		// Two shapes: "svm:<cluster>" (implicit solana, back-compat) and
+		// "svm:<chain>:<cluster>". Accept known (chain, cluster) pairs
+		// outright; accept unknown ones that look like valid identifiers so
+		// users can run private chains/clusters behind eRPC (bootstrap still
+		// enforces the genesis hash when CheckGenesisHash is set).
+		parts := strings.SplitN(rest, ":", 3)
+		if len(parts) > 2 {
+			return false
+		}
+		var chain, cluster string
+		if len(parts) == 1 {
+			cluster = parts[0]
+		} else {
+			chain, cluster = parts[0], parts[1]
+		}
 		if cluster == "" {
 			return false
 		}
-		// Accept known clusters outright; accept custom ones that look like an identifier
-		// (e.g. "fogo-mainnet", "my-localnet") so users can run private clusters behind eRPC.
-		// Bootstrap enforces the actual genesis hash when CheckGenesisHash is set.
-		if IsValidSvmCluster(cluster) {
+		if IsValidSvmCluster(chain, cluster) {
 			return true
 		}
-		for _, r := range cluster {
-			if !(r == '-' || r == '_' || r == '.' ||
-				(r >= 'a' && r <= 'z') ||
-				(r >= 'A' && r <= 'Z') ||
-				(r >= '0' && r <= '9')) {
-				return false
+		isIdentifier := func(s string) bool {
+			if s == "" {
+				return true // empty chain is fine — means implicit solana
 			}
+			for _, r := range s {
+				if !(r == '-' || r == '_' || r == '.' ||
+					(r >= 'a' && r <= 'z') ||
+					(r >= 'A' && r <= 'Z') ||
+					(r >= '0' && r <= '9')) {
+					return false
+				}
+			}
+			return true
 		}
-		return true
+		return isIdentifier(chain) && isIdentifier(cluster)
 	}
 
 	return false

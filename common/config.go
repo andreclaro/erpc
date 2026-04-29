@@ -1740,8 +1740,19 @@ func (d *DirectiveDefaultsConfig) UnmarshalJSON(data []byte) error {
 // SvmNetworkConfig mirrors EvmNetworkConfig for SVM networks.
 // Most fields are Solana-specific and do not have EVM equivalents.
 type SvmNetworkConfig struct {
+	// Chain identifies which SVM chain this network runs on. Defaults to "solana"
+	// when empty for backward compatibility. Set explicitly for forks/variants
+	// such as "fogo" or "eclipse" so eRPC can host multiple SVM chains side by
+	// side without network-ID or cache-key collisions.
+	//
+	// When Chain is empty or "solana", the derived NetworkId is "svm:<cluster>"
+	// — identical to the pre-multi-chain format. For any other Chain value the
+	// NetworkId is "svm:<chain>:<cluster>".
+	Chain string `yaml:"chain,omitempty" json:"chain"`
+
 	// Cluster the upstreams of this network serve (e.g. "mainnet-beta", "devnet").
-	// The NetworkId is derived from this value: NetworkId() == "svm:" + Cluster.
+	// The NetworkId is derived from this value together with Chain — see the
+	// Chain field above for the exact format.
 	Cluster string `yaml:"cluster,omitempty" json:"cluster"`
 
 	// Commitment is the default commitment level injected into requests whose params
@@ -1768,6 +1779,10 @@ type SvmNetworkConfig struct {
 
 // SvmUpstreamConfig carries per-upstream SVM settings.
 type SvmUpstreamConfig struct {
+	// Chain identifies which SVM chain this upstream serves. Must match the
+	// network-level Chain. Empty defaults to "solana" for backward compat.
+	Chain string `yaml:"chain,omitempty" json:"chain"`
+
 	// Cluster this upstream serves. Must match the network-level cluster for the
 	// upstream to be eligible.
 	Cluster string `yaml:"cluster,omitempty" json:"cluster"`
@@ -2155,7 +2170,7 @@ func (c *NetworkConfig) NetworkId() string {
 		if c.Svm == nil || c.Svm.Cluster == "" {
 			return ""
 		}
-		return util.SvmNetworkId(c.Svm.Cluster)
+		return util.SvmNetworkId(c.Svm.Chain, c.Svm.Cluster)
 	default:
 		return ""
 	}

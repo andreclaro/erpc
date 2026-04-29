@@ -64,7 +64,7 @@ func projectPreForward_getGenesisHash(ctx context.Context, n common.Network, r *
 	if cfg == nil || cfg.Svm == nil || cfg.Svm.Cluster == "" {
 		return false, nil, nil
 	}
-	hash, ok := common.KnownGenesisHash(cfg.Svm.Cluster)
+	hash, ok := common.KnownGenesisHash(cfg.Svm.Chain, cfg.Svm.Cluster)
 	if !ok || hash == "" {
 		// Unknown cluster — let the upstream answer, don't fabricate.
 		return false, nil, nil

@@ -47,41 +47,68 @@ type SvmStatePoller interface {
 // are receiving shreds but not processing them; their reads go stale silently.
 const MaxShredInsertSlotLagThreshold int64 = 100
 
-// knownSvmClusters maps cluster name → immutable genesis hash.
+// SvmChainSolana is the canonical Solana chain identifier. Empty Chain values
+// in SvmNetworkConfig normalize to this constant at NetworkId derivation time
+// so pre-multi-chain configs keep producing "svm:<cluster>" IDs.
+const SvmChainSolana = "solana"
+
+// knownSvmGenesisHashes maps (chain, cluster) → immutable genesis hash.
 // Genesis hashes are the hash of block 0 and never change, so we can validate
-// upstream cluster membership at bootstrap without an RPC call.
+// upstream cluster membership at bootstrap via a single RPC compared against
+// this table. Nested by chain so forks with overlapping cluster names (e.g.
+// "mainnet" on Fogo vs "mainnet-beta" on Solana) don't collide.
 //
-// Onboarding a new cluster:
+// Onboarding a new (chain, cluster):
 //   - Obtain the genesis hash once via `curl -X POST -d '{"method":"getGenesisHash"}'`
-//     against any trusted node of that cluster.
-//   - Add the (cluster, hash) row below.
+//     against any trusted node of that chain's cluster.
+//   - Add or extend the chain's entry below.
 //
 // Do NOT add a cluster with an empty hash — that would cost an RPC per upstream
-// bootstrap (svmVerifyGenesisHash would call getGenesisHash) without any
-// comparison happening. Better to leave the cluster absent; operators can still
-// run it via CheckGenesisHash:true, which opts in to runtime fetch+compare
-// against another of their own upstreams' responses.
+// bootstrap without any comparison happening. Better to leave the cluster
+// absent; operators can still run it via CheckGenesisHash:true, which opts in
+// to runtime fetch+compare against another of their own upstreams' responses.
 //
-// Non-Solana SVM-compatible chains (Fogo, Eclipse, custom forks) are expected
-// to be added here as they're onboarded for eRPC Phase 2+ support.
-var knownSvmClusters = map[string]string{
-	"mainnet-beta": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
-	"devnet":       "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
-	"testnet":      "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY",
+// Non-Solana SVM-compatible chains (Fogo, Eclipse, custom forks) slot in as
+// new top-level entries when their genesis hash has been verified.
+var knownSvmGenesisHashes = map[string]map[string]string{
+	SvmChainSolana: {
+		"mainnet-beta": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+		"devnet":       "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+		"testnet":      "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY",
+	},
 }
 
-// IsValidSvmCluster returns true when the cluster name is a recognized SVM network.
-// Unknown clusters (e.g. localnet, fogo-mainnet) must set CheckGenesisHash:true
-// on the upstream config to opt in to runtime validation.
-func IsValidSvmCluster(cluster string) bool {
-	_, ok := knownSvmClusters[cluster]
+// ResolveSvmChain normalizes an SvmNetworkConfig.Chain value: empty defaults to
+// SvmChainSolana. Everything in this package should go through this helper so
+// the backward-compat rule lives in one place.
+func ResolveSvmChain(chain string) string {
+	if chain == "" {
+		return SvmChainSolana
+	}
+	return chain
+}
+
+// IsValidSvmCluster returns true when the (chain, cluster) pair is recognized.
+// Unknown pairs (e.g. localnet under solana, or any cluster under a chain
+// that's not in the table) must set CheckGenesisHash:true on the upstream
+// config to opt in to runtime validation.
+func IsValidSvmCluster(chain, cluster string) bool {
+	clusters, ok := knownSvmGenesisHashes[ResolveSvmChain(chain)]
+	if !ok {
+		return false
+	}
+	_, ok = clusters[cluster]
 	return ok
 }
 
-// KnownGenesisHash returns the hardcoded genesis hash for a cluster, or "" if unknown.
-// Callers can tell "unknown cluster" (ok=false, skip check) from "known but empty"
-// (ok=true, use the returned hash).
-func KnownGenesisHash(cluster string) (string, bool) {
-	h, ok := knownSvmClusters[cluster]
+// KnownGenesisHash returns the hardcoded genesis hash for (chain, cluster), or
+// "" if unknown. Callers can tell "unknown pair" (ok=false, skip check) from
+// "known but empty" (ok=true, use the returned hash).
+func KnownGenesisHash(chain, cluster string) (string, bool) {
+	clusters, ok := knownSvmGenesisHashes[ResolveSvmChain(chain)]
+	if !ok {
+		return "", false
+	}
+	h, ok := clusters[cluster]
 	return h, ok
 }

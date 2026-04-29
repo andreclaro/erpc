@@ -1088,7 +1088,7 @@ func (u *Upstream) detectFeatures(ctx context.Context) error {
 				fmt.Errorf("svm upstream %q is missing svm.cluster", cfg.Id), u,
 			)
 		}
-		u.networkId.Store(util.SvmNetworkId(cfg.Svm.Cluster))
+		u.networkId.Store(util.SvmNetworkId(cfg.Svm.Chain, cfg.Svm.Cluster))
 		// Genesis-hash validation runs in Bootstrap (svmVerifyGenesisHash) after
 		// the state poller is in place, so calls there can be made through the
 		// upstream's normal Forward path.

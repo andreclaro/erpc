@@ -27,8 +27,9 @@ func (u *Upstream) svmVerifyGenesisHash(ctx context.Context) error {
 	if cluster == "" {
 		return nil
 	}
+	chain := cfg.Svm.Chain
 
-	expected, known := common.KnownGenesisHash(cluster)
+	expected, known := common.KnownGenesisHash(chain, cluster)
 
 	if !known && !cfg.Svm.CheckGenesisHash {
 		u.logger.Debug().Str("cluster", cluster).
@@ -52,7 +53,7 @@ func (u *Upstream) svmVerifyGenesisHash(ctx context.Context) error {
 
 	if known && expected != "" && !strings.EqualFold(actual, expected) {
 		return common.NewErrUpstreamClientInitialization(
-			fmt.Errorf("svm genesis hash mismatch for cluster %q: expected %s, got %s", cluster, expected, actual),
+			fmt.Errorf("svm genesis hash mismatch for chain=%q cluster=%q: expected %s, got %s", common.ResolveSvmChain(chain), cluster, expected, actual),
 			u,
 		)
 	}

@@ -67,7 +67,7 @@ func setupTestSvmNetwork(t *testing.T, ctx context.Context, upstreams []*common.
 
 	upstreamsRegistry.Bootstrap(ctx)
 	time.Sleep(100 * time.Millisecond)
-	require.NoError(t, upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.SvmNetworkId("mainnet-beta")))
+	require.NoError(t, upstreamsRegistry.PrepareUpstreamsForNetwork(ctx, util.SvmNetworkId("", "mainnet-beta")))
 	// Allow state poller to run one tick.
 	time.Sleep(150 * time.Millisecond)
 	return network
@@ -143,7 +143,7 @@ func TestSvm_GetGenesisHash_ShortCircuitForKnownCluster(t *testing.T) {
 
 	jrr, err := resp.JsonRpcResponse()
 	require.NoError(t, err)
-	expected, _ := common.KnownGenesisHash("mainnet-beta")
+	expected, _ := common.KnownGenesisHash("", "mainnet-beta")
 	assert.Contains(t, string(jrr.GetResultBytes()), expected)
 }
 
@@ -283,7 +283,7 @@ func TestSvm_GenesisHashMismatch_FailsBootstrap(t *testing.T) {
 	// getGenesisHash returns the devnet hash even though the config says mainnet-beta.
 	// KnownGenesisHash("mainnet-beta") returns the Solana mainnet genesis; we return
 	// devnet's to force a mismatch.
-	devnetHash, _ := common.KnownGenesisHash("devnet")
+	devnetHash, _ := common.KnownGenesisHash("", "devnet")
 	gock.New("http://svm-mismatch-rpc1.localhost").
 		Post("").
 		Persist().
@@ -335,7 +335,7 @@ func TestSvm_GenesisHashMismatch_FailsBootstrap(t *testing.T) {
 	// quickly. The assertion is on the initializer status, not the Prepare error.
 	shortCtx, shortCancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer shortCancel()
-	_ = reg.PrepareUpstreamsForNetwork(shortCtx, util.SvmNetworkId("mainnet-beta"))
+	_ = reg.PrepareUpstreamsForNetwork(shortCtx, util.SvmNetworkId("", "mainnet-beta"))
 
 	// The upstream must not be registered for this network because its bootstrap
 	// task failed with a genesis-hash mismatch.
@@ -671,7 +671,7 @@ func TestSvm_Consensus_SlotLagFilterExcludesStaleUpstream(t *testing.T) {
 
 	upsReg.Bootstrap(ctx)
 	time.Sleep(100 * time.Millisecond)
-	require.NoError(t, upsReg.PrepareUpstreamsForNetwork(ctx, util.SvmNetworkId("mainnet-beta")))
+	require.NoError(t, upsReg.PrepareUpstreamsForNetwork(ctx, util.SvmNetworkId("", "mainnet-beta")))
 	time.Sleep(300 * time.Millisecond) // let pollers run at least one tick
 
 	// Seed per-upstream finalized slots. The counter only moves forward
@@ -685,7 +685,7 @@ func TestSvm_Consensus_SlotLagFilterExcludesStaleUpstream(t *testing.T) {
 	// HighestFinalizedSlot over the pool → 10000.
 	// Lag: fresh=0, stale = 10000 - 990 = 9010 → far beyond MaxFinalizedSlotLag=100.
 	// The filter must exclude `stale` from the consensus pool.
-	for _, u := range upsReg.GetNetworkUpstreams(ctx, util.SvmNetworkId("mainnet-beta")) {
+	for _, u := range upsReg.GetNetworkUpstreams(ctx, util.SvmNetworkId("", "mainnet-beta")) {
 		sp := u.SvmStatePoller()
 		if sp == nil || sp.IsObjectNull() {
 			continue
