@@ -10,10 +10,14 @@ metrics:
   hostV4: 0.0.0.0
   port: 4001
 
-# SVM example: Solana mainnet-beta fronted by two generic HTTPS upstreams.
+# SVM example: Solana mainnet-beta and testnet fronted by multiple upstreams.
 # Networks are identified as svm:<cluster>. Known clusters (mainnet-beta, devnet,
 # testnet) have their genesis hash validated at bootstrap against a hardcoded
 # table — no extra RPC call. For unknown/custom clusters set checkGenesisHash:true.
+#
+# Multiple upstreams per cluster give you score-based routing, failover, and
+# consensus (if you enable a consensus policy) for free. Requests land on the
+# healthiest upstream; errors surface a retry against the next one.
 projects:
   - id: main
     networks:
@@ -39,10 +43,42 @@ projects:
           # non-retryable at the architecture layer — adding retry here would
           # be ignored for those methods.
 
+      - architecture: svm
+        svm:
+          cluster: testnet
+          commitment: confirmed
+          statePollerDebounce: 500ms
+        failsafe:
+          - matchMethod: "*"
+            timeout:
+              duration: 30s
+            retry:
+              maxAttempts: 3
+              delay: 500ms
+              backoffMaxDelay: 10s
+              backoffFactor: 0.3
+              jitter: 500ms
+
     upstreams:
-      - id: solana-primary
+      # --- mainnet-beta upstreams ---
+      - id: solana-labs-mainnet
         type: svm
         endpoint: https://api.mainnet-beta.solana.com
+        svm:
+          cluster: mainnet-beta
+        failsafe:
+          - matchMethod: "*"
+            timeout:
+              duration: 8s
+
+      # publicnode mainnet uses Cloudflare in front of the RPC node and
+      # intermittently resets unauthenticated connections — it's listed here
+      # so score-based routing can use it when it's healthy and skip it
+      # otherwise. For latency-sensitive production, pair with an authenticated
+      # provider.
+      - id: publicnode-mainnet
+        type: svm
+        endpoint: https://solana-rpc.publicnode.com
         svm:
           cluster: mainnet-beta
         failsafe:
@@ -60,7 +96,19 @@ projects:
             timeout:
               duration: 8s
 
+      # --- testnet upstreams ---
+      - id: publicnode-testnet
+        type: svm
+        endpoint: https://solana-testnet-rpc.publicnode.com
+        svm:
+          cluster: testnet
+        failsafe:
+          - matchMethod: "*"
+            timeout:
+              duration: 8s
+
   # A mixed EVM + SVM project is supported — each network has its own architecture
   # handler and upstream pool. Requests route by the path prefix:
-  #   POST /v1/main/evm/1          → Ethereum mainnet
-  #   POST /v1/main/svm/mainnet-beta → Solana mainnet-beta
+  #   POST /main/evm/1              → Ethereum mainnet
+  #   POST /main/svm/mainnet-beta   → Solana mainnet-beta
+  #   POST /main/svm/testnet        → Solana testnet
