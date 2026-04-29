@@ -1,0 +1,66 @@
+logLevel: info
+
+server:
+  httpHostV4: 0.0.0.0
+  httpHostV6: '[::]'
+  httpPort: 4000
+
+metrics:
+  enabled: true
+  hostV4: 0.0.0.0
+  port: 4001
+
+# SVM example: Solana mainnet-beta fronted by two generic HTTPS upstreams.
+# Networks are identified as svm:<cluster>. Known clusters (mainnet-beta, devnet,
+# testnet) have their genesis hash validated at bootstrap against a hardcoded
+# table — no extra RPC call. For unknown/custom clusters set checkGenesisHash:true.
+projects:
+  - id: main
+    networks:
+      - architecture: svm
+        svm:
+          cluster: mainnet-beta
+          # commitment applied when the request omits one; cache finality follows.
+          commitment: confirmed
+          # minimum time between state-poller ticks; ~one Solana slot is 400ms.
+          statePollerDebounce: 500ms
+          maxSlotsPerSignaturesQuery: 1000
+        failsafe:
+          - matchMethod: "*"
+            timeout:
+              duration: 30s
+            retry:
+              maxAttempts: 3
+              delay: 500ms
+              backoffMaxDelay: 10s
+              backoffFactor: 0.3
+              jitter: 500ms
+          # sendTransaction / sendRawTransaction are automatically marked
+          # non-retryable at the architecture layer — adding retry here would
+          # be ignored for those methods.
+
+    upstreams:
+      - id: solana-primary
+        type: svm
+        endpoint: https://api.mainnet-beta.solana.com
+        svm:
+          cluster: mainnet-beta
+        failsafe:
+          - matchMethod: "*"
+            timeout:
+              duration: 8s
+
+      - id: helius-mainnet
+        type: svm
+        endpoint: https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_API_KEY
+        svm:
+          cluster: mainnet-beta
+        failsafe:
+          - matchMethod: "*"
+            timeout:
+              duration: 8s
+
+  # A mixed EVM + SVM project is supported — each network has its own architecture
+  # handler and upstream pool. Requests route by the path prefix:
+  #   POST /v1/main/evm/1          → Ethereum mainnet
+  #   POST /v1/main/svm/mainnet-beta → Solana mainnet-beta
