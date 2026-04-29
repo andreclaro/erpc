@@ -2,7 +2,6 @@ package erpc
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -185,6 +184,13 @@ func NewNetwork(
 		nwCfg.Architecture = common.ArchitectureEvm
 	}
 
+	// Wire the architecture handler so per-network hooks dispatch correctly.
+	// prepareNetwork also sets this; keeping it here means tests that construct
+	// networks via NewNetwork directly get the same behavior as production.
+	if handler, err := common.GetArchitectureHandler(nwCfg.Architecture); err == nil {
+		network.architectureHandler = handler
+	}
+
 	return network, nil
 }
 
@@ -306,13 +312,15 @@ func (nr *NetworksRegistry) prepareNetwork(nwCfg *common.NetworkConfig) (*Networ
 		return nil, err
 	}
 
-	switch nwCfg.Architecture {
-	case "evm":
-		if nr.evmJsonRpcCache != nil {
-			network.cacheDal = nr.evmJsonRpcCache.WithProjectId(nr.project.Config.Id)
-		}
-	default:
-		return nil, errors.New("unknown network architecture")
+	handler, err := common.GetArchitectureHandler(nwCfg.Architecture)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported network architecture %q: %w", nwCfg.Architecture, err)
+	}
+	network.architectureHandler = handler
+
+	// Architecture-specific cache wiring (EVM only for now; SVM cache added in Phase 4)
+	if nwCfg.Architecture == common.ArchitectureEvm && nr.evmJsonRpcCache != nil {
+		network.cacheDal = nr.evmJsonRpcCache.WithProjectId(nr.project.Config.Id)
 	}
 	// Register alias for lazy-created networks to support alias-based routing
 	if nwCfg.Alias != "" {

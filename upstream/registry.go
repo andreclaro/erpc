@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/erpc/erpc/architecture/evm"
 	"github.com/erpc/erpc/clients"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"
@@ -136,7 +135,7 @@ func NewUpstreamsRegistry(
 			logger,
 			prjId,
 			ppr,
-			evm.NewJsonRpcErrorExtractor(),
+			NewCompositeJsonRpcErrorExtractor(),
 		),
 		rateLimitersRegistry:   rr,
 		vendorsRegistry:        vr,

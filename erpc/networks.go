@@ -53,6 +53,7 @@ type Network struct {
 	upstreamsRegistry        *upstream.UpstreamsRegistry
 	selectionPolicyEvaluator *PolicyEvaluator
 	initializer              *util.Initializer
+	architectureHandler      common.ArchitectureHandler
 }
 
 func (n *Network) Bootstrap(ctx context.Context) error {
@@ -384,17 +385,19 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 	req.SetUpstreams(upsList)
 
 	// Network-level pre-forward (executed after upstream selection) for upstream-aware logic
-	if handled, resp, err := evm.HandleNetworkPreForward(ctx, n, upsList, req); handled {
-		if err != nil {
-			if mlx != nil {
-				mlx.Close(ctx, nil, err)
+	if n.architectureHandler != nil {
+		if handled, resp, err := n.architectureHandler.HandleNetworkPreForward(ctx, n, upsList, req); handled {
+			if err != nil {
+				if mlx != nil {
+					mlx.Close(ctx, nil, err)
+				}
+				return nil, err
 			}
-			return nil, err
+			if mlx != nil {
+				mlx.Close(ctx, resp, nil)
+			}
+			return resp, nil
 		}
-		if mlx != nil {
-			mlx.Close(ctx, resp, nil)
-		}
-		return resp, nil
 	}
 
 	// 3) Check if we should handle this method on this network
@@ -1040,16 +1043,19 @@ func (n *Network) GetFinality(ctx context.Context, req *common.NormalizedRequest
 }
 
 func (n *Network) doForward(execSpanCtx context.Context, u common.Upstream, req *common.NormalizedRequest, skipCacheRead bool) (*common.NormalizedResponse, error) {
-	switch n.cfg.Architecture {
-	case common.ArchitectureEvm:
-		if handled, resp, err := evm.HandleUpstreamPreForward(execSpanCtx, n, u, req, skipCacheRead); handled {
-			return evm.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)
+	h := n.architectureHandler
+	if h != nil {
+		if handled, resp, err := h.HandleUpstreamPreForward(execSpanCtx, n, u, req, skipCacheRead); handled {
+			return h.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)
 		}
 	}
 
 	// If not handled, then fallback to the normal forward
 	resp, err := u.Forward(execSpanCtx, req, false)
-	return evm.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)
+	if h != nil {
+		return h.HandleUpstreamPostForward(execSpanCtx, n, u, req, resp, err, skipCacheRead)
+	}
+	return resp, err
 }
 
 // resolveEnforceBlockAvailability resolves the effective enforcement flag for block availability
