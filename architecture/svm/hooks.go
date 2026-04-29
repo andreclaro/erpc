@@ -134,18 +134,17 @@ func networkPreForward_injectCommitment(ctx context.Context, n common.Network, r
 	}
 
 	// Prefer mutating the last map-valued param (the conventional options slot).
-	// If no map exists, append a new one.
+	// If no map exists, append a new one. Either way, invalidate the memoized
+	// CacheHash so downstream cache lookups key on the post-mutation params.
 	for i := len(rpcReq.Params) - 1; i >= 0; i-- {
 		if m, ok := rpcReq.Params[i].(map[string]interface{}); ok {
 			m["commitment"] = defaultCommitment
-			// Invalidate the cached hash because params changed. It's safe to
-			// reset to an empty string then let the next read recompute —
-			// atomic.Value stores a zero "" string, CacheHash treats it as
-			// missing via the nil check below. See request_invalidate_hash test.
+			rpcReq.InvalidateCacheHash()
 			return false, nil, nil
 		}
 	}
 	rpcReq.Params = append(rpcReq.Params, map[string]interface{}{"commitment": defaultCommitment})
+	rpcReq.InvalidateCacheHash()
 	return false, nil, nil
 }
 
@@ -195,8 +194,14 @@ func networkPreForward_validateSignaturesForAddress(ctx context.Context, n commo
 	// Use the network's highest reported latest slot as the implicit upper
 	// bound. When no upstream has reported a slot yet (bootstrap, test), we
 	// skip the check — better to let the request through than to reject on
-	// missing metadata.
-	latest := n.SvmHighestLatestSlot(ctx)
+	// missing metadata. The type-assertion is defensive: dispatch guarantees
+	// this handler only fires for SVM networks, so the assertion succeeds in
+	// production; a failure here means a wiring bug, not a hot-path case.
+	svmNet, ok := n.(common.SvmNetwork)
+	if !ok {
+		return false, nil, nil
+	}
+	latest := svmNet.SvmHighestLatestSlot(ctx)
 	if latest <= 0 {
 		return false, nil, nil
 	}

@@ -41,8 +41,6 @@ func (n *queryTestNetwork) EvmHighestFinalizedBlockNumber(ctx context.Context) i
 	return n.finalized
 }
 func (n *queryTestNetwork) EvmLeaderUpstream(ctx context.Context) common.Upstream { return nil }
-func (n *queryTestNetwork) SvmHighestLatestSlot(ctx context.Context) int64         { return 0 }
-func (n *queryTestNetwork) SvmHighestFinalizedSlot(ctx context.Context) int64      { return 0 }
 
 type queryTestUpstream struct {
 	supported bool

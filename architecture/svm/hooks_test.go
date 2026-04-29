@@ -171,6 +171,46 @@ func TestNetworkPreForward_InjectCommitment_SkipsWriteMethods(t *testing.T) {
 	}
 }
 
+// TestNetworkPreForward_InjectCommitment_InvalidatesCacheHash guards against
+// a subtle cache-key poisoning bug: CacheHash memoizes its result via
+// atomic.Value on first call. If the commitment hook mutates Params without
+// invalidating the memoized hash, subsequent cache lookups would key on the
+// pre-mutation params — meaning two logically identical requests (one with
+// the caller's explicit commitment, one where we injected it) would hit
+// different cache entries.
+func TestNetworkPreForward_InjectCommitment_InvalidatesCacheHash(t *testing.T) {
+	t.Parallel()
+	net := &fakeNetwork{cfg: &common.NetworkConfig{
+		Architecture: common.ArchitectureSvm,
+		Svm:          &common.SvmNetworkConfig{Commitment: "finalized"},
+	}}
+	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["pubkey"]}`))
+
+	// Prime the hash against the pre-mutation params.
+	jrqBefore, err := req.JsonRpcRequest(context.Background())
+	if err != nil {
+		t.Fatalf("JsonRpcRequest: %v", err)
+	}
+	hashBefore, err := jrqBefore.CacheHash(context.Background())
+	if err != nil {
+		t.Fatalf("CacheHash (pre): %v", err)
+	}
+
+	if _, _, err := networkPreForward_injectCommitment(context.Background(), net, req); err != nil {
+		t.Fatalf("injectCommitment: %v", err)
+	}
+
+	jrqAfter, _ := req.JsonRpcRequest(context.Background())
+	hashAfter, err := jrqAfter.CacheHash(context.Background())
+	if err != nil {
+		t.Fatalf("CacheHash (post): %v", err)
+	}
+
+	if hashBefore == hashAfter {
+		t.Fatalf("CacheHash must change after param mutation; got %q both times", hashBefore)
+	}
+}
+
 func TestNetworkPreForward_InjectCommitment_NoopWithoutNetworkDefault(t *testing.T) {
 	t.Parallel()
 	net := &fakeNetwork{cfg: &common.NetworkConfig{

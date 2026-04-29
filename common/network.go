@@ -27,15 +27,19 @@ type Network interface {
 	Forward(ctx context.Context, nq *NormalizedRequest) (*NormalizedResponse, error)
 	GetFinality(ctx context.Context, req *NormalizedRequest, resp *NormalizedResponse) DataFinalityState
 
-	// TODO Move to EvmNetwork interface?
+	// TODO: migrate these to an EvmNetwork sub-interface (mirroring SvmNetwork
+	// below) so test mocks and non-EVM callers don't carry EVM-specific methods.
 	EvmHighestLatestBlockNumber(ctx context.Context) int64
 	EvmHighestFinalizedBlockNumber(ctx context.Context) int64
 	EvmLeaderUpstream(ctx context.Context) Upstream
+}
 
-	// SVM-specific accessors. Named in parallel with the EVM variants above so
-	// operators and tests find them in the same place. They return 0 for EVM
-	// networks (no SVM state poller means nothing to aggregate), which is the
-	// same sentinel the EVM methods return for an empty pool.
+// SvmNetwork is the SVM-specific view of a Network. Callers that need slot
+// accessors should type-assert: if svm, ok := n.(common.SvmNetwork); ok { ... }.
+// Production Network implementations satisfy this automatically when the
+// underlying network is SVM; EVM networks correctly fail the assertion.
+type SvmNetwork interface {
+	Network
 	SvmHighestLatestSlot(ctx context.Context) int64
 	SvmHighestFinalizedSlot(ctx context.Context) int64
 }
