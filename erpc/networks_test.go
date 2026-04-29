@@ -7829,7 +7829,8 @@ func TestNetwork_Forward(t *testing.T) {
 			ctx,
 			upstreamsRegistry,
 			metricsTracker,
-			nil,
+			nil, // evmJsonRpcCache
+			nil, // svmJsonRpcCache
 			rateLimitersRegistry,
 			&logger,
 		)

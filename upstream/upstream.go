@@ -16,6 +16,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/erpc/erpc/architecture/evm"
+	"github.com/erpc/erpc/architecture/svm"
 	"github.com/erpc/erpc/clients"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"
@@ -56,6 +57,7 @@ type Upstream struct {
 	rateLimitersRegistry *RateLimitersRegistry
 	rateLimiterAutoTuner *RateLimitAutoTuner
 	evmStatePoller       common.EvmStatePoller
+	svmStatePoller       common.SvmStatePoller
 	// True after successful chainId detection/validation; enables short-circuit in EvmGetChainId.
 	chainIdValidated atomic.Bool
 }
@@ -167,14 +169,27 @@ func (u *Upstream) Bootstrap(ctx context.Context) error {
 		return err
 	}
 
-	if u.config.Type == common.UpstreamTypeEvm {
+	switch u.config.Type {
+	case common.UpstreamTypeEvm:
 		u.evmStatePoller = evm.NewEvmStatePoller(u.ProjectId, u.appCtx, u.logger, u, u.metricsTracker, u.sharedStateRegistry)
+	case common.UpstreamTypeSvm:
+		u.svmStatePoller = svm.NewSvmStatePoller(u.ProjectId, u.appCtx, u.logger, u, u.metricsTracker, u.sharedStateRegistry)
 	}
 
 	if u.evmStatePoller != nil {
 		err = u.evmStatePoller.Bootstrap(ctx)
 		if err != nil {
+			// The reason we're not returning error is to allow upstream to still be registered
+			// even if background block polling fails initially.
 			u.logger.Error().Err(err).Msg("failed on initial bootstrap of evm state poller (will retry in background)")
+		}
+	}
+	if u.svmStatePoller != nil {
+		if err := u.svmStatePoller.Bootstrap(ctx); err != nil {
+			u.logger.Error().Err(err).Msg("failed on initial bootstrap of svm state poller (will retry in background)")
+		}
+		if err := u.svmVerifyGenesisHash(ctx); err != nil {
+			return err
 		}
 	}
 
@@ -1062,6 +1077,21 @@ func (u *Upstream) detectFeatures(ctx context.Context) error {
 
 		// TODO evm: check trace methods availability (by engine? erigon/geth/etc)
 		// TODO evm: detect max eth_getLogs max block range
+	} else if cfg.Type == common.UpstreamTypeSvm {
+		if cfg.Svm == nil {
+			return common.NewErrUpstreamClientInitialization(
+				fmt.Errorf("svm upstream %q is missing svm config", cfg.Id), u,
+			)
+		}
+		if cfg.Svm.Cluster == "" {
+			return common.NewErrUpstreamClientInitialization(
+				fmt.Errorf("svm upstream %q is missing svm.cluster", cfg.Id), u,
+			)
+		}
+		u.networkId.Store(util.SvmNetworkId(cfg.Svm.Cluster))
+		// Genesis-hash validation runs in Bootstrap (svmVerifyGenesisHash) after
+		// the state poller is in place, so calls there can be made through the
+		// upstream's normal Forward path.
 	} else {
 		return fmt.Errorf("upstream type not supported: %s", cfg.Type)
 	}

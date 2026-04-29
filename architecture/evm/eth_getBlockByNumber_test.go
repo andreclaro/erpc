@@ -62,6 +62,9 @@ func (t *testNetwork) EvmLeaderUpstream(ctx context.Context) common.Upstream {
 	return nil
 }
 
+func (t *testNetwork) SvmHighestLatestSlot(ctx context.Context) int64    { return 0 }
+func (t *testNetwork) SvmHighestFinalizedSlot(ctx context.Context) int64 { return 0 }
+
 func (t *testNetwork) GetMethodMetrics(method string) common.TrackedMetrics {
 	return nil
 }

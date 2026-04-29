@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/erpc/erpc/architecture/evm"
+	"github.com/erpc/erpc/architecture/svm"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/health"
 	"github.com/erpc/erpc/telemetry"
@@ -144,6 +145,46 @@ func (n *Network) EvmHighestLatestBlockNumber(ctx context.Context) int64 {
 	}
 	span.SetAttributes(attribute.Int64("highest_latest_block", maxBlock))
 	return maxBlock
+}
+
+// SvmHighestLatestSlot walks the SVM state pollers of this network's
+// upstreams and returns the highest reported latest slot. Analogous to
+// EvmHighestLatestBlockNumber. Returns 0 for a non-SVM network or when no
+// upstream has reported a slot yet.
+func (n *Network) SvmHighestLatestSlot(ctx context.Context) int64 {
+	_, span := common.StartDetailSpan(ctx, "Network.SvmHighestLatestSlot")
+	defer span.End()
+	var max int64
+	for _, u := range n.upstreamsRegistry.GetNetworkUpstreams(ctx, n.networkId) {
+		sp := u.SvmStatePoller()
+		if sp == nil || sp.IsObjectNull() {
+			continue
+		}
+		if s := sp.LatestSlot(); s > max {
+			max = s
+		}
+	}
+	span.SetAttributes(attribute.Int64("highest_latest_slot", max))
+	return max
+}
+
+// SvmHighestFinalizedSlot is the finalized-slot counterpart. Used by the
+// slot-lag consensus filter as the reference "pool leader" value.
+func (n *Network) SvmHighestFinalizedSlot(ctx context.Context) int64 {
+	_, span := common.StartDetailSpan(ctx, "Network.SvmHighestFinalizedSlot")
+	defer span.End()
+	var max int64
+	for _, u := range n.upstreamsRegistry.GetNetworkUpstreams(ctx, n.networkId) {
+		sp := u.SvmStatePoller()
+		if sp == nil || sp.IsObjectNull() {
+			continue
+		}
+		if s := sp.FinalizedSlot(); s > max {
+			max = s
+		}
+	}
+	span.SetAttributes(attribute.Int64("highest_finalized_slot", max))
+	return max
 }
 
 func (n *Network) EvmHighestFinalizedBlockNumber(ctx context.Context) int64 {
@@ -379,6 +420,28 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 			mlx.Close(ctx, nil, err)
 		}
 		return nil, err
+	}
+
+	// Architecture-specific pruning of the upstream list. Currently only SVM
+	// uses this hook — it excludes upstreams whose FinalizedSlot trails the
+	// pool by more than MaxFinalizedSlotLag, but only when a consensus policy
+	// is active AND the request's finality is Finalized. For non-consensus
+	// paths the existing score-based retry already handles stale upstreams.
+	if n.cfg.Architecture == common.ArchitectureSvm && n.cfg.Svm != nil && n.cfg.Svm.MaxFinalizedSlotLag > 0 {
+		fe := n.getFailsafeExecutor(ctx, req)
+		if fe != nil && fe.consensusPolicyEnabled && req.Finality(ctx) == common.DataFinalityStateFinalized {
+			before := len(upsList)
+			reference := svm.HighestFinalizedSlot(upsList)
+			upsList = svm.FilterByFinalizedSlotLag(upsList, n.cfg.Svm.MaxFinalizedSlotLag, reference)
+			if len(upsList) != before {
+				lg.Debug().
+					Int("before", before).
+					Int("after", len(upsList)).
+					Int64("maxFinalizedSlotLag", n.cfg.Svm.MaxFinalizedSlotLag).
+					Int64("referenceSlot", reference).
+					Msg("svm: filtered stale upstreams for consensus")
+			}
+		}
 	}
 
 	// Set upstreams on the request
@@ -916,6 +979,18 @@ func (n *Network) prepareRequest(ctx context.Context, nr *common.NormalizedReque
 			)
 		}
 		evm.NormalizeHttpJsonRpc(ctx, nr, jsonRpcReq)
+	case common.ArchitectureSvm:
+		// SVM doesn't need any EVM-style normalization (hex padding, block tag expansion, etc.).
+		// Validate that the request parses as JSON-RPC and move on.
+		if _, err := nr.JsonRpcRequest(ctx); err != nil {
+			return common.NewErrJsonRpcExceptionInternal(
+				0,
+				common.JsonRpcErrorParseException,
+				"failed to unmarshal json-rpc request",
+				err,
+				nil,
+			)
+		}
 	default:
 		return common.NewErrJsonRpcExceptionInternal(
 			0,
@@ -963,6 +1038,14 @@ func (n *Network) GetFinality(ctx context.Context, req *common.NormalizedRequest
 				return finality
 			}
 		}
+	}
+
+	// Architecture-specific finality resolution. SVM uses commitment + slot comparisons,
+	// EVM uses block-number comparisons against the state poller's finalized block.
+	// Keeping this switch here (rather than inside the ArchitectureHandler) avoids
+	// plumbing Network's internal upstreams registry through the generic interface.
+	if n.cfg.Architecture == common.ArchitectureSvm {
+		return svm.GetFinality(ctx, n, req, resp)
 	}
 
 	blockRef, blockNumber, _ := evm.ExtractBlockReferenceFromRequest(ctx, req)

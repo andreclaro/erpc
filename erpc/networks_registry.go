@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/erpc/erpc/architecture/evm"
+	"github.com/erpc/erpc/architecture/svm"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/health"
 	"github.com/erpc/erpc/upstream"
@@ -23,6 +24,7 @@ type NetworksRegistry struct {
 	upstreamsRegistry    *upstream.UpstreamsRegistry
 	metricsTracker       *health.Tracker
 	evmJsonRpcCache      *evm.EvmJsonRpcCache
+	svmJsonRpcCache      *svm.SvmJsonRpcCache
 	rateLimitersRegistry *upstream.RateLimitersRegistry
 	preparedNetworks     sync.Map // map[string]*Network
 	aliasToNetworkId     map[string]aliasEntry
@@ -42,6 +44,7 @@ func NewNetworksRegistry(
 	upstreamsRegistry *upstream.UpstreamsRegistry,
 	metricsTracker *health.Tracker,
 	evmJsonRpcCache *evm.EvmJsonRpcCache,
+	svmJsonRpcCache *svm.SvmJsonRpcCache,
 	rateLimitersRegistry *upstream.RateLimitersRegistry,
 	logger *zerolog.Logger,
 ) *NetworksRegistry {
@@ -52,6 +55,7 @@ func NewNetworksRegistry(
 		upstreamsRegistry:    upstreamsRegistry,
 		metricsTracker:       metricsTracker,
 		evmJsonRpcCache:      evmJsonRpcCache,
+		svmJsonRpcCache:      svmJsonRpcCache,
 		rateLimitersRegistry: rateLimitersRegistry,
 		preparedNetworks:     sync.Map{},
 		aliasToNetworkId:     map[string]aliasEntry{},
@@ -318,9 +322,18 @@ func (nr *NetworksRegistry) prepareNetwork(nwCfg *common.NetworkConfig) (*Networ
 	}
 	network.architectureHandler = handler
 
-	// Architecture-specific cache wiring (EVM only for now; SVM cache added in Phase 4)
-	if nwCfg.Architecture == common.ArchitectureEvm && nr.evmJsonRpcCache != nil {
-		network.cacheDal = nr.evmJsonRpcCache.WithProjectId(nr.project.Config.Id)
+	// Architecture-specific cache wiring. Each architecture has its own cache
+	// implementation because key partitioning differs (EVM uses blockRef, SVM
+	// uses commitment+slotRef). A given network gets exactly one cache.
+	switch nwCfg.Architecture {
+	case common.ArchitectureEvm:
+		if nr.evmJsonRpcCache != nil {
+			network.cacheDal = nr.evmJsonRpcCache.WithProjectId(nr.project.Config.Id)
+		}
+	case common.ArchitectureSvm:
+		if nr.svmJsonRpcCache != nil {
+			network.cacheDal = nr.svmJsonRpcCache.WithProjectId(nr.project.Config.Id)
+		}
 	}
 	// Register alias for lazy-created networks to support alias-based routing
 	if nwCfg.Alias != "" {
