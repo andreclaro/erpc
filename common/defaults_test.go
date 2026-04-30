@@ -7,6 +7,7 @@ import (
 
 	"github.com/erpc/erpc/util"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSetDefaults_NetworkConfig(t *testing.T) {
@@ -1160,5 +1161,66 @@ func TestBuildProviderSettings(t *testing.T) {
 		assert.Equal(t, "test-api-key", settings["apiKey"])
 		assert.Nil(t, settings["tagIds"])
 		assert.Nil(t, settings["tagLabels"])
+	})
+}
+
+func TestSetDefaults_SvmNetworkConfig_PopulatesGuards(t *testing.T) {
+	t.Run("zero values get defaults", func(t *testing.T) {
+		n := &NetworkConfig{
+			Architecture: ArchitectureSvm,
+			Svm:          &SvmNetworkConfig{Cluster: "mainnet-beta"},
+		}
+		require.NoError(t, n.SetDefaults(nil, nil))
+
+		if n.Svm.MaxSlotsPerSignaturesQuery != 1000 {
+			t.Errorf("MaxSlotsPerSignaturesQuery = %d, want 1000", n.Svm.MaxSlotsPerSignaturesQuery)
+		}
+		if n.Svm.StatePollerDebounce.Duration() != 400*time.Millisecond {
+			t.Errorf("StatePollerDebounce = %v, want 400ms", n.Svm.StatePollerDebounce.Duration())
+		}
+	})
+
+	t.Run("operator overrides preserved", func(t *testing.T) {
+		n := &NetworkConfig{
+			Architecture: ArchitectureSvm,
+			Svm: &SvmNetworkConfig{
+				Cluster:                    "mainnet-beta",
+				MaxSlotsPerSignaturesQuery: 5000,
+				StatePollerDebounce:        Duration(750 * time.Millisecond),
+			},
+		}
+		require.NoError(t, n.SetDefaults(nil, nil))
+
+		if n.Svm.MaxSlotsPerSignaturesQuery != 5000 {
+			t.Errorf("operator value should win, got %d", n.Svm.MaxSlotsPerSignaturesQuery)
+		}
+		if n.Svm.StatePollerDebounce.Duration() != 750*time.Millisecond {
+			t.Errorf("operator debounce should win, got %v", n.Svm.StatePollerDebounce.Duration())
+		}
+	})
+
+	t.Run("Architecture auto-derived from Svm", func(t *testing.T) {
+		// A config with only Svm set and no Architecture string should be
+		// treated as SVM — matches the existing EVM auto-derive behavior.
+		n := &NetworkConfig{Svm: &SvmNetworkConfig{Cluster: "mainnet-beta"}}
+		require.NoError(t, n.SetDefaults(nil, nil))
+
+		if n.Architecture != ArchitectureSvm {
+			t.Errorf("expected Architecture=svm, got %q", n.Architecture)
+		}
+	})
+
+	t.Run("Architecture=svm without Svm section auto-creates it", func(t *testing.T) {
+		// Symmetric to Architecture=evm without Evm section — the validator
+		// would previously have failed with a nil-pointer deref downstream.
+		n := &NetworkConfig{Architecture: ArchitectureSvm}
+		require.NoError(t, n.SetDefaults(nil, nil))
+
+		if n.Svm == nil {
+			t.Fatal("Svm should be auto-created when Architecture=svm")
+		}
+		if n.Svm.MaxSlotsPerSignaturesQuery != 1000 {
+			t.Errorf("defaults should still apply to auto-created Svm, got %d", n.Svm.MaxSlotsPerSignaturesQuery)
+		}
 	})
 }
