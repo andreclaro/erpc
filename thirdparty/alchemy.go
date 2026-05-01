@@ -140,7 +140,10 @@ var defaultAlchemyNetworkSubdomains = map[int64]string{
 }
 
 const DefaultAlchemyRecheckInterval = 24 * time.Hour
-const alchemyApiUrl = "https://app-api.alchemy.com/trpc/config.getNetworkConfig"
+
+// alchemyApiUrl is the tRPC endpoint used to discover Alchemy networks.
+// Declared as var (not const) so tests can point it at a mock server.
+var alchemyApiUrl = "https://app-api.alchemy.com/trpc/config.getNetworkConfig"
 
 type alchemyNetworkConfigResponse struct {
 	Result struct {
@@ -336,7 +339,17 @@ func (v *AlchemyVendor) ensureRemoteData(ctx context.Context, logger *zerolog.Lo
 			logger.Warn().Err(err).Msg("could not refresh Alchemy API data, will use stale data")
 			return nil
 		}
-		return err
+		// Cold start: the Alchemy API is unreachable and we have no cached data.
+		// Seed from the built-in static subdomain map so ~140 chains still work.
+		// Intentionally do not stamp remoteDataLastFetchedAt — the next call will
+		// retry the API and promote real data as soon as it's reachable.
+		logger.Warn().Err(err).Msg("could not fetch Alchemy API data on cold start, falling back to built-in subdomain map")
+		fallback := make(map[int64]string, len(defaultAlchemyNetworkSubdomains))
+		for chainID, subdomain := range defaultAlchemyNetworkSubdomains {
+			fallback[chainID] = subdomain
+		}
+		v.remoteData[alchemyApiUrl] = fallback
+		return nil
 	}
 
 	v.remoteData[alchemyApiUrl] = newData
