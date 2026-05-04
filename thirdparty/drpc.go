@@ -404,7 +404,7 @@ func (v *DrpcVendor) fetchDrpcNetworks(ctx context.Context, logger *zerolog.Logg
 		return nil, fmt.Errorf("failed to parse dRPC networks response: %w", err)
 	}
 
-	// Prefer highest-priority chain per chainId; only include EVM jsonrpc networks.
+	// Only include EVM JSON-RPC chains with premium access; prefer highest priority when a chain ID appears multiple times.
 	type candidate struct {
 		name     string
 		priority int
