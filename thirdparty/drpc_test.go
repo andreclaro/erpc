@@ -81,6 +81,22 @@ func TestDrpcVendor_SuccessfulFetchPromotesOverFallback(t *testing.T) {
 	assert.True(t, supported, "custom chain from mocked API should be recognized")
 }
 
+func TestDrpcVendor_ChainsUrlSetting_InvalidURLReturnsError(t *testing.T) {
+	vendor := CreateDrpcVendor().(*DrpcVendor)
+	logger := zerolog.Nop()
+	ctx := context.Background()
+
+	for _, badURL := range []string{"not-a-url", "ftp://host", "://missing-scheme"} {
+		settings := common.VendorSettings{
+			"chainsUrl":       badURL,
+			"recheckInterval": 24 * time.Hour,
+		}
+		_, err := vendor.SupportsNetwork(ctx, &logger, settings, "evm:1")
+		require.Errorf(t, err, "malformed chainsUrl %q should return an error", badURL)
+		assert.Contains(t, err.Error(), "invalid chainsUrl")
+	}
+}
+
 // swapDrpcNetworksURL temporarily overrides drpcNetworksURL so tests can point
 // the vendor at a mock server or a deliberately broken URL.
 // Returns the previous value so the caller can restore it.

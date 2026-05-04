@@ -222,6 +222,10 @@ func (v *DrpcVendor) SupportsNetwork(ctx context.Context, logger *zerolog.Logger
 		chainsURL = drpcNetworksURL
 	}
 
+	if err = validateChainsURL(chainsURL); err != nil {
+		return false, err
+	}
+
 	recheckInterval, ok := settings["recheckInterval"].(time.Duration)
 	if !ok {
 		recheckInterval = DefaultDrpcRecheckInterval
@@ -264,6 +268,10 @@ func (v *DrpcVendor) GenerateConfigs(ctx context.Context, logger *zerolog.Logger
 		chainsURL, ok := settings["chainsUrl"].(string)
 		if !ok || chainsURL == "" {
 			chainsURL = drpcNetworksURL
+		}
+
+		if err := validateChainsURL(chainsURL); err != nil {
+			return nil, err
 		}
 
 		recheckInterval, ok := settings["recheckInterval"].(time.Duration)
