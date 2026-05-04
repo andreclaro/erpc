@@ -217,9 +217,9 @@ func (v *DrpcVendor) SupportsNetwork(ctx context.Context, logger *zerolog.Logger
 		return false, err
 	}
 
-	networksURL, ok := settings["chainsUrl"].(string)
-	if !ok || networksURL == "" {
-		networksURL = drpcNetworksURL
+	chainsURL, ok := settings["chainsUrl"].(string)
+	if !ok || chainsURL == "" {
+		chainsURL = drpcNetworksURL
 	}
 
 	recheckInterval, ok := settings["recheckInterval"].(time.Duration)
@@ -227,13 +227,13 @@ func (v *DrpcVendor) SupportsNetwork(ctx context.Context, logger *zerolog.Logger
 		recheckInterval = DefaultDrpcRecheckInterval
 	}
 
-	if err = v.ensureRemoteData(ctx, logger, recheckInterval, networksURL); err != nil {
+	if err = v.ensureRemoteData(ctx, logger, recheckInterval, chainsURL); err != nil {
 		logger.Warn().Err(err).Msg("could not fetch dRPC networks data on cold start, falling back to built-in network map")
 		_, exists := defaultDrpcNetworkNames[chainID]
 		return exists, nil
 	}
 
-	networks, ok := v.remoteData[networksURL]
+	networks, ok := v.remoteData[chainsURL]
 	if !ok || networks == nil {
 		return false, nil
 	}
@@ -261,9 +261,9 @@ func (v *DrpcVendor) GenerateConfigs(ctx context.Context, logger *zerolog.Logger
 			return nil, fmt.Errorf("drpc vendor requires upstream.evm.chainId to be defined")
 		}
 
-		networksURL, ok := settings["chainsUrl"].(string)
-		if !ok || networksURL == "" {
-			networksURL = drpcNetworksURL
+		chainsURL, ok := settings["chainsUrl"].(string)
+		if !ok || chainsURL == "" {
+			chainsURL = drpcNetworksURL
 		}
 
 		recheckInterval, ok := settings["recheckInterval"].(time.Duration)
@@ -272,11 +272,11 @@ func (v *DrpcVendor) GenerateConfigs(ctx context.Context, logger *zerolog.Logger
 		}
 
 		var networks map[int64]string
-		if err := v.ensureRemoteData(ctx, logger, recheckInterval, networksURL); err != nil {
+		if err := v.ensureRemoteData(ctx, logger, recheckInterval, chainsURL); err != nil {
 			logger.Warn().Err(err).Msg("could not fetch dRPC networks data on cold start, falling back to built-in network map")
 			networks = defaultDrpcNetworkNames
 		} else {
-			networks = v.remoteData[networksURL]
+			networks = v.remoteData[chainsURL]
 		}
 
 		netName, ok := networks[chainID]
@@ -352,29 +352,29 @@ func (v *DrpcVendor) OwnsUpstream(ups *common.UpstreamConfig) bool {
 	return strings.Contains(ups.Endpoint, ".drpc.org")
 }
 
-func (v *DrpcVendor) ensureRemoteData(ctx context.Context, logger *zerolog.Logger, recheckInterval time.Duration, networksURL string) error {
+func (v *DrpcVendor) ensureRemoteData(ctx context.Context, logger *zerolog.Logger, recheckInterval time.Duration, chainsURL string) error {
 	v.remoteDataLock.Lock()
 	defer v.remoteDataLock.Unlock()
 
-	if ltm, ok := v.remoteDataLastFetchedAt[networksURL]; ok && time.Since(ltm) < recheckInterval {
+	if ltm, ok := v.remoteDataLastFetchedAt[chainsURL]; ok && time.Since(ltm) < recheckInterval {
 		return nil
 	}
 
-	newData, err := v.fetchDrpcNetworks(ctx, logger, networksURL)
+	newData, err := v.fetchDrpcNetworks(ctx, logger, chainsURL)
 	if err != nil {
-		if _, ok := v.remoteData[networksURL]; ok {
+		if _, ok := v.remoteData[chainsURL]; ok {
 			logger.Warn().Err(err).Msg("could not refresh dRPC networks data; will use stale data")
 			return nil
 		}
 		return err
 	}
 
-	v.remoteData[networksURL] = newData
-	v.remoteDataLastFetchedAt[networksURL] = time.Now()
+	v.remoteData[chainsURL] = newData
+	v.remoteDataLastFetchedAt[chainsURL] = time.Now()
 	return nil
 }
 
-func (v *DrpcVendor) fetchDrpcNetworks(ctx context.Context, logger *zerolog.Logger, networksURL string) (map[int64]string, error) {
+func (v *DrpcVendor) fetchDrpcNetworks(ctx context.Context, logger *zerolog.Logger, chainsURL string) (map[int64]string, error) {
 	var httpClient = &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
@@ -386,7 +386,7 @@ func (v *DrpcVendor) fetchDrpcNetworks(ctx context.Context, logger *zerolog.Logg
 
 	rctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(rctx, "GET", networksURL, nil)
+	req, err := http.NewRequestWithContext(rctx, "GET", chainsURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -433,7 +433,7 @@ func (v *DrpcVendor) fetchDrpcNetworks(ctx context.Context, logger *zerolog.Logg
 		logger.Trace().Int64("chain_id", cid).Str("name", c.name).Int("priority", c.priority).Msg("selected dRPC network name")
 	}
 
-	logger.Info().Int("count", len(networkNames)).Str("url", networksURL).Msg("successfully fetched dRPC network names")
+	logger.Info().Int("count", len(networkNames)).Str("url", chainsURL).Msg("successfully fetched dRPC network names")
 
 	return networkNames, nil
 }
