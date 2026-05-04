@@ -169,6 +169,22 @@ func TestAlchemyVendor_ChainsUrlSetting_IsolatedFromDefaultUrl(t *testing.T) {
 	assert.False(t, supported, "chain 888888 should not bleed into the default URL cache")
 }
 
+func TestAlchemyVendor_ChainsUrlSetting_InvalidURLReturnsError(t *testing.T) {
+	vendor := CreateAlchemyVendor().(*AlchemyVendor)
+	logger := zerolog.Nop()
+	ctx := context.Background()
+
+	for _, badURL := range []string{"not-a-url", "ftp://host", "://missing-scheme"} {
+		settings := common.VendorSettings{
+			"chainsUrl":       badURL,
+			"recheckInterval": 24 * time.Hour,
+		}
+		_, err := vendor.SupportsNetwork(ctx, &logger, settings, "evm:1")
+		require.Errorf(t, err, "malformed chainsUrl %q should return an error", badURL)
+		assert.Contains(t, err.Error(), "invalid chainsUrl")
+	}
+}
+
 // swapAlchemyApiURL temporarily overrides the package-level alchemyApiUrl so
 // tests can point the vendor at a mock server or a deliberately broken URL.
 // Returns the previous value so the caller can restore it.
