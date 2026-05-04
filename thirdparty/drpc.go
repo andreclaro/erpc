@@ -227,9 +227,10 @@ func (v *DrpcVendor) SupportsNetwork(ctx context.Context, logger *zerolog.Logger
 		recheckInterval = DefaultDrpcRecheckInterval
 	}
 
-	err = v.ensureRemoteData(ctx, logger, recheckInterval, networksURL)
-	if err != nil {
-		return false, fmt.Errorf("unable to load remote data: %w", err)
+	if err = v.ensureRemoteData(ctx, logger, recheckInterval, networksURL); err != nil {
+		logger.Warn().Err(err).Msg("could not fetch dRPC networks data on cold start, falling back to built-in network map")
+		_, exists := defaultDrpcNetworkNames[chainID]
+		return exists, nil
 	}
 
 	networks, ok := v.remoteData[networksURL]
@@ -270,13 +271,12 @@ func (v *DrpcVendor) GenerateConfigs(ctx context.Context, logger *zerolog.Logger
 			recheckInterval = DefaultDrpcRecheckInterval
 		}
 
+		var networks map[int64]string
 		if err := v.ensureRemoteData(ctx, logger, recheckInterval, networksURL); err != nil {
-			return nil, fmt.Errorf("unable to load remote data: %w", err)
-		}
-
-		networks, ok := v.remoteData[networksURL]
-		if !ok || networks == nil {
-			return nil, fmt.Errorf("network data not available")
+			logger.Warn().Err(err).Msg("could not fetch dRPC networks data on cold start, falling back to built-in network map")
+			networks = defaultDrpcNetworkNames
+		} else {
+			networks = v.remoteData[networksURL]
 		}
 
 		netName, ok := networks[chainID]
@@ -366,17 +366,7 @@ func (v *DrpcVendor) ensureRemoteData(ctx context.Context, logger *zerolog.Logge
 			logger.Warn().Err(err).Msg("could not refresh dRPC networks data; will use stale data")
 			return nil
 		}
-		// Cold start: the dRPC API is unreachable and we have no cached data.
-		// Seed from the built-in static network map so known chains still work.
-		// Intentionally do not stamp remoteDataLastFetchedAt — the next call will
-		// retry the API and promote real data as soon as it's reachable.
-		logger.Warn().Err(err).Msg("could not fetch dRPC networks data on cold start, falling back to built-in network map")
-		fallback := make(map[int64]string, len(defaultDrpcNetworkNames))
-		for chainID, name := range defaultDrpcNetworkNames {
-			fallback[chainID] = name
-		}
-		v.remoteData[networksURL] = fallback
-		return nil
+		return err
 	}
 
 	v.remoteData[networksURL] = newData
