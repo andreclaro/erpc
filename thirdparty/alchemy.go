@@ -195,6 +195,8 @@ func (v *AlchemyVendor) SupportsNetwork(ctx context.Context, logger *zerolog.Log
 
 	if err = v.ensureRemoteData(ctx, logger, recheckInterval, apiUrl); err != nil {
 		logger.Warn().Err(err).Msg("could not fetch Alchemy API data on cold start, falling back to built-in subdomain map")
+		_, exists := defaultAlchemyNetworkSubdomains[chainID]
+		return exists, nil
 	}
 
 	networks := v.resolveNetworks(apiUrl)
@@ -232,11 +234,14 @@ func (v *AlchemyVendor) GenerateConfigs(ctx context.Context, logger *zerolog.Log
 			recheckInterval = DefaultAlchemyRecheckInterval
 		}
 
+		var networks map[int64]string
 		if err := v.ensureRemoteData(ctx, logger, recheckInterval, apiUrl); err != nil {
 			logger.Warn().Err(err).Msg("could not fetch Alchemy API data on cold start, falling back to built-in subdomain map")
+			networks = defaultAlchemyNetworkSubdomains
+		} else {
+			networks = v.resolveNetworks(apiUrl)
 		}
 
-		networks := v.resolveNetworks(apiUrl)
 		subdomain, ok := networks[chainID]
 		if !ok {
 			return nil, fmt.Errorf("unsupported network chain ID for Alchemy: %d", chainID)
