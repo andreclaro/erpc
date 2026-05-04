@@ -93,6 +93,82 @@ func TestAlchemyVendor_SuccessfulFetchPromotesOverFallback(t *testing.T) {
 	_ = customChainID
 }
 
+func TestAlchemyVendor_ChainsUrlSetting_OverridesDefault(t *testing.T) {
+	const customChainID = int64(777777)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"result":{"data":[{"networkChainId":777777,"kebabCaseId":"custom-chains-url-net"}]}}`))
+	}))
+	defer server.Close()
+
+	vendor := CreateAlchemyVendor().(*AlchemyVendor)
+	logger := zerolog.Nop()
+	ctx := context.Background()
+
+	settings := common.VendorSettings{
+		"chainsUrl":       server.URL,
+		"recheckInterval": 24 * time.Hour,
+	}
+
+	supported, err := vendor.SupportsNetwork(ctx, &logger, settings, "evm:777777")
+	require.NoError(t, err)
+	assert.True(t, supported, "chain from chainsUrl mock server should be recognized")
+
+	// Static defaults are still merged in.
+	supported, err = vendor.SupportsNetwork(ctx, &logger, settings, "evm:1")
+	require.NoError(t, err)
+	assert.True(t, supported)
+}
+
+func TestAlchemyVendor_ChainsUrlSetting_ColdStartFallback(t *testing.T) {
+	vendor := CreateAlchemyVendor().(*AlchemyVendor)
+	logger := zerolog.Nop()
+	ctx := context.Background()
+
+	settings := common.VendorSettings{
+		"chainsUrl":       "http://127.0.0.1:1/does-not-exist",
+		"recheckInterval": 24 * time.Hour,
+	}
+
+	supported, err := vendor.SupportsNetwork(ctx, &logger, settings, "evm:1")
+	require.NoError(t, err, "cold-start fallback via chainsUrl should not surface a fetch error")
+	assert.True(t, supported, "chain 1 is hard-coded in defaultAlchemyNetworkSubdomains")
+}
+
+func TestAlchemyVendor_ChainsUrlSetting_IsolatedFromDefaultUrl(t *testing.T) {
+	// Verify that a vendor using chainsUrl does not pollute the cache for the
+	// default alchemyApiUrl (and vice versa) — each URL key is independent.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"result":{"data":[{"networkChainId":888888,"kebabCaseId":"isolated-net"}]}}`))
+	}))
+	defer server.Close()
+
+	vendor := CreateAlchemyVendor().(*AlchemyVendor)
+	logger := zerolog.Nop()
+	ctx := context.Background()
+
+	settingsWithCustomUrl := common.VendorSettings{
+		"chainsUrl":       server.URL,
+		"recheckInterval": 24 * time.Hour,
+	}
+	settingsDefault := common.VendorSettings{
+		"recheckInterval": 24 * time.Hour,
+	}
+
+	// Populate cache for custom URL.
+	_, err := vendor.SupportsNetwork(ctx, &logger, settingsWithCustomUrl, "evm:888888")
+	require.NoError(t, err)
+
+	// Default URL cache should not know about chain 888888.
+	originalURL := swapAlchemyApiURL(t, "http://127.0.0.1:1/does-not-exist")
+	defer swapAlchemyApiURL(t, originalURL)
+
+	supported, err := vendor.SupportsNetwork(ctx, &logger, settingsDefault, "evm:888888")
+	require.NoError(t, err)
+	assert.False(t, supported, "chain 888888 should not bleed into the default URL cache")
+}
+
 // swapAlchemyApiURL temporarily overrides the package-level alchemyApiUrl so
 // tests can point the vendor at a mock server or a deliberately broken URL.
 // Returns the previous value so the caller can restore it.
