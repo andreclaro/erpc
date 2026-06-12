@@ -2628,6 +2628,23 @@ var NewErrConsensusDispute = func(message string, participants []ParticipantInfo
 	}
 }
 
+// NewErrConsensusCompositionDispute creates a hard dispute caused by the
+// minAgreement winner-composition check failing (tag quotas not met in the
+// winning group).
+var NewErrConsensusCompositionDispute = func(message string, participants []ParticipantInfo, causes []error) error {
+	return &ErrConsensusDispute{
+		BaseError{
+			Code:    ErrCodeConsensusDispute,
+			Message: message,
+			Cause:   errors.Join(causes...),
+			Details: map[string]interface{}{
+				"participants":       participants,
+				"compositionDispute": true,
+			},
+		},
+	}
+}
+
 func (e *ErrConsensusDispute) Errors() []error {
 	if e.Cause == nil {
 		return nil

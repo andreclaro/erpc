@@ -1221,6 +1221,38 @@ func (c *ConsensusPolicyConfig) Validate() error {
 		if rp.MinParticipants > c.MaxParticipants {
 			return fmt.Errorf("consensus.requiredParticipants[%d].minParticipants (%d) cannot exceed maxParticipants (%d)", i, rp.MinParticipants, c.MaxParticipants)
 		}
+		// minAgreement enforces the WINNING-group composition (mixed-node
+		// consensus). It is opt-in (0 = pool-placement only). When set it must be
+		// satisfiable: you cannot require more of a tag in the winner than you
+		// invite into the pool (minParticipants), nor more than can fit in a
+		// group that meets the agreement threshold.
+		if rp.MinAgreement < 0 {
+			return fmt.Errorf("consensus.requiredParticipants[%d].minAgreement must not be negative", i)
+		}
+		if rp.MinAgreement > rp.MinParticipants {
+			return fmt.Errorf("consensus.requiredParticipants[%d].minAgreement (%d) cannot exceed minParticipants (%d)", i, rp.MinAgreement, rp.MinParticipants)
+		}
+		if c.AgreementThreshold > 0 && rp.MinAgreement > c.AgreementThreshold {
+			return fmt.Errorf("consensus.requiredParticipants[%d].minAgreement (%d) cannot exceed agreementThreshold (%d)", i, rp.MinAgreement, c.AgreementThreshold)
+		}
+	}
+
+	// Cross-entry: sum(minAgreement) must not exceed agreementThreshold.
+	// A winning group has exactly agreementThreshold members; it cannot
+	// simultaneously satisfy multiple per-tag minimums that add up to more.
+	if c.AgreementThreshold > 0 {
+		total := 0
+		for _, rp := range c.RequiredParticipants {
+			if rp != nil {
+				total += rp.MinAgreement
+			}
+		}
+		if total > c.AgreementThreshold {
+			return fmt.Errorf(
+				"consensus.requiredParticipants: sum of minAgreement values (%d) exceeds agreementThreshold (%d); no single winning group can satisfy all tag quotas simultaneously",
+				total, c.AgreementThreshold,
+			)
+		}
 	}
 
 	return nil

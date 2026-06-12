@@ -50,6 +50,7 @@ type consensusAnalysis struct {
 	originalRequest   *common.NormalizedRequest
 	leaderUpstream    common.Upstream
 	method            string // The RPC method being called (e.g., "eth_getTransactionCount")
+	allParticipants   []common.Upstream // ordered participant pool for this round
 
 	// Cached computed values
 	cachedBestNonEmpty *responseGroup
@@ -60,11 +61,12 @@ type consensusAnalysis struct {
 	cachedValidGroups  []*responseGroup
 }
 
-func newConsensusAnalysis(lg *zerolog.Logger, ctx context.Context, config *config, responses []*execResult) *consensusAnalysis {
+func newConsensusAnalysis(lg *zerolog.Logger, ctx context.Context, config *config, participants []common.Upstream, responses []*execResult) *consensusAnalysis {
 	analysis := &consensusAnalysis{
 		config:            config,
 		groups:            make(map[string]*responseGroup),
 		totalParticipants: len(responses),
+		allParticipants:   participants,
 	}
 
 	// Try to extract original request and compute leader upstream once
@@ -155,6 +157,38 @@ func newConsensusAnalysis(lg *zerolog.Logger, ctx context.Context, config *confi
 
 func (a *consensusAnalysis) hasRemaining() bool {
 	return a.config.maxParticipants > a.totalParticipants
+}
+
+// hasPendingRequiredParticipants reports whether any upstream in the participant
+// pool matching a minAgreement quota has not yet responded. More precise than
+// hasRemaining(): returns false when all still-pending slots are non-required-tag
+// upstreams. Falls back to hasRemaining() when allParticipants is unpopulated.
+func (a *consensusAnalysis) hasPendingRequiredParticipants(reqs []*common.ConsensusRequiredParticipant) bool {
+	if len(a.allParticipants) == 0 {
+		return a.hasRemaining()
+	}
+	respondedIDs := make(map[string]struct{})
+	for _, g := range a.groups {
+		for _, res := range g.Results {
+			if res != nil && res.Upstream != nil {
+				respondedIDs[res.Upstream.Id()] = struct{}{}
+			}
+		}
+	}
+	for _, r := range reqs {
+		if r == nil || r.MinAgreement <= 0 || r.Tag == "" {
+			continue
+		}
+		for _, u := range a.allParticipants {
+			if _, responded := respondedIDs[u.Id()]; responded {
+				continue
+			}
+			if upstreamMatchesTag(u, r.Tag) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *consensusAnalysis) participants() []common.ParticipantInfo {
