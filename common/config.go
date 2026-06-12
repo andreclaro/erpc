@@ -1778,10 +1778,14 @@ type ConsensusPolicyConfig struct {
 // `consensus.requiredParticipants`. `Tag` is a glob pattern (`*`, `?`)
 // matched against each upstream's `tags`; `MinParticipants` is the minimum
 // number of matching upstreams that must be in the consensus participant
-// set. A single upstream can satisfy multiple entries it matches.
+// set (pool quota, best-effort). `MinAgreement` is the minimum number of
+// matching upstreams that must be in the *winning* group (winner-composition
+// quota, hard-enforced — disputes regardless of `disputeBehavior` when not
+// met). A single upstream can satisfy multiple entries it matches.
 type ConsensusRequiredParticipant struct {
 	Tag             string `yaml:"tag" json:"tag"`
 	MinParticipants int    `yaml:"minParticipants" json:"minParticipants"`
+	MinAgreement    int    `yaml:"minAgreement,omitempty" json:"minAgreement,omitempty"`
 }
 
 func (c *ConsensusPolicyConfig) Copy() *ConsensusPolicyConfig {

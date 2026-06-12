@@ -245,6 +245,50 @@ var consensusRules = []consensusRule{
 			}
 		},
 	},
+	// Mixed-node consensus: the winning group must satisfy every requiredParticipants
+	// minAgreement tag quota. Three outcomes, handled differently:
+	//
+	//  UniqueWinner        — exactly one quota-satisfying group at the highest
+	//                        satisfying count → return it. This is the happy path.
+	//  CompositionDispute  — threshold met but no group satisfies tag quotas
+	//                        (e.g. external-only winner) → hard dispute via
+	//                        ErrConsensusCompositionDispute regardless of
+	//                        disputeBehavior. This is the trust boundary that
+	//                        prevents a set of external providers from forming
+	//                        consensus unchallenged.
+	//  ValueTieDefer       — 2+ quota-satisfying groups tied at top count with
+	//                        different hashes → Condition returns false so the
+	//                        rule does NOT fire; existing tie/dispute rules
+	//                        (priorities 9/14) handle it via disputeBehavior.
+	{
+		Description: "required-participants: winning group must satisfy minAgreement tag quotas",
+		Condition: func(a *consensusAnalysis) bool {
+			if !anyAgreementQuota(a.config.requiredParticipants) {
+				return false
+			}
+			outcome, _ := resolveMinAgreement(a.getValidGroups(), a.config.requiredParticipants, a.config.agreementThreshold)
+			return outcome == minAgreementUniqueWinner || outcome == minAgreementCompositionDispute
+		},
+		Action: func(a *consensusAnalysis) *slotResult {
+			outcome, winner := resolveMinAgreement(a.getValidGroups(), a.config.requiredParticipants, a.config.agreementThreshold)
+			switch outcome {
+			case minAgreementUniqueWinner:
+				if winner.ResponseType == ResponseTypeConsensusError {
+					return &slotResult{Error: winner.FirstError}
+				}
+				return &slotResult{Result: winner.LargestResult}
+			case minAgreementCompositionDispute:
+				return &slotResult{
+					Error: common.NewErrConsensusCompositionDispute(
+						"winning group does not satisfy requiredParticipants minAgreement tag quotas",
+						a.participants(),
+						nil,
+					),
+				}
+			}
+			return nil // unreachable: ValueTieDefer never reaches Action
+		},
+	},
 	// PreferLargerResponses + AcceptMostCommon: when no group meets threshold, choose the largest non-empty
 	{
 		Description: "prefer-larger + accept-most-common: choose largest non-empty below threshold",
@@ -867,6 +911,16 @@ var shortCircuitRules = []shortCircuitRule{
 			if best == nil {
 				return false
 			}
+			// Mixed-node consensus: don't short-circuit a winner that doesn't yet
+			// satisfy the minAgreement tag quotas while required upstreams may
+			// still respond — give the still-pending required nodes a chance.
+			// Uses the precise participant list so a non-required pending upstream
+			// does not block early exit unnecessarily.
+			if anyAgreementQuota(a.config.requiredParticipants) &&
+				a.hasPendingRequiredParticipants(a.config.requiredParticipants) &&
+				!groupSatisfiesAgreementQuotas(best, a.config.requiredParticipants) {
+				return false
+			}
 			if best.ResponseType != ResponseTypeConsensusError {
 				return false
 			}
@@ -900,6 +954,17 @@ var shortCircuitRules = []shortCircuitRule{
 			// change the winner. In particular, when PreferLargerResponses is enabled, a later
 			// larger response can override a smaller above-threshold winner regardless of counts.
 			best := a.getBestByCount()
+			// Mixed-node consensus: don't short-circuit a winner that doesn't yet
+			// satisfy the minAgreement tag quotas while required upstreams may
+			// still respond. Otherwise externals racing ahead resolve the slot
+			// before the internal node ever votes.
+			// Uses the precise participant list so a non-required pending upstream
+			// does not block early exit unnecessarily.
+			if anyAgreementQuota(a.config.requiredParticipants) &&
+				a.hasPendingRequiredParticipants(a.config.requiredParticipants) &&
+				(best == nil || !groupSatisfiesAgreementQuotas(best, a.config.requiredParticipants)) {
+				return false
+			}
 			if a.hasRemaining() {
 				// Do not short-circuit when preferHighestValueFor is configured for this method;
 				// we need all responses to find the truly highest value.
