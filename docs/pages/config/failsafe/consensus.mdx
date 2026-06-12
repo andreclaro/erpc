@@ -122,21 +122,32 @@ offline analysis. Work with my existing eRPC config. Reference:
 https://docs.erpc.cloud/config/failsafe/consensus.llms.txt`}
 />
 
+<PromptExample
+	n={6}
+	title="require mixed internal/external consensus"
+	prompt={`I run my own (internal) nodes alongside third-party (external) RPC providers and I
+want every consensus result to be corroborated across both — at least one internal and
+one external node must be in the agreeing group, otherwise dispute. Set up
+requiredParticipants with minParticipants and minAgreement per tag, fail-closed on
+dispute, and tell me how to tag my upstreams. Work with my existing eRPC config.
+Reference: https://docs.erpc.cloud/config/failsafe/consensus.llms.txt`}
+/>
+
 <AISection title="Consensus — full agent reference">
 
 ### How it works
 
 **Integration point.** Consensus sits at `networkExecutor.Run`. When a `ConsensusPolicyConfig` is present and the `SkipConsensus` directive is false, the executor calls `consensus.Run(ctx, req, slotInner)` where `slotInner` is `retry(hedge(tryOneUpstream))`. Without consensus the path is `retry(hedge(runUpstreamSweep))`. Composition order: `consensus(retry(hedge(tryOneUpstream)))`. (<SourceLink file="erpc/network_executor.go" lines="183-188" />)
 
-**Participant selection.** Before spawning goroutines, if `requiredParticipants` is configured, `reorderForParticipantQuota` front-loads tag-matching upstreams so the first `maxParticipants` drawn satisfy every `{tag, minParticipants}` entry. Tag matching uses exact equality first, then glob wildcards (`*`, `?`). This is best-effort: quota shortfalls are handled by `lowParticipantsBehavior`. The executor then spawns exactly `maxParticipants` goroutines, each calling `slotInner` independently. (<SourceLink file="consensus/quota.go" lines="27-79" />)
+**Participant selection.** Before spawning goroutines, if `requiredParticipants` is configured, `reorderForParticipantQuota` front-loads tag-matching upstreams so the first `maxParticipants` drawn satisfy every `{tag, minParticipants}` entry. Tag matching uses exact equality first, then glob wildcards (`*`, `?`). This is best-effort: quota shortfalls are handled by `lowParticipantsBehavior`. The executor then spawns exactly `maxParticipants` goroutines, each calling `slotInner` independently. (<SourceLink file="consensus/quota.go" lines="27-79" />) Pool placement does not guarantee the required tags end up in the *winning* group — set `minAgreement` on an entry to enforce winner composition (mixed-node consensus); see the `requiredParticipants` rows in the config reference. (<SourceLink file="consensus/quota.go" lines="83-180" />)
 
-**Collection and analysis loop.** The `runAnalyzer` goroutine reads responses from a buffered channel. After each response it calls `newConsensusAnalysis` (classify, hash, group) and `determineWinner` (apply 24 priority-ordered rules). If `shouldShortCircuit` returns true, the outcome is sent immediately and remaining requests are cancelled (or left running in fire-and-forget mode). After all participants respond — or a wait-cap deadline fires — the final outcome is sent to the caller's select.
+**Collection and analysis loop.** The `runAnalyzer` goroutine reads responses from a buffered channel. After each response it calls `newConsensusAnalysis` (classify, hash, group) and `determineWinner` (apply 25 priority-ordered rules). If `shouldShortCircuit` returns true, the outcome is sent immediately and remaining requests are cancelled (or left running in fire-and-forget mode). After all participants respond — or a wait-cap deadline fires — the final outcome is sent to the caller's select.
 
 **Response classification.** Each response is classified into one of four types: `ResponseTypeNonEmpty` (successful non-null result), `ResponseTypeEmpty` (successful but null/empty result), `ResponseTypeConsensusError` (JSON-RPC execution exception, client exception, unsupported, or missing-data), `ResponseTypeInfrastructureError` (all other errors including `ErrUpstreamsExhausted`). Infrastructure errors are excluded from `validParticipants`. `ErrUpstreamsExhausted` is always infra even when it wraps execution exceptions via the shared `ErrorsByUpstream` map. (<SourceLink file="consensus/analysis.go" lines="333-344" />) Specific error-code mappings: `ErrCodeEndpointExecutionException` (EVM revert, code 3) → `ConsensusError`; `ErrCodeEndpointClientSideException`, `ErrCodeEndpointUnsupported`, `ErrCodeEndpointMissingData` → `ConsensusError`; all other errors (timeout, network, server 500) → `InfrastructureError`; nil JSON-RPC response on a successful response object → `InfrastructureError` with hash `"error:generic"`. A successful response where `IsResultEmptyish` returns true → `ResponseTypeEmpty`.
 
 **Hashing.** Non-error responses are hashed via `JsonRpcResponse.CanonicalHash()` or `CanonicalHashWithIgnoredFields(fields)` when `ignoreFields` is configured for the method. Errors are hashed via `errorToConsensusHash`: JSON-RPC exceptions hash as `"jsonrpc:<normalized_code>"`; standard errors hash as their code; unknown errors hash as `"error:generic"`. Within each hash group, `LargestResult` tracks the member with the highest `CachedResponseSize`; the winner returns `group.LargestResult`, not the first response. (<SourceLink file="consensus/analysis.go" lines="102-117" />)
 
-**Rule evaluation.** `determineWinner` walks `consensusRules` in priority order (<SourceLink file="consensus/rules.go" lines="24" />). Full 24-rule ordering:
+**Rule evaluation.** `determineWinner` walks `consensusRules` in priority order (<SourceLink file="consensus/rules.go" lines="24" />). Full 25-rule ordering:
 
 | Priority | Rule | Triggers when | Action |
 |---|---|---|---|
@@ -145,27 +156,28 @@ https://docs.erpc.cloud/config/failsafe/consensus.llms.txt`}
 | 3 | `onlyBlockHeadLeader` on dispute | `disputeBehavior == onlyBlockHeadLeader` AND no group meets threshold | Leader non-error → leader error (incl. infra) → dispute |
 | 4 | `onlyBlockHeadLeader` on low participants | `lowParticipantsBehavior == onlyBlockHeadLeader` AND low participants | Leader non-error → leader non-infra error → low-participants error |
 | 5 | `preferBlockHeadLeader` on dispute/low | `preferBlockHeadLeader` AND no group meets threshold AND leader non-error exists | Return leader non-error; else dispute |
-| 6 | `preferLarger + acceptMostCommon` below threshold | `preferLargerResponses` AND `acceptMostCommon` AND below threshold | Return largest non-empty by size |
-| 7 | `acceptMostCommon + preferNonEmpty` above threshold (empty/error leads) | `preferNonEmpty` AND `acceptMostCommon` AND threshold met AND leader is empty or error AND non-empty exists | Return best non-empty (count, then size) |
-| 8 | Tie at/above threshold (no preference) | Multiple non-error groups share best count ≥ threshold | Dispute |
-| 9 | `acceptMostCommon` below threshold: non-empty over empty | `preferNonEmpty` AND `acceptMostCommon` AND below threshold AND exactly 1 non-empty AND ≥1 empty | Return single non-empty |
-| 10 | `acceptMostCommon` below threshold: non-empty over error | `preferNonEmpty` AND `acceptMostCommon` AND below threshold AND leader is error AND non-empty exists | Return best non-empty |
-| 11 | `returnError + preferNonEmpty` (empty threshold winner) | `disputeBehavior == returnError` AND empty meets threshold AND non-empty minority exists | Dispute (escalate from empty winner) |
-| 12 | `acceptMostCommon + preferNonEmpty` above threshold (both qualify) | Both non-empty and consensus-error ≥ threshold | Return best non-empty |
-| 13 | Tie above threshold (general, no preference) | Multiple valid groups share best count ≥ threshold | Dispute |
-| 14 | `preferLarger`: above threshold, multiple groups | `preferLargerResponses` AND best meets threshold AND &gt;1 group ≥ threshold | Return largest non-empty by size |
-| 15 | `preferLarger + acceptMostCommon`: larger exists below threshold | `preferLargerResponses` AND `acceptMostCommon` AND best meets threshold AND non-empty AND larger exists below | Return largest non-empty by size |
-| 16 | `returnError + preferLarger`: smaller wins but larger exists | `disputeBehavior == returnError` AND `preferLargerResponses` AND threshold met AND larger below threshold | Dispute |
-| 17 | `acceptMostCommon` below threshold: unique leader | `acceptMostCommon` AND best count &lt; threshold AND best &gt; second-best | Return best valid group |
-| 18 | `lowParticipants + acceptMostCommon` | `lowParticipantsBehavior == acceptMostCommon` AND low participants | Non-empty (if untied) → empty → error → low-participants error |
-| 19 | Threshold winner (generic) | Any valid group meets threshold | Return result or consensus-error |
-| 20 | Dispute (multiple groups, none at threshold) | Best count &lt; threshold AND &gt;1 valid group | Dispute error |
-| 21 | All infra errors meet threshold | `validParticipants == 0` AND infra group meets threshold | Return agreed infra error |
-| 22 | `lowParticipants + returnError` | `lowParticipantsBehavior == returnError` AND low participants | Low-participants error |
-| 23 | No responses | `len(groups) == 0` | Low-participants error |
-| 24 | Fallback | Catch-all | Low-participants error |
+| 6 | `required-participants: minAgreement` | `anyAgreementQuota` AND exactly one quota-satisfying group at top count, OR threshold met but no group satisfies tag quotas | Unique highest-count quota-satisfying group wins; if no group satisfies tag quotas → composition dispute (`ErrConsensusCompositionDispute`, not bypassable by `disputeBehavior`); if 2+ quota-satisfying groups tie at top count → defer to tie/dispute rules (priorities 9/14) |
+| 7 | `preferLarger + acceptMostCommon` below threshold | `preferLargerResponses` AND `acceptMostCommon` AND below threshold | Return largest non-empty by size |
+| 8 | `acceptMostCommon + preferNonEmpty` above threshold (empty/error leads) | `preferNonEmpty` AND `acceptMostCommon` AND threshold met AND leader is empty or error AND non-empty exists | Return best non-empty (count, then size) |
+| 9 | Tie at/above threshold (no preference) | Multiple non-error groups share best count ≥ threshold | Dispute |
+| 10 | `acceptMostCommon` below threshold: non-empty over empty | `preferNonEmpty` AND `acceptMostCommon` AND below threshold AND exactly 1 non-empty AND ≥1 empty | Return single non-empty |
+| 11 | `acceptMostCommon` below threshold: non-empty over error | `preferNonEmpty` AND `acceptMostCommon` AND below threshold AND leader is error AND non-empty exists | Return best non-empty |
+| 12 | `returnError + preferNonEmpty` (empty threshold winner) | `disputeBehavior == returnError` AND empty meets threshold AND non-empty minority exists | Dispute (escalate from empty winner) |
+| 13 | `acceptMostCommon + preferNonEmpty` above threshold (both qualify) | Both non-empty and consensus-error ≥ threshold | Return best non-empty |
+| 14 | Tie above threshold (general, no preference) | Multiple valid groups share best count ≥ threshold | Dispute |
+| 15 | `preferLarger`: above threshold, multiple groups | `preferLargerResponses` AND best meets threshold AND &gt;1 group ≥ threshold | Return largest non-empty by size |
+| 16 | `preferLarger + acceptMostCommon`: larger exists below threshold | `preferLargerResponses` AND `acceptMostCommon` AND best meets threshold AND non-empty AND larger exists below | Return largest non-empty by size |
+| 17 | `returnError + preferLarger`: smaller wins but larger exists | `disputeBehavior == returnError` AND `preferLargerResponses` AND threshold met AND larger below threshold | Dispute |
+| 18 | `acceptMostCommon` below threshold: unique leader | `acceptMostCommon` AND best count &lt; threshold AND best &gt; second-best | Return best valid group |
+| 19 | `lowParticipants + acceptMostCommon` | `lowParticipantsBehavior == acceptMostCommon` AND low participants | Non-empty (if untied) → empty → error → low-participants error |
+| 20 | Threshold winner (generic) | Any valid group meets threshold | Return result or consensus-error |
+| 21 | Dispute (multiple groups, none at threshold) | Best count &lt; threshold AND &gt;1 valid group | Dispute error |
+| 22 | All infra errors meet threshold | `validParticipants == 0` AND infra group meets threshold | Return agreed infra error |
+| 23 | `lowParticipants + returnError` | `lowParticipantsBehavior == returnError` AND low participants | Low-participants error |
+| 24 | No responses | `len(groups) == 0` | Low-participants error |
+| 25 | Fallback | Catch-all | Low-participants error |
 
-**Short-circuit rules.** `shouldShortCircuit` evaluates 3 rules after each response. (1) `sendrawtx_first_success`: fires on any single non-empty for `eth_sendRawTransaction`, never blocked. (2) `consensus_error_threshold`: best group is consensus-error ≥ threshold; blocked when `preferHighestValueFor` configured, or `acceptMostCommon` active AND (`preferNonEmpty` OR `preferLargerResponses`). (3) `unassailable_lead`: best non-empty ≥ threshold with unassailable lead; blocked when `preferLargerResponses` active, `preferHighestValueFor` configured, or `preferNonEmpty` active and leader is empty.
+**Short-circuit rules.** `shouldShortCircuit` evaluates 3 rules after each response. (1) `sendrawtx_first_success`: fires on any single non-empty for `eth_sendRawTransaction`, never blocked. (2) `consensus_error_threshold`: best group is consensus-error ≥ threshold; blocked when `preferHighestValueFor` configured, or `acceptMostCommon` active AND (`preferNonEmpty` OR `preferLargerResponses`); additionally blocked when `minAgreement` is configured, a required-tag upstream is still pending (`hasPendingRequiredParticipants`), and the current best group does not yet satisfy all tag quotas. (3) `unassailable_lead`: best non-empty ≥ threshold with unassailable lead; blocked when `preferLargerResponses` active, `preferHighestValueFor` configured, or `preferNonEmpty` active and leader is empty; additionally blocked under the same `minAgreement` pending-required-tag condition as (2).
 
 **Misbehavior tracking and punishment.** After all responses, `trackAndPunishMisbehavingUpstreams` compares each group against the consensus group. Data disagreements count as misbehavior; error disagreements are tracked separately via `erpc_consensus_upstream_errors_total` and are NOT misbehavior. For each misbehaving upstream: `MetricConsensusMisbehaviorDetected` fires and `tracker.RecordUpstreamMisbehavior` is called. Punishment requires strict majority (`consensusGroup.Count > validParticipants / 2`) plus token-bucket denial (`disputeThreshold` tokens per `disputeWindow`); when both hold, the upstream is cordoned and `AfterFunc` calls `Uncordon` after `sitOutPenalty`. (<SourceLink file="consensus/executor.go" lines="784-1229" />)
 
@@ -199,9 +211,10 @@ All fields under `networks[].failsafe[].consensus.` (or project-level `failsafe[
 | `fireAndForget` | bool | `false` (Go zero value; no `SetDefaults` entry) | When `true`, remaining in-flight requests are NOT cancelled after short-circuit. Goroutines use `context.WithoutCancel(ctx)` and survive HTTP disconnection. **Footgun**: process shutdown signals do not reach these goroutines; budget shutdown timeouts accordingly. |
 | `maxWaitOnResult` | \*AdaptiveDuration | `{quantile:0.5, min:"5ms", max:"1s"}` (<SourceLink file="common/defaults.go" lines="2432-2438" />) | Cap after first non-empty response. Cold-start fallback is `min` (5ms). If you configure without a `min`, cold start returns 0 — no cap until data accumulates. |
 | `maxWaitOnEmpty` | \*AdaptiveDuration | `{quantile:0.9, min:"50ms", max:"2s"}` (<SourceLink file="common/defaults.go" lines="2439-2445" />) | Cap after first response of any kind. Same cold-start behavior: fallback to `min` (50ms). |
-| `requiredParticipants` | `[]*ConsensusRequiredParticipant` | `[]` (disabled) | List of `{tag, minParticipants}` entries. Front-loads tag-matching upstreams. Best-effort: shortfall falls through to `lowParticipantsBehavior`. |
+| `requiredParticipants` | `[]*ConsensusRequiredParticipant` | `[]` (disabled) | List of `{tag, minParticipants, minAgreement}` entries. Front-loads tag-matching upstreams; optionally requires those tags in the winning group (`minAgreement`). Pool placement is best-effort: shortfall falls through to `lowParticipantsBehavior`. |
 | `requiredParticipants[].tag` | string | **Required** | Glob pattern matched against `upstream.tags[]`. Empty tag is a startup validation error. |
 | `requiredParticipants[].minParticipants` | int | **Required; no default** | Must be &gt; 0 and ≤ `maxParticipants`. Omitting or setting 0 is a startup validation error — not a silent no-op. |
+| `requiredParticipants[].minAgreement` | int | `0` (disabled) | Mixed-node consensus: minimum upstreams matching `tag` that must be in the **winning** group, not just the pool. When &gt; 0, a winner not covering every tag quota is **hard-disputed** (`ErrConsensusCompositionDispute`) regardless of `disputeBehavior` — `acceptMostCommon` cannot bypass it. Must be ≤ `minParticipants` and ≤ `agreementThreshold`. Fail-closed: if a required tag never agrees, every round disputes. |
 | `punishMisbehavior` | \*PunishMisbehaviorConfig | `nil` (disabled) | Enables cordon punishment for persistent misbehavior. |
 | `punishMisbehavior.disputeThreshold` | uint | **Required** &gt;0 | Token bucket capacity per `disputeWindow`. No `SetDefaults` entry — must be explicitly set; omitting is a startup validation error. |
 | `punishMisbehavior.disputeWindow` | Duration | **Required** &gt;0 | Token bucket window. Validated at startup AND guarded at runtime: `<= 0` silently disables punishment with a debug log. |
@@ -499,6 +512,45 @@ The 100 MiB `maxSize` guard prevents unbounded memory use during high-dispute pe
 }]`}
 />
 
+**6. Mixed-node consensus across a trust boundary.** Require every accepted result to be
+corroborated by at least one Circle-operated (internal) node **and** at least one
+third-party (external) node, so a set of external providers can never form consensus
+unchallenged. `minParticipants` invites each tag into the pool; `minAgreement` enforces
+that the *winning* group carries it. With `minAgreement` set, a winner missing a required
+tag is hard-disputed regardless of `disputeBehavior`. Upstreams are tagged `type:internal`
+/ `type:external` via their `tags` field:
+
+<ConfigTabs
+  path="projects[].networks[].failsafe[]"
+  yaml={`failsafe:
+  - matchMethod: "*"
+    consensus:
+      maxParticipants: 3
+      agreementThreshold: 2
+      # fail-closed: dispute rather than return an unverified result
+      disputeBehavior: returnError
+      requiredParticipants:
+        - tag: "type:internal"
+          minParticipants: 1   # invite >=1 internal into the pool
+          minAgreement: 1       # >=1 internal must be in the winning group
+        - tag: "type:external"
+          minParticipants: 1
+          minAgreement: 1`}
+  ts={`failsafe: [{
+  matchMethod: "*",
+  consensus: {
+    maxParticipants: 3,
+    agreementThreshold: 2,
+    // fail-closed: dispute rather than return an unverified result
+    disputeBehavior: "returnError",
+    requiredParticipants: [
+      { tag: "type:internal", minParticipants: 1, minAgreement: 1 },
+      { tag: "type:external", minParticipants: 1, minAgreement: 1 },
+    ],
+  },
+}]`}
+/>
+
 ### Request/response behavior
 
 - Consensus wraps the composed `retry(hedge(tryOneUpstream))` inner function. Retry and hedge still fire per participant slot; the consensus layer sees only the final result from each slot.
@@ -542,12 +594,17 @@ The 100 MiB `maxSize` guard prevents unbounded memory use during high-dispute pe
 20. **Race-free analysis struct.** `newConsensusAnalysis` pre-populates all cached accessor fields before returning. After the analyzer sends the outcome to the caller, both goroutines may read the analysis concurrently (caller for metrics; analyzer for misbehavior tracking). Lazy-init under concurrent reads would be a data race. (<SourceLink file="consensus/analysis.go" lines="141-153" />)
 21. **`preferHighestValueFor` can be combined per-method with hash-based consensus.** The map allows different handling per method — `eth_getTransactionCount: ["result"]` uses highest-value while `eth_call` falls through to normal hash-based consensus on the same failsafe entry. The rule only matches when at least one valid group has extractable numeric values; if extraction fails for all responses it falls through to subsequent rules.
 22. **`ErrConsensusDispute` and `ErrConsensusLowParticipants` error contracts.** `ErrConsensusDispute` has HTTP method-level status `409 Conflict` and JSON-RPC wire code `-32603`; `ErrConsensusLowParticipants` has HTTP method-level status `412 Precondition Failed` and the same wire code. Wire HTTP status for POST JSON-RPC is `200` in both cases (errors are translated to JSON-RPC at the transport layer). Both errors carry `errors.Join(per-participant errors)` as their `Cause`; retryability propagates from children — if ANY child error is retryable, the whole dispute or low-participants error is retryable toward the network. `ErrConsensusLowParticipants.DeepestMessage()` includes per-participant info.
+23. **`minAgreement` composition failure hard-disputes regardless of `disputeBehavior`.** Unlike `minParticipants` (best-effort pool placement, gotcha #6), `minAgreement` polices the *winning* group. When the threshold is met but no group satisfies all tag quotas (e.g. external-only winner), the rule fires before the accept-most-common / prefer-\* rules and returns `ErrConsensusCompositionDispute` — `disputeBehavior: acceptMostCommonValidResult` cannot bypass it. If two or more quota-satisfying groups tie on count but disagree on value, the rule steps aside and normal tie/dispute rules apply (see gotcha #27). (<SourceLink file="consensus/rules.go" lines="248-291" />)
+24. **`minAgreement` is fail-closed.** If a required tag never lands in any agreeing group — e.g. your internal node is down, lagging, or simply dissents — every round disputes rather than returning an external-only result. This couples availability to having a healthy node per required tag; size `maxParticipants` and your tag pool accordingly. Off by default (`minAgreement: 0`), so existing pool-only `requiredParticipants` configs are unaffected.
+25. **`minAgreement` defers short-circuit.** The `unassailable_lead` and `consensus_error_threshold` short-circuits are suppressed while a required tag is still unsatisfied and participants remain outstanding, so a fast pair of same-tag upstreams can't resolve the slot before a required node responds. Resolution still bounds on `maxWaitOnResult` / `maxWaitOnEmpty` and `maxParticipants`. (<SourceLink file="consensus/rules.go" lines="920-975" />)
+26. **`minAgreement` must be satisfiable or the server won't start.** Validation rejects `minAgreement > minParticipants` (can't require more in the winner than you invite) and `minAgreement > agreementThreshold` (can't fit more of one tag than the agreeing group's own size). Both are startup errors, not silent no-ops. (<SourceLink file="common/validation.go" lines="1224-1253" />)
+27. **`minAgreement` distinguishes composition failure from value disagreement.** A winning group missing a required tag → `ErrConsensusCompositionDispute` regardless of `disputeBehavior` (hard, not bypassable). Two fully mixed groups tied at the same count on different values → normal tie handling (`disputeBehavior`, `preferNonEmpty`, `preferLargerResponses`, etc.). No new config knob needed: the existing dispute knobs apply to value disagreement; composition failures are always hard.
 
 ### Observability
 
 | Metric | Type | Labels | When it fires |
 |---|---|---|---|
-| `erpc_consensus_total` | Counter | `project`, `network`, `category`, `outcome`, `finality` | Every `Run` completion. `outcome`: `success`, `consensus_on_error`, `dispute`, `low_participants`, `generic_error`, `caller_abandoned`. |
+| `erpc_consensus_total` | Counter | `project`, `network`, `category`, `outcome`, `finality` | Every `Run` completion. `outcome`: `success`, `consensus_on_error`, `dispute`, `dispute_composition` (minAgreement tag quota not met), `low_participants`, `generic_error`, `caller_abandoned`. |
 | `erpc_consensus_duration_seconds` | Histogram | same as total | Duration of each `Run`. Buckets: `[0.05, 0.5, 5, 30]`. |
 | `erpc_consensus_errors_total` | Counter | `project`, `network`, `category`, `error`, `finality` | When result is an error. |
 | `erpc_consensus_agreement_count` | Histogram | `project`, `network`, `category`, `finality` | Best group count per round. Buckets: linear 1–10. |
@@ -574,8 +631,8 @@ The 100 MiB `maxSize` guard prevents unbounded memory use during high-dispute pe
 - [`consensus/consensus.go`](https://github.com/erpc/erpc/blob/main/consensus/consensus.go) — `Consensus` struct, `NewConsensus`, entry-point `Run`
 - [`consensus/executor.go`](https://github.com/erpc/erpc/blob/main/consensus/executor.go) — `executeConsensus` (fan-out, wait caps, context racing), `runAnalyzer` (collection loop, short-circuit, misbehavior tracking), `executeParticipant`, `trackAndPunishMisbehavingUpstreams`
 - [`consensus/analysis.go`](https://github.com/erpc/erpc/blob/main/consensus/analysis.go) — `newConsensusAnalysis` (classify, hash, group), `classifyAndHashResponse`, `errorToConsensusHash`, `LargestResult` tracking
-- [`consensus/rules.go`](https://github.com/erpc/erpc/blob/main/consensus/rules.go) — `consensusRules` (24 rules) and `shortCircuitRules` (3 rules); all decision logic
-- [`consensus/quota.go`](https://github.com/erpc/erpc/blob/main/consensus/quota.go) — `reorderForParticipantQuota`, `upstreamMatchesTag` (glob matching)
+- [`consensus/rules.go`](https://github.com/erpc/erpc/blob/main/consensus/rules.go) — `consensusRules` (25 rules, incl. the `minAgreement` winner-composition rule) and `shortCircuitRules` (3 rules, guarded for `minAgreement`); all decision logic
+- [`consensus/quota.go`](https://github.com/erpc/erpc/blob/main/consensus/quota.go) — `reorderForParticipantQuota`, `upstreamMatchesTag` (glob matching), `anyAgreementQuota`/`groupSatisfiesAgreementQuotas` (`minAgreement` winner checks)
 - [`consensus/export.go`](https://github.com/erpc/erpc/blob/main/consensus/export.go) — `misbehaviorExporter` interface, `fileMisbehaviorExporter`, JSONL record structs
 - [`consensus/export_s3.go`](https://github.com/erpc/erpc/blob/main/consensus/export_s3.go) — `s3MisbehaviorExporter`, buffered per-key S3 uploads with background flush worker
 - [`consensus/export_utils.go`](https://github.com/erpc/erpc/blob/main/consensus/export_utils.go) — `resolveFilePattern`/`resolveFilePatternWithDefaults`, `getInstanceID` (cached singleton using `INSTANCE_ID` → `POD_NAME` → `HOSTNAME` → SHA256 hash of now+pid), `sanitizeForFilename`, `parseS3Path`

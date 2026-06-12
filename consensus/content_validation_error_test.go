@@ -46,7 +46,7 @@ func TestConsensus_ContentValidationErrorDoesNotDisputeMajority(t *testing.T) {
 		logger:                  &lg,
 	}
 
-	analysis := newConsensusAnalysis(&lg, ctx, cfg, responses)
+	analysis := newConsensusAnalysis(&lg, ctx, cfg, nil, responses)
 	require.Equal(t, 2, analysis.validParticipants, "the content-validation error must not count as a valid participant")
 
 	e := &executor{consensusPolicy: &consensusPolicy{logger: &lg, config: cfg}}

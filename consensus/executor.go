@@ -223,6 +223,14 @@ func (e *executor) executeConsensus(
 	if maxToSpawn <= 0 {
 		maxToSpawn = 1
 	}
+	// Snapshot the participant slice (first maxToSpawn entries after reorder)
+	// so the analyzer can determine which specific upstreams are still pending.
+	allUps := originalReq.Upstreams()
+	n := maxToSpawn
+	if n > len(allUps) {
+		n = len(allUps)
+	}
+	participantUps := allUps[:n]
 	// Record on the request's ExecState that THIS request went through
 	// the consensus executor and how many participants we spawned. Read
 	// downstream by diagnostic surfaces (admin endpoints, response
@@ -257,7 +265,7 @@ func (e *executor) executeConsensus(
 	analyzerDone := make(chan struct{})
 	go e.runAnalyzer(
 		ctx, lg, originalReq, labels,
-		responseChan, attemptCancels, maxToSpawn, cancelRemaining,
+		responseChan, attemptCancels, maxToSpawn, participantUps, cancelRemaining,
 		outcomeCh, analyzerDone, collectionSpan,
 	)
 
@@ -358,6 +366,7 @@ func (e *executor) runAnalyzer(
 	responseChan <-chan *execResult,
 	attemptCancels []context.CancelFunc,
 	maxToSpawn int,
+	participantUps []common.Upstream,
 	cancelRemaining func(),
 	outcomeCh chan<- consensusOutcome,
 	analyzerDone chan<- struct{},
@@ -515,7 +524,7 @@ func (e *executor) runAnalyzer(
 		responses = append(responses, resp)
 		considerWaitCap(resp)
 
-		analysis = newConsensusAnalysis(e.logger, ctx, e.config, responses)
+		analysis = newConsensusAnalysis(e.logger, ctx, e.config, participantUps, responses)
 		winner = e.determineWinner(lg, analysis)
 		if reason, ok := e.shouldShortCircuit(winner, analysis); ok {
 			shortCircuited = true
@@ -548,7 +557,7 @@ func (e *executor) runAnalyzer(
 	// All participants accounted for. If no short-circuit fired, compute the
 	// final analysis and send the winner now.
 	if analysis == nil {
-		analysis = newConsensusAnalysis(e.logger, ctx, e.config, responses)
+		analysis = newConsensusAnalysis(e.logger, ctx, e.config, participantUps, responses)
 		winner = e.determineWinner(lg, analysis)
 	}
 	if !shortCircuited {
@@ -1378,6 +1387,15 @@ func (e *executor) startConsensusSpan(ctx context.Context, labels metricsLabels)
 	)
 }
 
+func isCompositionDispute(err error) bool {
+	var d *common.ErrConsensusDispute
+	if !errors.As(err, &d) {
+		return false
+	}
+	b, _ := d.Details["compositionDispute"].(bool)
+	return b
+}
+
 func (e *executor) recordMetricsAndTracing(req *common.NormalizedRequest, startTime time.Time, result *slotResult, analysis *consensusAnalysis, labels metricsLabels, span trace.Span) {
 	// Defensive: analysis is nil on the catastrophic-path where the analyzer
 	// goroutine panicked before any responses could be classified. Emit
@@ -1412,7 +1430,11 @@ func (e *executor) recordMetricsAndTracing(req *common.NormalizedRequest, startT
 		if hasConsensus {
 			outcome = "consensus_on_error"
 		} else if isDispute {
-			outcome = "dispute"
+			if isCompositionDispute(result.Error) {
+				outcome = "dispute_composition"
+			} else {
+				outcome = "dispute"
+			}
 		} else if isLowParticipants {
 			outcome = "low_participants"
 		} else {
@@ -1448,14 +1470,7 @@ func (e *executor) recordMetricsAndTracing(req *common.NormalizedRequest, startT
 	// consensus failure — keep them out of the error counter.
 	severity := common.ClassifySeverity(result.Error)
 	if result.Error != nil && (severity == common.SeverityWarning || severity == common.SeverityCritical) {
-		errLabel := "generic_error"
-		if hasConsensus {
-			errLabel = "consensus_on_error"
-		} else if isDispute {
-			errLabel = "dispute"
-		} else if isLowParticipants {
-			errLabel = "low_participants"
-		}
+		errLabel := outcome
 		telemetry.MetricConsensusErrors.
 			WithLabelValues(labels.projectId, labels.networkId, labels.category, errLabel, labels.finalityStr).
 			Inc()
