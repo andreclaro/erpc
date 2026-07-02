@@ -234,6 +234,77 @@ func TestMinAgreement_WinnerRule(t *testing.T) {
 	})
 }
 
+func TestMinAgreement_PreferHighestValueFor(t *testing.T) {
+	reqs := []*common.ConsensusRequiredParticipant{
+		{Tag: "type:internal", MinParticipants: 1, MinAgreement: 1},
+		{Tag: "type:external", MinParticipants: 1, MinAgreement: 1},
+	}
+	cfg := &config{
+		maxParticipants:      3,
+		agreementThreshold:   2,
+		disputeBehavior:      common.ConsensusDisputeBehaviorReturnError,
+		requiredParticipants: reqs,
+		preferHighestValueFor: map[string][]string{
+			"eth_blockNumber": {"result"},
+		},
+	}
+
+	t.Run("all-external high-value group must not win via preferHighestValueFor", func(t *testing.T) {
+		// External-only group agrees on 0x200 (higher); mixed group agrees on 0x100 (lower).
+		// Without the fix, preferHighestValueFor would return 0x200 bypassing minAgreement.
+		a := &consensusAnalysis{
+			config: cfg,
+			method: "eth_blockNumber",
+		}
+		a.groups = map[string]*responseGroup{
+			"ext": groupOf("ext", ResponseTypeNonEmpty,
+				resWithUpstream("alchemy-1", []string{"type:external"}, "0x200"),
+				resWithUpstream("quicknode-1", []string{"type:external"}, "0x200"),
+			),
+			"mixed": groupOf("mixed", ResponseTypeNonEmpty,
+				resWithUpstream("internal-1", []string{"type:internal"}, "0x100"),
+				resWithUpstream("alchemy-2", []string{"type:external"}, "0x100"),
+			),
+		}
+		for _, g := range a.groups {
+			a.totalParticipants += g.Count
+			a.validParticipants += g.Count
+		}
+		winner := newTestExecutor(cfg).determineWinner(&testNopLogger, a)
+		require.Nil(t, winner.Error, "mixed group must win; all-external high-value group must not bypass minAgreement")
+		require.NotNil(t, winner.Result)
+		jrr, err := winner.Result.JsonRpcResponse()
+		require.NoError(t, err)
+		assert.Contains(t, jrr.GetResultString(), "0x100")
+	})
+
+	t.Run("mixed high-value group wins when it satisfies quotas", func(t *testing.T) {
+		a := &consensusAnalysis{
+			config: cfg,
+			method: "eth_blockNumber",
+		}
+		a.groups = map[string]*responseGroup{
+			"mixed-high": groupOf("mixed-high", ResponseTypeNonEmpty,
+				resWithUpstream("internal-1", []string{"type:internal"}, "0x200"),
+				resWithUpstream("alchemy-1", []string{"type:external"}, "0x200"),
+			),
+			"mixed-low": groupOf("mixed-low", ResponseTypeNonEmpty,
+				resWithUpstream("internal-2", []string{"type:internal"}, "0x100"),
+				resWithUpstream("quicknode-1", []string{"type:external"}, "0x100"),
+			),
+		}
+		for _, g := range a.groups {
+			a.totalParticipants += g.Count
+			a.validParticipants += g.Count
+		}
+		winner := newTestExecutor(cfg).determineWinner(&testNopLogger, a)
+		require.Nil(t, winner.Error)
+		jrr, err := winner.Result.JsonRpcResponse()
+		require.NoError(t, err)
+		assert.Contains(t, jrr.GetResultString(), "0x200", "quota-satisfying high-value group must win")
+	})
+}
+
 func TestMinAgreement_ShortCircuitGuard(t *testing.T) {
 	reqs := []*common.ConsensusRequiredParticipant{
 		{Tag: "type:internal", MinParticipants: 1, MinAgreement: 1},

@@ -1237,23 +1237,6 @@ func (c *ConsensusPolicyConfig) Validate() error {
 		}
 	}
 
-	// Cross-entry: sum(minAgreement) must not exceed agreementThreshold.
-	// A winning group has exactly agreementThreshold members; it cannot
-	// simultaneously satisfy multiple per-tag minimums that add up to more.
-	if c.AgreementThreshold > 0 {
-		total := 0
-		for _, rp := range c.RequiredParticipants {
-			if rp != nil {
-				total += rp.MinAgreement
-			}
-		}
-		if total > c.AgreementThreshold {
-			return fmt.Errorf(
-				"consensus.requiredParticipants: sum of minAgreement values (%d) exceeds agreementThreshold (%d); no single winning group can satisfy all tag quotas simultaneously",
-				total, c.AgreementThreshold,
-			)
-		}
-	}
 
 	return nil
 }

@@ -95,6 +95,7 @@ var consensusRules = []consensusRule{
 				count        int
 				response     *common.NormalizedResponse
 				responseSize int
+				results      []*execResult
 			}
 			valueGroups := make(map[string]*valueGroup) // key is string representation of values
 
@@ -111,6 +112,7 @@ var consensusRules = []consensusRule{
 					key := valuesToKey(values)
 					if vg, exists := valueGroups[key]; exists {
 						vg.count++
+						vg.results = append(vg.results, result)
 						// Keep the largest response in case of ties
 						if result.CachedResponseSize > vg.responseSize {
 							vg.response = result.Result
@@ -122,16 +124,25 @@ var consensusRules = []consensusRule{
 							count:        1,
 							response:     result.Result,
 							responseSize: result.CachedResponseSize,
+							results:      []*execResult{result},
 						}
 					}
 				}
 			}
 
-			// Find the highest value that meets the threshold
+			checkQuotas := anyAgreementQuota(a.config.requiredParticipants)
+
+			// Find the highest value that meets the threshold and satisfies tag quotas.
 			var best *valueGroup
 			for _, vg := range valueGroups {
 				if vg.count < threshold {
 					continue // Doesn't meet minimum agreement
+				}
+				if checkQuotas {
+					synthetic := &responseGroup{Results: vg.results}
+					if !groupSatisfiesAgreementQuotas(synthetic, a.config.requiredParticipants) {
+						continue
+					}
 				}
 				if best == nil || compareValueChains(vg.values, best.values) > 0 {
 					best = vg
