@@ -48,7 +48,7 @@ func TestResolveMinAgreement(t *testing.T) {
 
 	t.Run("NoOp: no group at threshold", func(t *testing.T) {
 		g := groupOf("mixed", ResponseTypeNonEmpty,
-			resWithUpstream("circle-1", []string{"type:internal"}, "0x1"),
+			resWithUpstream("internal-1", []string{"type:internal"}, "0x1"),
 		)
 		outcome, winner := resolveMinAgreement([]*responseGroup{g}, reqs, threshold)
 		require.Equal(t, minAgreementNoOp, outcome)
@@ -57,7 +57,7 @@ func TestResolveMinAgreement(t *testing.T) {
 
 	t.Run("UniqueWinner: one mixed group at threshold alongside one external-only", func(t *testing.T) {
 		mixed := groupOf("mixed", ResponseTypeNonEmpty,
-			resWithUpstream("circle-1", []string{"type:internal"}, "0x100"),
+			resWithUpstream("internal-1", []string{"type:internal"}, "0x100"),
 			resWithUpstream("alchemy-1", []string{"type:external"}, "0x100"),
 		)
 		extOnly := groupOf("ext", ResponseTypeNonEmpty,
@@ -81,11 +81,11 @@ func TestResolveMinAgreement(t *testing.T) {
 
 	t.Run("ValueTieDefer: two mixed groups at same count, no higher non-satisfying group", func(t *testing.T) {
 		mixedA := groupOf("a", ResponseTypeNonEmpty,
-			resWithUpstream("circle-1", []string{"type:internal"}, "0x100"),
+			resWithUpstream("internal-1", []string{"type:internal"}, "0x100"),
 			resWithUpstream("alchemy-1", []string{"type:external"}, "0x100"),
 		)
 		mixedB := groupOf("b", ResponseTypeNonEmpty,
-			resWithUpstream("circle-2", []string{"type:internal"}, "0x200"),
+			resWithUpstream("internal-2", []string{"type:internal"}, "0x200"),
 			resWithUpstream("quicknode-1", []string{"type:external"}, "0x200"),
 		)
 		outcome, winner := resolveMinAgreement([]*responseGroup{mixedA, mixedB}, reqs, threshold)
@@ -103,11 +103,11 @@ func TestResolveMinAgreement(t *testing.T) {
 		)
 		extHigh.Count = 3
 		mixedA := groupOf("a", ResponseTypeNonEmpty,
-			resWithUpstream("circle-1", []string{"type:internal"}, "0x100"),
+			resWithUpstream("internal-1", []string{"type:internal"}, "0x100"),
 			resWithUpstream("alchemy-2", []string{"type:external"}, "0x100"),
 		)
 		mixedB := groupOf("b", ResponseTypeNonEmpty,
-			resWithUpstream("circle-2", []string{"type:internal"}, "0x200"),
+			resWithUpstream("internal-2", []string{"type:internal"}, "0x200"),
 			resWithUpstream("quicknode-2", []string{"type:external"}, "0x200"),
 		)
 		outcome, winner := resolveMinAgreement([]*responseGroup{extHigh, mixedA, mixedB}, reqs, threshold)
@@ -117,13 +117,13 @@ func TestResolveMinAgreement(t *testing.T) {
 
 	t.Run("UniqueWinner: higher-count quota-satisfying group beats lower-count", func(t *testing.T) {
 		mixedHigh := groupOf("high", ResponseTypeNonEmpty,
-			resWithUpstream("circle-1", []string{"type:internal"}, "0x100"),
+			resWithUpstream("internal-1", []string{"type:internal"}, "0x100"),
 			resWithUpstream("alchemy-1", []string{"type:external"}, "0x100"),
 			resWithUpstream("infura-1", []string{"type:external"}, "0x100"),
 		)
 		mixedHigh.Count = 3
 		mixedLow := groupOf("low", ResponseTypeNonEmpty,
-			resWithUpstream("circle-2", []string{"type:internal"}, "0x200"),
+			resWithUpstream("internal-2", []string{"type:internal"}, "0x200"),
 			resWithUpstream("quicknode-1", []string{"type:external"}, "0x200"),
 		)
 		outcome, winner := resolveMinAgreement([]*responseGroup{mixedHigh, mixedLow}, reqs, threshold)

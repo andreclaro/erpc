@@ -67,7 +67,7 @@ func TestGroupSatisfiesAgreementQuotas(t *testing.T) {
 
 	t.Run("mixed group satisfies", func(t *testing.T) {
 		g := groupOf("h", ResponseTypeNonEmpty,
-			resWithUpstream("circle-1", []string{"type:internal"}, "0x1"),
+			resWithUpstream("internal-1", []string{"type:internal"}, "0x1"),
 			resWithUpstream("alchemy-1", []string{"type:external"}, "0x1"),
 		)
 		require.True(t, groupSatisfiesAgreementQuotas(g, reqs))
@@ -111,7 +111,7 @@ func TestMinAgreement_WinnerRule(t *testing.T) {
 			resWithUpstream("quicknode-1", []string{"type:external"}, "0x100"),
 		)
 		dissent := groupOf("int", ResponseTypeNonEmpty,
-			resWithUpstream("circle-1", []string{"type:internal"}, "0x999"),
+			resWithUpstream("internal-1", []string{"type:internal"}, "0x999"),
 		)
 		a := mkAnalysis(cfg(), win, dissent)
 		winner := newTestExecutor(a.config).determineWinner(&testNopLogger, a)
@@ -124,7 +124,7 @@ func TestMinAgreement_WinnerRule(t *testing.T) {
 
 	t.Run("mixed group wins over same-count all-external group", func(t *testing.T) {
 		mixed := groupOf("mixed", ResponseTypeNonEmpty,
-			resWithUpstream("circle-1", []string{"type:internal"}, "0x100"),
+			resWithUpstream("internal-1", []string{"type:internal"}, "0x100"),
 			resWithUpstream("alchemy-1", []string{"type:external"}, "0x100"),
 		)
 		ext := groupOf("ext", ResponseTypeNonEmpty,
@@ -153,11 +153,11 @@ func TestMinAgreement_WinnerRule(t *testing.T) {
 		)
 		extHigh.Count = 3
 		mixedA := groupOf("a", ResponseTypeNonEmpty,
-			resWithUpstream("circle-1", []string{"type:internal"}, "0x100"),
+			resWithUpstream("internal-1", []string{"type:internal"}, "0x100"),
 			resWithUpstream("alchemy-2", []string{"type:external"}, "0x100"),
 		)
 		mixedB := groupOf("b", ResponseTypeNonEmpty,
-			resWithUpstream("circle-2", []string{"type:internal"}, "0x200"),
+			resWithUpstream("internal-2", []string{"type:internal"}, "0x200"),
 			resWithUpstream("quicknode-2", []string{"type:external"}, "0x200"),
 		)
 		a := mkAnalysis(c, extHigh, mixedA, mixedB)
@@ -172,11 +172,11 @@ func TestMinAgreement_WinnerRule(t *testing.T) {
 		c := cfg()
 		c.maxParticipants = 4
 		mixedA := groupOf("a", ResponseTypeNonEmpty,
-			resWithUpstream("circle-1", []string{"type:internal"}, "0x100"),
+			resWithUpstream("internal-1", []string{"type:internal"}, "0x100"),
 			resWithUpstream("alchemy-1", []string{"type:external"}, "0x100"),
 		)
 		mixedB := groupOf("b", ResponseTypeNonEmpty,
-			resWithUpstream("circle-2", []string{"type:internal"}, "0x200"),
+			resWithUpstream("internal-2", []string{"type:internal"}, "0x200"),
 			resWithUpstream("quicknode-1", []string{"type:external"}, "0x200"),
 		)
 		a := mkAnalysis(c, mixedA, mixedB)
@@ -189,7 +189,7 @@ func TestMinAgreement_WinnerRule(t *testing.T) {
 
 	t.Run("mixed group, no competitor -> result", func(t *testing.T) {
 		mixed := groupOf("mixed", ResponseTypeNonEmpty,
-			resWithUpstream("circle-1", []string{"type:internal"}, "0x100"),
+			resWithUpstream("internal-1", []string{"type:internal"}, "0x100"),
 			resWithUpstream("alchemy-1", []string{"type:external"}, "0x100"),
 		)
 		a := mkAnalysis(cfg(), mixed)
@@ -248,8 +248,8 @@ func TestMinAgreement_ShortCircuitGuard(t *testing.T) {
 
 	t.Run("does not short-circuit unsatisfied winner while required upstreams pending", func(t *testing.T) {
 		// 2 externals agree (count 2 >= threshold), only 2 of 3 participants in;
-		// the internal node (circle-1) has not responded yet. Must NOT short-circuit.
-		int1 := common.NewFakeUpstream("circle-1", common.WithTags("type:internal"))
+		// the internal node (internal-1) has not responded yet. Must NOT short-circuit.
+		int1 := common.NewFakeUpstream("internal-1", common.WithTags("type:internal"))
 		ext1 := common.NewFakeUpstream("alchemy-1", common.WithTags("type:external"))
 		ext2 := common.NewFakeUpstream("quicknode-1", common.WithTags("type:external"))
 		win := groupOf("ext", ResponseTypeNonEmpty,
@@ -265,11 +265,11 @@ func TestMinAgreement_ShortCircuitGuard(t *testing.T) {
 	})
 
 	t.Run("short-circuits once the winning group satisfies the quotas", func(t *testing.T) {
-		int1 := common.NewFakeUpstream("circle-1", common.WithTags("type:internal"))
+		int1 := common.NewFakeUpstream("internal-1", common.WithTags("type:internal"))
 		ext1 := common.NewFakeUpstream("alchemy-1", common.WithTags("type:external"))
 		ext2 := common.NewFakeUpstream("quicknode-1", common.WithTags("type:external"))
 		mixed := groupOf("mixed", ResponseTypeNonEmpty,
-			resWithUpstream("circle-1", []string{"type:internal"}, "0x100"),
+			resWithUpstream("internal-1", []string{"type:internal"}, "0x100"),
 			resWithUpstream("alchemy-1", []string{"type:external"}, "0x100"),
 		)
 		// allParticipants: [int1, ext1, ext2]; int1+ext1 responded, ext2 still pending
@@ -287,11 +287,11 @@ func TestMinAgreement_ShortCircuitGuard(t *testing.T) {
 		// int1 + ext1 responded and form a mixed winner. ext2 (a second external) is
 		// still pending, but both minAgreement quotas are already satisfied.
 		// The guard must NOT fire — ext2 cannot change the composition outcome.
-		int1 := common.NewFakeUpstream("circle-1", common.WithTags("type:internal"))
+		int1 := common.NewFakeUpstream("internal-1", common.WithTags("type:internal"))
 		ext1 := common.NewFakeUpstream("alchemy-1", common.WithTags("type:external"))
 		ext2 := common.NewFakeUpstream("quicknode-1", common.WithTags("type:external"))
 		mixed := groupOf("mixed", ResponseTypeNonEmpty,
-			resWithUpstream("circle-1", []string{"type:internal"}, "0x100"),
+			resWithUpstream("internal-1", []string{"type:internal"}, "0x100"),
 			resWithUpstream("alchemy-1", []string{"type:external"}, "0x100"),
 		)
 		// allParticipants has ext2 last; it has not responded (not in any group)
