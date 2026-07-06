@@ -249,9 +249,9 @@ func TestMinAgreement_PreferHighestValueFor(t *testing.T) {
 		},
 	}
 
-	t.Run("all-external high-value group must not win via preferHighestValueFor", func(t *testing.T) {
+	t.Run("all-external high-value group must not silently win via preferHighestValueFor", func(t *testing.T) {
 		// External-only group agrees on 0x200 (higher); mixed group agrees on 0x100 (lower).
-		// Without the fix, preferHighestValueFor would return 0x200 bypassing minAgreement.
+		// Returning 0x100 would lie about the current block height — must composition-dispute instead.
 		a := &consensusAnalysis{
 			config: cfg,
 			method: "eth_blockNumber",
@@ -271,11 +271,30 @@ func TestMinAgreement_PreferHighestValueFor(t *testing.T) {
 			a.validParticipants += g.Count
 		}
 		winner := newTestExecutor(cfg).determineWinner(&testNopLogger, a)
-		require.Nil(t, winner.Error, "mixed group must win; all-external high-value group must not bypass minAgreement")
-		require.NotNil(t, winner.Result)
-		jrr, err := winner.Result.JsonRpcResponse()
-		require.NoError(t, err)
-		assert.Contains(t, jrr.GetResultString(), "0x100")
+		require.NotNil(t, winner.Error)
+		assert.True(t, isCompositionDispute(winner.Error),
+			"non-satisfying group at higher value must produce composition dispute, not a silent lower-value fallback")
+	})
+
+	t.Run("only external group at threshold produces composition dispute", func(t *testing.T) {
+		a := &consensusAnalysis{
+			config: cfg,
+			method: "eth_blockNumber",
+		}
+		a.groups = map[string]*responseGroup{
+			"ext": groupOf("ext", ResponseTypeNonEmpty,
+				resWithUpstream("alchemy-1", []string{"type:external"}, "0x200"),
+				resWithUpstream("quicknode-1", []string{"type:external"}, "0x200"),
+			),
+		}
+		for _, g := range a.groups {
+			a.totalParticipants += g.Count
+			a.validParticipants += g.Count
+		}
+		winner := newTestExecutor(cfg).determineWinner(&testNopLogger, a)
+		require.NotNil(t, winner.Error)
+		assert.True(t, isCompositionDispute(winner.Error),
+			"no satisfying group at threshold must produce composition dispute, not a generic threshold error")
 	})
 
 	t.Run("mixed high-value group wins when it satisfies quotas", func(t *testing.T) {
