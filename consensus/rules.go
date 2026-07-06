@@ -134,10 +134,12 @@ var consensusRules = []consensusRule{
 
 			// Find the highest value that meets the threshold and satisfies tag quotas.
 			var best *valueGroup
+			atThreshold := false
 			for _, vg := range valueGroups {
 				if vg.count < threshold {
-					continue // Doesn't meet minimum agreement
+					continue
 				}
+				atThreshold = true
 				if checkQuotas {
 					synthetic := &responseGroup{Results: vg.results}
 					if !groupSatisfiesAgreementQuotas(synthetic, a.config.requiredParticipants) {
@@ -146,6 +148,39 @@ var consensusRules = []consensusRule{
 				}
 				if best == nil || compareValueChains(vg.values, best.values) > 0 {
 					best = vg
+				}
+			}
+
+			if checkQuotas {
+				if best == nil && atThreshold {
+					// Groups reached threshold but none satisfied tag quotas.
+					return &slotResult{
+						Error: common.NewErrConsensusCompositionDispute(
+							"no highest-value group satisfies requiredParticipants minAgreement tag quotas",
+							a.participants(),
+							nil,
+						),
+					}
+				}
+				if best != nil {
+					// A non-satisfying group with a higher value would win via later
+					// rules if we fall through — dispute instead (same logic as resolveMinAgreement).
+					for _, vg := range valueGroups {
+						if vg.count < threshold {
+							continue
+						}
+						synthetic := &responseGroup{Results: vg.results}
+						if !groupSatisfiesAgreementQuotas(synthetic, a.config.requiredParticipants) &&
+							compareValueChains(vg.values, best.values) > 0 {
+							return &slotResult{
+								Error: common.NewErrConsensusCompositionDispute(
+									"highest-value group does not satisfy requiredParticipants minAgreement tag quotas",
+									a.participants(),
+									nil,
+								),
+							}
+						}
+					}
 				}
 			}
 
