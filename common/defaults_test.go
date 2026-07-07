@@ -1547,3 +1547,20 @@ func TestSetDefaults_NetworkDefaults_SvmMergesIntoNetwork(t *testing.T) {
 		require.Nil(t, n.Svm)
 	})
 }
+
+func TestDatabaseConfig_SetDefaults_SvmJsonRpcCache(t *testing.T) {
+	d := &DatabaseConfig{
+		SvmJsonRpcCache: &CacheConfig{
+			Connectors: []*ConnectorConfig{
+				{
+					Id:     "short-term",
+					Driver: DriverMemory,
+					Memory: &MemoryConnectorConfig{},
+				},
+			},
+		},
+	}
+	require.NoError(t, d.SetDefaults("erpc-default"))
+	require.Equal(t, "1GB", d.SvmJsonRpcCache.Connectors[0].Memory.MaxTotalSize)
+	require.Equal(t, 100_000, d.SvmJsonRpcCache.Connectors[0].Memory.MaxItems)
+}

@@ -837,6 +837,11 @@ func (d *DatabaseConfig) SetDefaults(defClusterKey string) error {
 			return err
 		}
 	}
+	if d.SvmJsonRpcCache != nil {
+		if err := d.SvmJsonRpcCache.SetDefaults(); err != nil {
+			return err
+		}
+	}
 	if d.SharedState != nil {
 		if err := d.SharedState.SetDefaults(defClusterKey); err != nil {
 			return err
