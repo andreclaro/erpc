@@ -16,10 +16,14 @@ import (
 //   - Transient realtime snapshots: getLatestBlockhash, getRecentBlockhash
 //     (deprecated but still live on older validators), getFeeForMessage,
 //     getSignatureStatuses, getVoteAccounts, getLeaderSchedule, getEpochInfo,
-//     getEpochSchedule, getSlotLeaders, getRecentPerformanceSamples,
-//     getRecentPrioritizationFees. These all reflect "now" and go stale in
-//     under one slot (~400ms); caching them would surface stale state to the
-//     caller without detection.
+//     getSlotLeaders, getRecentPerformanceSamples, getRecentPrioritizationFees.
+//     These all reflect "now" and go stale in under one slot (~400ms); caching
+//     them would surface stale state to the caller without detection.
+//
+// Note: getEpochSchedule is intentionally excluded — epoch schedule constants
+// (slotsPerEpoch, leaderScheduleSlotOffset, etc.) only change at epoch
+// boundaries (~2 days / 432,000 slots). It is classified by commitment level
+// like other read methods so responses can be cached for their TTL.
 var neverCacheMethods = map[string]bool{
 	"getLatestBlockhash":          true,
 	"getRecentBlockhash":          true,
@@ -31,7 +35,6 @@ var neverCacheMethods = map[string]bool{
 	"getVoteAccounts":             true,
 	"getLeaderSchedule":           true,
 	"getEpochInfo":                true,
-	"getEpochSchedule":            true,
 	"getSlotLeaders":              true,
 	"getRecentPerformanceSamples": true,
 	"getRecentPrioritizationFees": true,

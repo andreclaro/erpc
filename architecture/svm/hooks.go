@@ -46,8 +46,9 @@ var commitmentOptionsIndex = map[string]int{
 	"getTransactionCount":       0,
 	"getVoteAccounts":           0,
 	// one positional arg precedes the options object
-	"getAccountInfo":          1,
-	"getBalance":              1,
+	"getAccountInfo":                    1,
+	"getBalance":                        1,
+	"getMinimumBalanceForRentExemption": 1,
 	"getBlock":                1,
 	"getLeaderSchedule":       1,
 	"getMultipleAccounts":     1,
@@ -380,10 +381,16 @@ func networkPreForward_validateSignaturesForAddress(ctx context.Context, n commo
 	}
 	window := latest - minSlot
 	if window > cfg.Svm.MaxSlotsPerSignaturesQuery {
-		return true, nil, fmt.Errorf(
-			"getSignaturesForAddress slot window %d exceeds maxSlotsPerSignaturesQuery=%d (latest=%d, minContextSlot=%d); paginate the query",
-			window, cfg.Svm.MaxSlotsPerSignaturesQuery, latest, minSlot,
-		)
+		return true, nil, common.NewErrEndpointClientSideException(
+			common.NewErrJsonRpcExceptionInternal(
+				-32602, common.JsonRpcErrorClientSideException,
+				fmt.Sprintf(
+					"getSignaturesForAddress slot window %d exceeds maxSlotsPerSignaturesQuery=%d (latest=%d, minContextSlot=%d); paginate the query",
+					window, cfg.Svm.MaxSlotsPerSignaturesQuery, latest, minSlot,
+				),
+				nil, nil,
+			),
+		).WithRetryableTowardNetwork(false)
 	}
 	return false, nil, nil
 }

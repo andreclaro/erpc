@@ -132,7 +132,14 @@ func (e *JsonRpcErrorExtractor) Extract(
 		)
 
 	// --- Node health issues (failover, but treat as server-side) --------------
-	case svmCodeNodeUnhealthy, svmCodeNodeTooBehind, svmCodeNodeTimeout, svmCodeMinContextSlot:
+	// svmCodeNodeTooBehind (-32006) is TransactionPrecompileVerificationFailure in
+	// the agave validator — a client error (bad ed25519/secp256k1 precompile sig).
+	// Separated here so it is not retried across upstreams.
+	case svmCodeNodeTooBehind:
+		wrapped := common.NewErrJsonRpcExceptionInternal(code, common.JsonRpcErrorClientSideException, msg, nil, details)
+		return common.NewErrEndpointClientSideException(wrapped).WithRetryableTowardNetwork(false)
+
+	case svmCodeNodeUnhealthy, svmCodeNodeTimeout, svmCodeMinContextSlot:
 		return common.NewErrEndpointServerSideException(
 			common.NewErrJsonRpcExceptionInternal(code, common.JsonRpcErrorServerSideException, msg, nil, details),
 			details, resp.StatusCode,
@@ -163,7 +170,7 @@ func (e *JsonRpcErrorExtractor) Extract(
 			// Preflight / blockhash failures — the caller's transaction is the problem.
 			// Mark non-retryable to guard against double-spend on retry.
 			wrapped := common.NewErrJsonRpcExceptionInternal(code, common.JsonRpcErrorClientSideException, msg, nil, details)
-			return common.NewErrEndpointExecutionException(wrapped)
+			return common.NewErrEndpointClientSideException(wrapped).WithRetryableTowardNetwork(false)
 		case strings.Contains(low, "invalid") && (strings.Contains(low, "signature") || strings.Contains(low, "transaction") || strings.Contains(low, "instruction")):
 			wrapped := common.NewErrJsonRpcExceptionInternal(code, common.JsonRpcErrorClientSideException, msg, nil, details)
 			return common.NewErrEndpointClientSideException(wrapped).WithRetryableTowardNetwork(false)
