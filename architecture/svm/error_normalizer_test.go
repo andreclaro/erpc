@@ -100,8 +100,9 @@ func TestExtract_AllMappedCodes(t *testing.T) {
 		{"-32009 long-term storage slot", -32009, "Long-term storage slot not reachable", common.ErrCodeEndpointMissingData, false},
 		{"-32014 block status not available", -32014, "Block status not available", common.ErrCodeEndpointMissingData, false},
 
-		// Node-health family — retryable (server-side).
-		{"-32006 node too behind", -32006, "Node too far behind", common.ErrCodeEndpointServerSideException, false},
+		// Node-health family — retryable (server-side), except -32006 which is
+		// client-side (the request cannot succeed on any upstream in this state).
+		{"-32006 node too behind", -32006, "Node too far behind", common.ErrCodeEndpointClientSideException, true},
 		{"-32015 node timeout", -32015, "RPC node timeout", common.ErrCodeEndpointServerSideException, false},
 		{"-32016 min context slot", -32016, "Min context slot not reached", common.ErrCodeEndpointServerSideException, false},
 
@@ -115,10 +116,9 @@ func TestExtract_AllMappedCodes(t *testing.T) {
 		// Internal error (retryable).
 		{"-32603 internal error", -32603, "Internal server error", common.ErrCodeEndpointServerSideException, false},
 
-		// -32000 disambiguation by message text. ExecutionException carries
-		// retryableTowardNetwork:false by construction in common/errors.go —
-		// preflight/blockhash failures must never replay against a second upstream.
-		{"-32000 blockhash not found → execution", -32000, "Blockhash not found in recent list", common.ErrCodeEndpointExecutionException, true},
+		// -32000 disambiguation by message text. Preflight/blockhash failures are
+		// client-side (invalid tx state) with retryableTowardNetwork:false.
+		{"-32000 blockhash not found → execution", -32000, "Blockhash not found in recent list", common.ErrCodeEndpointClientSideException, true},
 		{"-32000 invalid signature → client-side", -32000, "Invalid signature on tx", common.ErrCodeEndpointClientSideException, true},
 		{"-32000 generic → server-side", -32000, "something unexpected happened", common.ErrCodeEndpointServerSideException, false},
 
