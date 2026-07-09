@@ -1559,7 +1559,14 @@ func (r *NormalizedRequest) MarkUpstreamCompleted(ctx context.Context, upstream 
 	// stay consumed. The ErrorsByUpstream gate in NextUpstream provides
 	// additional within-round protection for those.
 	isEmptyResult := hasResponse && err == nil && resp != nil && resp.IsResultEmptyish(ctx)
-	canReUse := !hasResponse || (err != nil && IsRetryableTowardsUpstream(err)) || isEmptyResult
+	inConsensus := false
+	if st := r.ExecState(); st != nil {
+		inConsensus = st.ConsensusSlots.Load() > 0
+	}
+	// In consensus mode, do not release empty-result upstreams: concurrent slots share
+	// ConsumedUpstreams, and releasing an upstream lets another slot re-select it,
+	// producing duplicate participants that break minAgreement composition checks.
+	canReUse := !hasResponse || (err != nil && IsRetryableTowardsUpstream(err)) || (isEmptyResult && !inConsensus)
 	if canReUse {
 		r.ConsumedUpstreams.Delete(upstream)
 	}

@@ -281,6 +281,46 @@ func TestUpstreamSelection_MissingDataError_DontBlockReselection(t *testing.T) {
 	t.Logf("re-selected upstream: %s", reselected.Id())
 }
 
+// TestUpstreamSelection_EmptyResponse_ConsensusMode_NoReselection verifies that in
+// consensus mode an upstream that returned an empty result is NOT released back into
+// ConsumedUpstreams, preventing concurrent slots from re-selecting the same upstream
+// and producing duplicate participants that break minAgreement composition checks.
+func TestUpstreamSelection_EmptyResponse_ConsensusMode_NoReselection(t *testing.T) {
+	ctx := context.Background()
+	req := NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_getLogs"}`))
+
+	up1 := newMockUpstream("quicknode")
+	up2 := newMockUpstream("alchemy")
+	req.SetUpstreams([]Upstream{up1, up2})
+
+	// Simulate consensus mode: ConsensusSlots > 0.
+	req.ExecState().ConsensusSlots.Add(2)
+
+	// Slot 1 selects quicknode and completes with an empty result.
+	selected1, err := req.NextUpstream()
+	if err != nil {
+		t.Fatalf("first NextUpstream should succeed: %v", err)
+	}
+	emptyResp := createEmptyNormalizedResponse(t)
+	req.MarkUpstreamCompleted(ctx, selected1, emptyResp, nil)
+
+	// Slot 2 should get alchemy, not quicknode again.
+	selected2, err := req.NextUpstream()
+	if err != nil {
+		t.Fatalf("second NextUpstream should succeed: %v", err)
+	}
+	if selected2.Id() == selected1.Id() {
+		t.Fatalf("in consensus mode, upstream %q must not be re-selected after returning empty; got duplicate", selected1.Id())
+	}
+
+	// After both slots are done, no further upstream should be available.
+	req.MarkUpstreamCompleted(ctx, selected2, emptyResp, nil)
+	_, err = req.NextUpstream()
+	if err == nil {
+		t.Fatal("expected ErrNoUpstreamsLeftToSelect after all consensus slots consumed, but got nil")
+	}
+}
+
 func createEmptyNormalizedResponse(t *testing.T) *NormalizedResponse {
 	t.Helper()
 	jrr, err := NewJsonRpcResponse(1, nil, nil)
