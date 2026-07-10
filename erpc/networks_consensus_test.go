@@ -41,6 +41,7 @@ type consensusTestCase struct {
 	setupFn              func(t *testing.T, ctx context.Context, reg *upstream.UpstreamsRegistry)
 	requestMethod        string
 	requestParams        []interface{}
+	requestDirectives    *common.RequestDirectives
 }
 
 type mockResponse struct {
@@ -1243,6 +1244,30 @@ func TestConsensusPolicy(t *testing.T) {
 				PreferNonEmpty:          &common.TRUE,
 				PreferLargerResponses:   &common.FALSE,
 			},
+			mockResponses: []mockResponse{
+				{status: 200, body: jsonRpcSuccess(nil)},
+				{status: 200, body: jsonRpcSuccess(nil)},
+				{status: 200, body: jsonRpcSuccess(nil)},
+			},
+			expectedCalls:  []int{1, 1, 1},
+			expectedResult: &expectedResult{jsonRpcResult: "null"},
+		},
+		{
+			name:        "all_null_receipts_with_retry_pending_returns_null_not_exhausted",
+			description: "Regression for erpc#979: RetryPending + maxAttempts:2 must not exhaust the upstream pool when all upstreams return null for eth_getTransactionReceipt",
+			upstreams:   createTestUpstreams(3),
+			consensusConfig: &common.ConsensusPolicyConfig{
+				MaxParticipants:         3,
+				AgreementThreshold:      2,
+				DisputeBehavior:         common.ConsensusDisputeBehaviorAcceptMostCommonValidResult,
+				LowParticipantsBehavior: common.ConsensusLowParticipantsBehaviorAcceptMostCommonValidResult,
+				PreferNonEmpty:          &common.TRUE,
+				PreferLargerResponses:   &common.FALSE,
+			},
+			retryPolicy: &common.RetryPolicyConfig{MaxAttempts: 2},
+			requestMethod: "eth_getTransactionReceipt",
+			requestParams: []interface{}{"0xabc123def456abc123def456abc123def456abc123def456abc123def456abc123"},
+			requestDirectives: &common.RequestDirectives{RetryPending: true},
 			mockResponses: []mockResponse{
 				{status: 200, body: jsonRpcSuccess(nil)},
 				{status: 200, body: jsonRpcSuccess(nil)},
@@ -2890,6 +2915,9 @@ func runConsensusTest(t *testing.T, tc consensusTestCase) {
 	require.NoError(t, err)
 	fakeReq := common.NewNormalizedRequest(reqBytes)
 	fakeReq.SetNetwork(ntw)
+	if tc.requestDirectives != nil {
+		fakeReq.SetDirectives(tc.requestDirectives)
+	}
 
 	// Execute and get result
 	start := time.Now()

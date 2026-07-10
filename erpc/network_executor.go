@@ -355,6 +355,17 @@ func (e *networkExecutor) shouldRetry(req *common.NormalizedRequest, resp *commo
 	return e.shouldRetryWithReason(req, resp, err, attempt) != ""
 }
 
+// inConsensusSlot reports whether req is executing inside a consensus round.
+// Data-unavailability responses are valid participant votes in consensus —
+// retrying within the slot burns shared pool upstreams and causes ErrUpstreamsExhausted.
+func inConsensusSlot(req *common.NormalizedRequest) bool {
+	if req == nil {
+		return false
+	}
+	st := req.ExecState()
+	return st != nil && st.ConsensusSlots.Load() > 0
+}
+
 // dataUnavailableCapReached reports whether the EmptyResultMaxAttempts cap — the
 // single bound on retries when the requested data simply isn't on the upstream yet
 // (empty/missing-data point-lookups, pending tx-lookups, and
@@ -428,7 +439,7 @@ func (e *networkExecutor) shouldRetryWithReason(req *common.NormalizedRequest, r
 	if rds != nil && rds.RetryEmpty {
 		if resp.IsResultEmptyish() {
 			// Respect the shared "data not available yet" cap.
-			if e.dataUnavailableCapReached(attempt) {
+			if e.dataUnavailableCapReached(attempt) || inConsensusSlot(req) {
 				return ""
 			}
 			// If the method is in the empty-result-accept list, treat empty as valid.
@@ -452,7 +463,7 @@ func (e *networkExecutor) shouldRetryWithReason(req *common.NormalizedRequest, r
 			"eth_getTransactionByHash",
 			"eth_getTransactionByBlockHashAndIndex",
 			"eth_getTransactionByBlockNumberAndIndex":
-			if e.dataUnavailableCapReached(attempt) {
+			if e.dataUnavailableCapReached(attempt) || inConsensusSlot(req) {
 				return ""
 			}
 			return "pending_tx"
