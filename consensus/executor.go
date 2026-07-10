@@ -1438,12 +1438,12 @@ func (e *executor) recordMetricsAndTracing(req *common.NormalizedRequest, startT
 
 	outcome := "success"
 	if result.Error != nil {
-		if isCompositionDispute(result.Error) {
-			// Composition disputes fire after a group reaches agreementThreshold,
-			// so hasConsensus would be true — check this before hasConsensus.
-			outcome = "dispute_composition"
-		} else if hasConsensus {
-			outcome = "consensus_on_error"
+		if hasConsensus {
+			if isCompositionDispute(result.Error) {
+				outcome = "dispute_composition"
+			} else {
+				outcome = "consensus_on_error"
+			}
 		} else if isDispute {
 			outcome = "dispute"
 		} else if isLowParticipants {
