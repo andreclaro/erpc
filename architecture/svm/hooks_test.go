@@ -656,6 +656,37 @@ func TestNetworkPostForward_GetSlot_FromCachePreserved(t *testing.T) {
 	}
 }
 
+// TestNetworkPostForward_GetSlot_FinalizedCommitment_NotUpgraded verifies that
+// getSlot responses with commitment:finalized are never overridden with the
+// (processed-tier) latestSlot tip. Returning the cached tip here would cause
+// getBlock(slot, finalized) to fail with -32004 immediately after.
+func TestNetworkPostForward_GetSlot_FinalizedCommitment_NotUpgraded(t *testing.T) {
+	t.Parallel()
+	net := &fakeNetwork{cfg: &common.NetworkConfig{
+		Architecture: common.ArchitectureSvm,
+		Svm:          &common.SvmNetworkConfig{Commitment: "finalized"},
+	}, latestSlot: 12345678}
+
+	// Request with explicit commitment:finalized in params.
+	body := `{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[{"commitment":"finalized"}]}`
+	req := common.NewNormalizedRequest([]byte(body))
+	jrr, err := common.NewJsonRpcResponseFromBytes(nil, []byte("12340000"), nil)
+	if err != nil {
+		t.Fatalf("build response: %v", err)
+	}
+	resp := common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr)
+
+	got, err := networkPostForward_getSlot(context.Background(), net, req, resp, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Must NOT be upgraded to latestSlot (12345678); the upstream's finalized
+	// slot (12340000) is the source of truth.
+	if got != resp {
+		t.Fatalf("finalized-commitment response must be returned unchanged; got slot %d", readSlot(t, got))
+	}
+}
+
 func TestHandleNetworkPostForward_DispatchesGetSlotAndGetBlockHeight(t *testing.T) {
 	t.Parallel()
 	net := &fakeNetwork{cfg: &common.NetworkConfig{Architecture: common.ArchitectureSvm}, latestSlot: 99999}
