@@ -322,6 +322,9 @@ var consensusRules = []consensusRule{
 				if winner.ResponseType == ResponseTypeConsensusError {
 					return &slotResult{Error: winner.FirstError}
 				}
+				if winner.LargestResult == nil {
+					return &slotResult{Error: winner.FirstError}
+				}
 				return &slotResult{Result: winner.LargestResult}
 			case minAgreementCompositionDispute:
 				return &slotResult{

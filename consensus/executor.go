@@ -162,7 +162,7 @@ func (e *executor) Run(
 		consensusSpan,
 	)
 	if out == nil {
-		return nil, nil
+		return nil, common.NewErrConsensusDispute("consensus produced no winner", nil, nil)
 	}
 	return out.Result, out.Error
 }
