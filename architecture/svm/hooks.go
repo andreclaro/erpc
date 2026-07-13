@@ -515,7 +515,14 @@ func networkPostForward_getSlot(ctx context.Context, network common.Network, nq 
 	commitment, _, _ := resolveCommitment(ctx, network, nq)
 	var highestSlot int64
 	if commitment == "finalized" {
-		highestSlot = svmNet.SvmHighestFinalizedSlot(reqCtx)
+		// Back off by one finalization epoch (~32 slots, ~13s) before enforcing.
+		// getSlot(finalized) returns the consensus-layer tip, but RPC nodes may not
+		// have indexed the block data yet — getBlock on a just-finalized slot returns
+		// -32004 until the node writes the block to storage. The lag ensures we only
+		// enforce against slots that are accessible, while still correcting cache
+		// entries that are thousands of slots stale (the original problem).
+		const finalizedIndexingLag = 32
+		highestSlot = svmNet.SvmHighestFinalizedSlot(reqCtx) - finalizedIndexingLag
 	} else {
 		highestSlot = svmNet.SvmHighestLatestSlot(reqCtx)
 	}
