@@ -1220,6 +1220,11 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 			if skipErr, isRetryable := n.checkUpstreamBlockAvailability(loopCtx, u, effectiveReq, method); skipErr != nil {
 				n.handleBlockSkip(loopCtx, loopSpan, &ulg, u, effectiveReq, method, skipErr, isRetryable)
 				loopSpan.End()
+				// ponytail: block skips don't count as the one upstream call for consensus slots —
+				// a skipped internal upstream must not prevent the slot from calling an external one.
+				if oneUpstreamOnly {
+					loopIteration--
+				}
 				continue
 			}
 
