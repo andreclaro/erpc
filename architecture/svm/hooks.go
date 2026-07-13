@@ -502,22 +502,23 @@ func networkPostForward_getSlot(ctx context.Context, network common.Network, nq 
 		return nr, re
 	}
 
-	// For finalized-commitment requests, the upstream's response is already the
-	// source of truth — finalization is irreversible and the value never goes
-	// backward. Overriding it with a cached tip can return a slot whose block
-	// data is not yet accessible, causing getBlock(commitment:finalized) to
-	// receive -32004 immediately after.
-	commitment, _, _ := resolveCommitment(ctx, network, nq)
-	if commitment == "finalized" {
-		return nr, re
-	}
-
 	svmNet, ok := network.(common.SvmNetwork)
 	if !ok {
 		return nr, re
 	}
 	reqCtx := context.WithValue(ctx, common.RequestContextKey, nq)
-	highestSlot := svmNet.SvmHighestLatestSlot(reqCtx)
+
+	// For finalized commitment use the finalized tip as the reference, not the
+	// processed tip. Using the processed tip (~32 slots ahead) would override
+	// finalized responses with a slot whose block is not yet finalized, causing
+	// an immediate -32004 on the subsequent getBlock(commitment:finalized) call.
+	commitment, _, _ := resolveCommitment(ctx, network, nq)
+	var highestSlot int64
+	if commitment == "finalized" {
+		highestSlot = svmNet.SvmHighestFinalizedSlot(reqCtx)
+	} else {
+		highestSlot = svmNet.SvmHighestLatestSlot(reqCtx)
+	}
 	if highestSlot <= slotNumber {
 		return nr, re
 	}

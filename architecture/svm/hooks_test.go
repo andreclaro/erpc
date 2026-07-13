@@ -656,20 +656,22 @@ func TestNetworkPostForward_GetSlot_FromCachePreserved(t *testing.T) {
 	}
 }
 
-// TestNetworkPostForward_GetSlot_FinalizedCommitment_NotUpgraded verifies that
-// getSlot responses with commitment:finalized are never overridden with the
-// (processed-tier) latestSlot tip. Returning the cached tip here would cause
-// getBlock(slot, finalized) to fail with -32004 immediately after.
-func TestNetworkPostForward_GetSlot_FinalizedCommitment_NotUpgraded(t *testing.T) {
+// TestNetworkPostForward_GetSlot_FinalizedCommitment_UsesFinalizeTip verifies
+// that getSlot(finalized) is enforced against the finalized tip (not the
+// processed tip). Using the processed tip would cause getBlock(slot, finalized)
+// to fail with -32004 for the ~32 slots that are processed but not yet finalized.
+func TestNetworkPostForward_GetSlot_FinalizedCommitment_UsesFinalizeTip(t *testing.T) {
 	t.Parallel()
+	// latestSlot (processed) is ahead of finalizedSlot by ~32 slots; only
+	// finalizedSlot should be used as the enforcement reference.
 	net := &fakeNetwork{cfg: &common.NetworkConfig{
 		Architecture: common.ArchitectureSvm,
 		Svm:          &common.SvmNetworkConfig{Commitment: "finalized"},
-	}, latestSlot: 12345678}
+	}, latestSlot: 12345678, finalizedSlot: 12345000}
 
-	// Request with explicit commitment:finalized in params.
 	body := `{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[{"commitment":"finalized"}]}`
 	req := common.NewNormalizedRequest([]byte(body))
+	// Upstream returned a stale finalized slot (below the known finalized tip).
 	jrr, err := common.NewJsonRpcResponseFromBytes(nil, []byte("12340000"), nil)
 	if err != nil {
 		t.Fatalf("build response: %v", err)
@@ -680,10 +682,37 @@ func TestNetworkPostForward_GetSlot_FinalizedCommitment_NotUpgraded(t *testing.T
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Must NOT be upgraded to latestSlot (12345678); the upstream's finalized
-	// slot (12340000) is the source of truth.
+	// Must be upgraded to finalizedSlot (12345000), not latestSlot (12345678).
+	if slot := readSlot(t, got); slot != 12345000 {
+		t.Fatalf("expected finalized tip 12345000, got %d", slot)
+	}
+}
+
+// TestNetworkPostForward_GetSlot_FinalizedCommitment_NoOverrideWhenCurrent
+// verifies that a finalized response equal to or ahead of the known finalized
+// tip is returned unchanged.
+func TestNetworkPostForward_GetSlot_FinalizedCommitment_NoOverrideWhenCurrent(t *testing.T) {
+	t.Parallel()
+	net := &fakeNetwork{cfg: &common.NetworkConfig{
+		Architecture: common.ArchitectureSvm,
+		Svm:          &common.SvmNetworkConfig{Commitment: "finalized"},
+	}, latestSlot: 12345678, finalizedSlot: 12345000}
+
+	body := `{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[{"commitment":"finalized"}]}`
+	req := common.NewNormalizedRequest([]byte(body))
+	// Upstream returned the current finalized slot — no override needed.
+	jrr, err := common.NewJsonRpcResponseFromBytes(nil, []byte("12345000"), nil)
+	if err != nil {
+		t.Fatalf("build response: %v", err)
+	}
+	resp := common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr)
+
+	got, err := networkPostForward_getSlot(context.Background(), net, req, resp, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got != resp {
-		t.Fatalf("finalized-commitment response must be returned unchanged; got slot %d", readSlot(t, got))
+		t.Fatalf("up-to-date finalized response must be returned unchanged; got slot %d", readSlot(t, got))
 	}
 }
 

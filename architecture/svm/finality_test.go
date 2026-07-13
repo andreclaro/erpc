@@ -13,8 +13,9 @@ import (
 // paths touch. EVM accessors don't need to be implemented anymore — they're
 // behind common.EvmNetwork, which this type deliberately does not satisfy.
 type fakeNetwork struct {
-	cfg        *common.NetworkConfig
-	latestSlot int64
+	cfg           *common.NetworkConfig
+	latestSlot    int64
+	finalizedSlot int64
 }
 
 func (f *fakeNetwork) Id() string                                   { return "svm:mainnet-beta" }
@@ -25,7 +26,7 @@ func (f *fakeNetwork) Config() *common.NetworkConfig                { return f.c
 func (f *fakeNetwork) Logger() *zerolog.Logger                      { l := zerolog.Nop(); return &l }
 func (f *fakeNetwork) GetMethodMetrics(string) common.TrackedMetrics { return nil }
 func (f *fakeNetwork) SvmHighestLatestSlot(context.Context) int64    { return f.latestSlot }
-func (f *fakeNetwork) SvmHighestFinalizedSlot(context.Context) int64 { return 0 }
+func (f *fakeNetwork) SvmHighestFinalizedSlot(context.Context) int64 { return f.finalizedSlot }
 func (f *fakeNetwork) Forward(context.Context, *common.NormalizedRequest) (*common.NormalizedResponse, error) {
 	return nil, nil
 }
