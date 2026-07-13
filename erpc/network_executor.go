@@ -399,7 +399,7 @@ func (e *networkExecutor) shouldRetryWithReason(req *common.NormalizedRequest, r
 			return ""
 		}
 		if common.HasErrorCode(err, common.ErrCodeUpstreamBlockUnavailable) {
-			if e.dataUnavailableCapReached(attempt) {
+			if e.dataUnavailableCapReached(attempt) || inConsensusSlot(req) {
 				return ""
 			}
 			return "block_unavailable"
