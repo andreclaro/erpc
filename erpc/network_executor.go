@@ -535,13 +535,6 @@ func (e *networkExecutor) runHedge(
 	if req != nil && req.IsCompositeRequest() {
 		return inner(ctx, req)
 	}
-	// Hedging inside a consensus slot races all hedges against the shared
-	// upstream pool simultaneously — same pool exhaustion as unbounded retries.
-	// The multi-slot fan-out already provides the concurrency hedge adds outside
-	// consensus; skip it here to keep each slot to one upstream call.
-	if inConsensusSlot(req) {
-		return inner(ctx, req)
-	}
 	// Write methods are not safe to hedge (non-idempotent broadcasts cause
 	// duplicate side-effects). eth_sendRawTransaction has its own consensus
 	// fan-out elsewhere.
