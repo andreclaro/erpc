@@ -412,6 +412,19 @@ func classifyAndHashResponse(r *execResult, ctx context.Context, config *config)
 		// HasErrorCode traversal would find those foreign errors and misclassify this
 		// as a consensus-valid response, creating phantom voting groups.
 		if common.HasErrorCode(r.Err, common.ErrCodeUpstreamsExhausted) {
+			// Exception: when every cause is ErrEndpointMissingData, the slot exhausted
+			// retries on null (e.g. eth_getTransactionReceipt for a pending tx). That is
+			// a valid "not found" vote — treat it as empty so it counts toward quorum
+			// alongside slots that returned null on the first try.
+			var exhausted *common.ErrUpstreamsExhausted
+			if errors.As(r.Err, &exhausted) {
+				if causes := exhausted.Errors(); len(causes) > 0 && allMissingData(causes) {
+					r.CachedResponseType = ResponseTypeEmpty
+					r.CachedHash = "empty:missing_data"
+					r.CachedResponseSize = 0
+					return
+				}
+			}
 			r.CachedResponseType = ResponseTypeInfrastructureError
 			r.CachedHash = "error:exhausted"
 			r.CachedResponseSize = 0
@@ -457,6 +470,16 @@ func classifyAndHashResponse(r *execResult, ctx context.Context, config *config)
 		r.CachedResponseType = ResponseTypeInfrastructureError
 		r.CachedHash = "error:generic"
 	}
+}
+
+// allMissingData reports whether every error in the slice has ErrCodeEndpointMissingData.
+func allMissingData(errs []error) bool {
+	for _, e := range errs {
+		if !common.HasErrorCode(e, common.ErrCodeEndpointMissingData) {
+			return false
+		}
+	}
+	return true
 }
 
 // resultOrErrorToHash computes a hash for a result, considering both success and error cases.

@@ -1432,7 +1432,7 @@ func (e *executor) recordMetricsAndTracing(req *common.NormalizedRequest, startT
 
 	// Determine if consensus was achieved based on the highest count group
 	best := analysis.getBestByCount()
-	hasConsensus := best != nil && best.Count >= e.agreementThreshold
+	hasConsensus := best != nil && best.Count >= e.agreementThreshold && best.ResponseType != ResponseTypeInfrastructureError
 	isLowParticipants := analysis.isLowParticipants(e.agreementThreshold)
 	isDispute := !hasConsensus && !isLowParticipants
 
