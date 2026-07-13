@@ -2,6 +2,7 @@ package svm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -570,5 +571,103 @@ func TestHandleUpstreamPostForward_NonSendTransaction_Unchanged(t *testing.T) {
 	_, err := h.HandleUpstreamPostForward(context.Background(), net, nil, req, nil, upstreamErr, false)
 	if err != upstreamErr {
 		t.Fatalf("non-sendTx error must pass through unchanged, got %v", err)
+	}
+}
+
+func slotResponse(t *testing.T, method string, slot int64) (*common.NormalizedRequest, *common.NormalizedResponse) {
+	t.Helper()
+	body := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":%q,"params":[]}`, method)
+	req := common.NewNormalizedRequest([]byte(body))
+	jrr, err := common.NewJsonRpcResponseFromBytes(nil, []byte(fmt.Sprintf("%d", slot)), nil)
+	if err != nil {
+		t.Fatalf("build slot response: %v", err)
+	}
+	return req, common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr)
+}
+
+func readSlot(t *testing.T, resp *common.NormalizedResponse) int64 {
+	t.Helper()
+	jrr, err := resp.JsonRpcResponse()
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	var slot int64
+	if err := json.Unmarshal(jrr.GetResultBytes(), &slot); err != nil {
+		t.Fatalf("unmarshal slot: %v", err)
+	}
+	return slot
+}
+
+func TestNetworkPostForward_GetSlot_UpgradesStaleResponse(t *testing.T) {
+	t.Parallel()
+	net := &fakeNetwork{cfg: &common.NetworkConfig{Architecture: common.ArchitectureSvm}, latestSlot: 12345678}
+	req, resp := slotResponse(t, "getSlot", 12340000)
+
+	got, err := networkPostForward_getSlot(context.Background(), net, req, resp, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if slot := readSlot(t, got); slot != 12345678 {
+		t.Fatalf("expected upgraded slot 12345678, got %d", slot)
+	}
+}
+
+func TestNetworkPostForward_GetSlot_AlreadyAtTip_Unchanged(t *testing.T) {
+	t.Parallel()
+	net := &fakeNetwork{cfg: &common.NetworkConfig{Architecture: common.ArchitectureSvm}, latestSlot: 12340000}
+	req, resp := slotResponse(t, "getSlot", 12340000)
+
+	got, err := networkPostForward_getSlot(context.Background(), net, req, resp, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != resp {
+		t.Fatal("response at tip must be returned unchanged (same pointer)")
+	}
+}
+
+func TestNetworkPostForward_GetSlot_ErrorPassthrough(t *testing.T) {
+	t.Parallel()
+	net := &fakeNetwork{cfg: &common.NetworkConfig{Architecture: common.ArchitectureSvm}, latestSlot: 9999}
+	req, _ := slotResponse(t, "getSlot", 0)
+	upstreamErr := common.NewErrEndpointServerSideException(nil, nil, 500)
+
+	got, err := networkPostForward_getSlot(context.Background(), net, req, nil, upstreamErr)
+	if err != upstreamErr {
+		t.Fatalf("error must pass through unchanged, got %v", err)
+	}
+	if got != nil {
+		t.Fatal("resp must be nil when error present")
+	}
+}
+
+func TestNetworkPostForward_GetSlot_FromCachePreserved(t *testing.T) {
+	t.Parallel()
+	net := &fakeNetwork{cfg: &common.NetworkConfig{Architecture: common.ArchitectureSvm}, latestSlot: 12345678}
+	req, resp := slotResponse(t, "getSlot", 12340000)
+	resp.WithFromCache(true)
+
+	got, err := networkPostForward_getSlot(context.Background(), net, req, resp, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !got.FromCache() {
+		t.Fatal("corrected response must preserve FromCache=true")
+	}
+}
+
+func TestHandleNetworkPostForward_DispatchesGetSlotAndGetBlockHeight(t *testing.T) {
+	t.Parallel()
+	net := &fakeNetwork{cfg: &common.NetworkConfig{Architecture: common.ArchitectureSvm}, latestSlot: 99999}
+	h := &SvmArchitectureHandler{}
+	for _, method := range []string{"getSlot", "getBlockHeight", "GETSLOT", "GetBlockHeight"} {
+		req, resp := slotResponse(t, method, 12345)
+		got, err := h.HandleNetworkPostForward(context.Background(), net, req, resp, nil)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", method, err)
+		}
+		if slot := readSlot(t, got); slot != 99999 {
+			t.Fatalf("%s: expected upgraded slot 99999, got %d", method, slot)
+		}
 	}
 }

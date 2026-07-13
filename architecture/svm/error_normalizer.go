@@ -123,13 +123,26 @@ func (e *JsonRpcErrorExtractor) Extract(
 			common.NewErrJsonRpcExceptionInternal(code, common.JsonRpcErrorUnsupportedException, msg, nil, details),
 		)
 
-	// --- Missing data (retryable across upstreams) ----------------------------
-	case svmCodeBlockNotAvailable, svmCodeSlotSkipped, svmCodeNoSnapshot,
-		svmCodeLongTermStorageSlot, svmCodeBlockStatusNotAvail:
+	// --- Missing data — transient (retryable: block/slot not yet propagated) -
+	case svmCodeBlockNotAvailable, svmCodeNoSnapshot, svmCodeBlockStatusNotAvail:
 		return common.NewErrEndpointMissingData(
 			common.NewErrJsonRpcExceptionInternal(code, common.JsonRpcErrorMissingData, msg, nil, details),
 			upstream,
 		)
+
+	// --- Missing data — permanent (slot gone after snapshot jump) -------------
+	// Use the raw Solana code as normalizedCode so callers receive -32007/-32009
+	// on the wire instead of -32014 ("block status not available yet" = transient).
+	// Mark non-retryable: cycling upstreams wastes quota — snapshot jumps are global.
+	case svmCodeSlotSkipped, svmCodeLongTermStorageSlot:
+		md := common.NewErrEndpointMissingData(
+			common.NewErrJsonRpcExceptionInternal(code, common.JsonRpcErrorNumber(code), msg, nil, details),
+			upstream,
+		)
+		if re, ok := md.(common.RetryableError); ok {
+			re.WithRetryableTowardNetwork(false)
+		}
+		return md
 
 	// --- Node health issues (failover, but treat as server-side) --------------
 	// svmCodeNodeTooBehind (-32006) is TransactionPrecompileVerificationFailure in

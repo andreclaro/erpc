@@ -59,6 +59,17 @@ func (h *SvmArchitectureHandler) HandleNetworkPreForward(ctx context.Context, ne
 }
 
 func (h *SvmArchitectureHandler) HandleNetworkPostForward(ctx context.Context, network common.Network, req *common.NormalizedRequest, resp *common.NormalizedResponse, err error) (*common.NormalizedResponse, error) {
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	method, mErr := req.Method()
+	if mErr != nil {
+		return resp, err
+	}
+	switch strings.ToLower(method) {
+	case "getslot", "getblockheight":
+		return networkPostForward_getSlot(ctx, network, req, resp, err)
+	}
 	return resp, err
 }
 

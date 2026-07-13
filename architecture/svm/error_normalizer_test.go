@@ -2,6 +2,7 @@ package svm
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -93,11 +94,11 @@ func TestExtract_AllMappedCodes(t *testing.T) {
 		wantErrCode common.ErrorCode
 		nonRetry    bool // true if retryableTowardNetwork:false must be set
 	}{
-		// Missing-data family — retryable across upstreams.
+		// Missing-data family — transient are retryable, permanent are not.
 		{"-32004 block not available", -32004, "Block not available", common.ErrCodeEndpointMissingData, false},
-		{"-32007 slot skipped", -32007, "Slot was skipped", common.ErrCodeEndpointMissingData, false},
+		{"-32007 slot skipped", -32007, "Slot was skipped", common.ErrCodeEndpointMissingData, true},
 		{"-32008 no snapshot", -32008, "No snapshot available", common.ErrCodeEndpointMissingData, false},
-		{"-32009 long-term storage slot", -32009, "Long-term storage slot not reachable", common.ErrCodeEndpointMissingData, false},
+		{"-32009 long-term storage slot", -32009, "Long-term storage slot not reachable", common.ErrCodeEndpointMissingData, true},
 		{"-32014 block status not available", -32014, "Block status not available", common.ErrCodeEndpointMissingData, false},
 
 		// Node-health family — retryable (server-side), except -32006 which is
@@ -139,6 +140,60 @@ func TestExtract_AllMappedCodes(t *testing.T) {
 					tc.code, tc.msg, !common.IsRetryableTowardNetwork(err), tc.nonRetry)
 			}
 		})
+	}
+}
+
+func TestExtract_SlotSkipped_IsNonRetryableAndPreservesCode(t *testing.T) {
+	t.Parallel()
+	err := extract(t, -32007, "Slot 12345 was skipped", 200)
+	if !common.HasErrorCode(err, common.ErrCodeEndpointMissingData) {
+		t.Fatalf("expected ErrEndpointMissingData, got %T: %v", err, err)
+	}
+	if common.IsRetryableTowardNetwork(err) {
+		t.Fatal("-32007 (permanent) must be non-retryable toward network")
+	}
+	var jre *common.ErrJsonRpcExceptionInternal
+	if !errors.As(err, &jre) {
+		t.Fatalf("expected ErrJsonRpcExceptionInternal in chain, got %T", err)
+	}
+	if jre.NormalizedCode() != common.JsonRpcErrorNumber(-32007) {
+		t.Fatalf("wire code must be -32007, got %v", jre.NormalizedCode())
+	}
+}
+
+func TestExtract_LongTermStorage_IsNonRetryableAndPreservesCode(t *testing.T) {
+	t.Parallel()
+	err := extract(t, -32009, "Long-term storage slot not reachable", 200)
+	if !common.HasErrorCode(err, common.ErrCodeEndpointMissingData) {
+		t.Fatalf("expected ErrEndpointMissingData, got %T: %v", err, err)
+	}
+	if common.IsRetryableTowardNetwork(err) {
+		t.Fatal("-32009 (permanent) must be non-retryable toward network")
+	}
+	var jre *common.ErrJsonRpcExceptionInternal
+	if !errors.As(err, &jre) {
+		t.Fatalf("expected ErrJsonRpcExceptionInternal in chain, got %T", err)
+	}
+	if jre.NormalizedCode() != common.JsonRpcErrorNumber(-32009) {
+		t.Fatalf("wire code must be -32009, got %v", jre.NormalizedCode())
+	}
+}
+
+func TestExtract_BlockNotAvailable_IsRetryableAndNormalizesTo32014(t *testing.T) {
+	t.Parallel()
+	err := extract(t, -32004, "Block not available", 200)
+	if !common.HasErrorCode(err, common.ErrCodeEndpointMissingData) {
+		t.Fatalf("expected ErrEndpointMissingData, got %T: %v", err, err)
+	}
+	if !common.IsRetryableTowardNetwork(err) {
+		t.Fatal("-32004 (transient) must remain retryable toward network")
+	}
+	var jre *common.ErrJsonRpcExceptionInternal
+	if !errors.As(err, &jre) {
+		t.Fatalf("expected ErrJsonRpcExceptionInternal in chain, got %T", err)
+	}
+	if jre.NormalizedCode() != common.JsonRpcErrorMissingData {
+		t.Fatalf("wire code must be -32014 (JsonRpcErrorMissingData), got %v", jre.NormalizedCode())
 	}
 }
 

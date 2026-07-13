@@ -2,12 +2,16 @@ package svm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/erpc/erpc/common"
+	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // optionsAppend marks a method whose options object is always the trailing
@@ -466,4 +470,76 @@ func upstreamPostForward_sendTransaction(rs *common.NormalizedResponse, re error
 	}
 	wrapped := common.NewErrEndpointClientSideException(re).WithRetryableTowardNetwork(false)
 	return rs, wrapped
+}
+
+// networkPostForward_getSlot enforces the highest-known slot on every getSlot
+// and getBlockHeight response, including cache hits. When the upstream (or
+// cache) returns a slot below the majority tip already observed by this
+// instance, the response is replaced with the tip value — ensuring clients
+// never observe the slot number moving backwards through a cache window.
+//
+// Unlike EVM eth_blockNumber, SVM getSlot returns a bare integer (not hex) and
+// enforcement is unconditional (no EnforceHighestBlock directive gate needed).
+func networkPostForward_getSlot(ctx context.Context, network common.Network, nq *common.NormalizedRequest, nr *common.NormalizedResponse, re error) (*common.NormalizedResponse, error) {
+	if re != nil || nr == nil {
+		return nr, re
+	}
+
+	ctx, span := common.StartDetailSpan(ctx, "Network.PostForward.getSlot", trace.WithAttributes(
+		attribute.String("request.id", fmt.Sprintf("%v", nq.ID())),
+		attribute.String("network.id", network.Id()),
+	))
+	defer span.End()
+
+	jrr, err := nr.JsonRpcResponse(ctx)
+	if err != nil || jrr == nil || jrr.Error != nil {
+		common.SetTraceSpanError(span, err)
+		return nr, re
+	}
+
+	var slotNumber int64
+	if err := json.Unmarshal(jrr.GetResultBytes(), &slotNumber); err != nil || slotNumber <= 0 {
+		return nr, re
+	}
+
+	svmNet, ok := network.(common.SvmNetwork)
+	if !ok {
+		return nr, re
+	}
+	highestSlot := svmNet.SvmHighestLatestSlot(context.WithValue(ctx, common.RequestContextKey, nq))
+	if highestSlot <= slotNumber {
+		return nr, re
+	}
+
+	method, _ := nq.Method()
+	if ups := nr.Upstream(); ups != nil {
+		telemetry.MetricUpstreamStaleLatestBlock.WithLabelValues(
+			network.ProjectId(), ups.VendorName(), network.Label(), ups.Id(), method,
+		).Inc()
+		network.Logger().Debug().
+			Str("method", method).
+			Int64("knownHighestSlot", highestSlot).
+			Int64("responseSlot", slotNumber).
+			Str("upstreamId", ups.Id()).
+			Msg("upstream returned older slot than we know, falling back to highest known slot")
+	} else {
+		network.Logger().Debug().
+			Str("method", method).
+			Int64("knownHighestSlot", highestSlot).
+			Int64("responseSlot", slotNumber).
+			Bool("fromCache", nr.FromCache()).
+			Msg("response contains older slot than we know, falling back to highest known slot")
+	}
+
+	newJrr, err := common.NewJsonRpcResponse(nq.ID(), highestSlot, nil)
+	if err != nil {
+		common.SetTraceSpanError(span, err)
+		return nil, err
+	}
+	corrected := common.NewNormalizedResponse().WithRequest(nq).WithJsonRpcResponse(newJrr)
+	if nr.FromCache() {
+		corrected.WithFromCache(true)
+	}
+	nr.Release()
+	return corrected, nil
 }

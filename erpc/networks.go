@@ -678,25 +678,15 @@ func (n *Network) servedTip(
 	return pick.Tip
 }
 
-// SvmHighestLatestSlot walks the SVM state pollers of this network's
-// upstreams and returns the highest reported latest slot. Analogous to
-// EvmHighestLatestBlockNumber. Returns 0 for a non-SVM network or when no
-// upstream has reported a slot yet.
+// SvmHighestLatestSlot returns the majority-vote latest slot across SVM
+// upstreams. Uses evm.PickServedTip (floor(N/2)-th highest) so a single
+// fast/rogue upstream cannot inflate the served tip.
 func (n *Network) SvmHighestLatestSlot(ctx context.Context) int64 {
 	_, span := common.StartDetailSpan(ctx, "Network.SvmHighestLatestSlot")
 	defer span.End()
-	var max int64
-	for _, u := range n.upstreamsRegistry.GetNetworkUpstreams(ctx, n.networkId) {
-		sp := u.SvmStatePoller()
-		if sp == nil || sp.IsObjectNull() {
-			continue
-		}
-		if s := sp.LatestSlot(); s > max {
-			max = s
-		}
-	}
-	span.SetAttributes(attribute.Int64("highest_latest_slot", max))
-	return max
+	pick := evm.PickServedTip(n.gatherSvmTipInputs(ctx, false))
+	span.SetAttributes(attribute.Int64("highest_latest_slot", pick.Tip))
+	return pick.Tip
 }
 
 // SvmHighestFinalizedSlot is the finalized-slot counterpart. Used by the
@@ -704,18 +694,33 @@ func (n *Network) SvmHighestLatestSlot(ctx context.Context) int64 {
 func (n *Network) SvmHighestFinalizedSlot(ctx context.Context) int64 {
 	_, span := common.StartDetailSpan(ctx, "Network.SvmHighestFinalizedSlot")
 	defer span.End()
-	var max int64
-	for _, u := range n.upstreamsRegistry.GetNetworkUpstreams(ctx, n.networkId) {
+	pick := evm.PickServedTip(n.gatherSvmTipInputs(ctx, true))
+	span.SetAttributes(attribute.Int64("highest_finalized_slot", pick.Tip))
+	return pick.Tip
+}
+
+// gatherSvmTipInputs collects slot values from SVM state pollers for
+// majority-tip computation via evm.PickServedTip.
+func (n *Network) gatherSvmTipInputs(ctx context.Context, useFinalized bool) []evm.ServedTipInput {
+	upstreams := n.upstreamsRegistry.GetNetworkUpstreams(ctx, n.networkId)
+	out := make([]evm.ServedTipInput, 0, len(upstreams))
+	for _, u := range upstreams {
 		sp := u.SvmStatePoller()
 		if sp == nil || sp.IsObjectNull() {
 			continue
 		}
-		if s := sp.FinalizedSlot(); s > max {
-			max = s
+		var slot int64
+		if useFinalized {
+			slot = sp.FinalizedSlot()
+		} else {
+			slot = sp.LatestSlot()
 		}
+		if slot <= 0 {
+			continue
+		}
+		out = append(out, evm.ServedTipInput{UpstreamID: u.Id(), BlockNumber: slot})
 	}
-	span.SetAttributes(attribute.Int64("highest_finalized_slot", max))
-	return max
+	return out
 }
 
 // EvmHighestFinalizedBlockNumber is the finalized-axis sibling of
