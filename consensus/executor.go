@@ -165,34 +165,31 @@ func (e *executor) Run(
 		return nil, common.NewErrConsensusDispute("consensus produced no winner", nil, nil)
 	}
 	if out.Result == nil {
-		synthesizeNull := false
-		if out.Error == nil {
-			// Winner group was ResponseTypeEmpty but LargestResult was nil. This should not
-			// normally happen after the missing_data inConsensusSlot guard, but defend against
-			// it crashing the response writer.
-			synthesizeNull = true
-		} else if common.HasErrorCode(out.Error, common.ErrCodeEndpointMissingData) {
-			// Providers return a JSON-RPC error (e.g. -32000 "transaction not found") for
-			// tx-lookup methods when the tx is pending or unknown. Per the EVM RPC spec the
-			// correct response is {"result":null}, not an error. Only convert for these methods;
-			// for other methods ErrEndpointMissingData is a genuine error and must be propagated.
+		// Synthesize {"result":null} only for tx-lookup methods, regardless of whether
+		// the cause is ErrCodeEndpointMissingData (provider returned -32000) or a
+		// defense-in-depth nil-result/nil-error winner. EVM spec requires null for
+		// pending/unknown tx; for any other method a spec-violating null is worse than
+		// a dispute error, so return the latter.
+		if out.Error == nil || common.HasErrorCode(out.Error, common.ErrCodeEndpointMissingData) {
 			method, _ := originalReq.Method()
 			switch method {
 			case "eth_getTransactionReceipt",
 				"eth_getTransactionByHash",
 				"eth_getTransactionByBlockHashAndIndex",
 				"eth_getTransactionByBlockNumberAndIndex":
-				synthesizeNull = true
+				jrrReq, _ := originalReq.JsonRpcRequest()
+				var reqId interface{}
+				if jrrReq != nil {
+					reqId = jrrReq.ID
+				}
+				nullJrr := common.MustNewJsonRpcResponse(reqId, nil, nil)
+				return common.NewNormalizedResponse().WithJsonRpcResponse(nullJrr), nil
 			}
 		}
-		if synthesizeNull {
-			jrrReq, _ := originalReq.JsonRpcRequest()
-			var reqId interface{}
-			if jrrReq != nil {
-				reqId = jrrReq.ID
-			}
-			nullJrr := common.MustNewJsonRpcResponse(reqId, nil, nil)
-			return common.NewNormalizedResponse().WithJsonRpcResponse(nullJrr), nil
+		if out.Error == nil {
+			// Winner has no result and no error for a non-tx method — return a dispute
+			// rather than (nil, nil) which would crash the response writer.
+			return nil, common.NewErrConsensusDispute("consensus winner has no result and no error", nil, nil)
 		}
 	}
 	return out.Result, out.Error
