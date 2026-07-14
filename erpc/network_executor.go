@@ -399,7 +399,7 @@ func (e *networkExecutor) shouldRetryWithReason(req *common.NormalizedRequest, r
 			return ""
 		}
 		if common.HasErrorCode(err, common.ErrCodeUpstreamBlockUnavailable) {
-			if e.dataUnavailableCapReached(attempt) {
+			if e.dataUnavailableCapReached(attempt) || inConsensusSlot(req) {
 				return ""
 			}
 			return "block_unavailable"
@@ -414,7 +414,11 @@ func (e *networkExecutor) shouldRetryWithReason(req *common.NormalizedRequest, r
 					return ""
 				}
 			}
-			if e.dataUnavailableCapReached(attempt) {
+			// Inside a consensus slot the multi-slot fan-out already covers the
+			// "another upstream may have it" case. Retrying here races all slots
+			// against the shared upstream pool and can exhaust it, causing
+			// ErrUpstreamsExhausted instead of a clean null/empty vote.
+			if e.dataUnavailableCapReached(attempt) || inConsensusSlot(req) {
 				return ""
 			}
 			return "missing_data"

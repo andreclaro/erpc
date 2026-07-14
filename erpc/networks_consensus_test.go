@@ -1513,7 +1513,7 @@ func TestConsensusPolicy(t *testing.T) {
 		},
 		{
 			name:        "retry_on_error_and_success_on_next_upstream",
-			description: "Retry enabled; second upstream errors; first and third succeed, reaching 2/3 consensus. Retry policy retries the erroring upstream once (MaxAttempts:2).",
+			description: "Retry enabled; second upstream returns ErrEndpointMissingData; first and third succeed, reaching 2/3 consensus. Missing-data retry is suppressed inside consensus slots to prevent pool exhaustion.",
 			upstreams:   createTestUpstreams(3),
 			consensusConfig: &common.ConsensusPolicyConfig{
 				MaxParticipants:         3,
@@ -1531,7 +1531,7 @@ func TestConsensusPolicy(t *testing.T) {
 				{status: 200, body: jsonRpcError(-32000, "cannot query unfinalized data")},
 				{status: 200, body: jsonRpcSuccess("0x7a")},
 			},
-			expectedCalls: []int{1, 2, 1}, // upstream 2 is retried once due to MaxAttempts:2
+			expectedCalls: []int{1, 1, 1}, // upstream 2 is NOT retried: inConsensusSlot guard suppresses missing_data retry
 			expectedResult: &expectedResult{
 				jsonRpcResult: `"0x7a"`,
 			},

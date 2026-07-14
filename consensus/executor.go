@@ -164,6 +164,37 @@ func (e *executor) Run(
 	if out == nil {
 		return nil, common.NewErrConsensusDispute("consensus produced no winner", nil, nil)
 	}
+	if out.Result == nil {
+		synthesizeNull := false
+		if out.Error == nil {
+			// Winner group was ResponseTypeEmpty but LargestResult was nil. This should not
+			// normally happen after the missing_data inConsensusSlot guard, but defend against
+			// it crashing the response writer.
+			synthesizeNull = true
+		} else if common.HasErrorCode(out.Error, common.ErrCodeEndpointMissingData) {
+			// Providers return a JSON-RPC error (e.g. -32000 "transaction not found") for
+			// tx-lookup methods when the tx is pending or unknown. Per the EVM RPC spec the
+			// correct response is {"result":null}, not an error. Only convert for these methods;
+			// for other methods ErrEndpointMissingData is a genuine error and must be propagated.
+			method, _ := originalReq.Method()
+			switch method {
+			case "eth_getTransactionReceipt",
+				"eth_getTransactionByHash",
+				"eth_getTransactionByBlockHashAndIndex",
+				"eth_getTransactionByBlockNumberAndIndex":
+				synthesizeNull = true
+			}
+		}
+		if synthesizeNull {
+			jrrReq, _ := originalReq.JsonRpcRequest()
+			var reqId interface{}
+			if jrrReq != nil {
+				reqId = jrrReq.ID
+			}
+			nullJrr := common.MustNewJsonRpcResponse(reqId, nil, nil)
+			return common.NewNormalizedResponse().WithJsonRpcResponse(nullJrr), nil
+		}
+	}
 	return out.Result, out.Error
 }
 
