@@ -1294,6 +1294,19 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 				return nil, err
 			}
 
+			// Post-call block_unavailable in a consensus slot: mirror the pre-call block-skip
+			// fix (loopIteration-- on checkUpstreamBlockAvailability). The upstream passed the
+			// pre-call check but couldn't serve the block at call time; another upstream can.
+			// Don't count this iteration toward the one-upstream budget so the slot reaches
+			// a working upstream rather than exiting as an infra-error invalid participant.
+			if oneUpstreamOnly && common.HasErrorCode(err, common.ErrCodeUpstreamBlockUnavailable) {
+				lastErr = err
+				common.SetTraceSpanError(loopSpan, err)
+				loopSpan.End()
+				loopIteration--
+				continue
+			}
+
 			// Track best result and continue to next upstream.
 			if err != nil {
 				lastErr = err
