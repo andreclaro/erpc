@@ -492,15 +492,16 @@ func (i *Initializer) MarkTaskAsFailed(name string, err error) {
 func (i *Initializer) Stop(destroyFn func() error) error {
 	i.logger.Debug().Msg("stopping initializer")
 
-	i.tasksMu.Lock()
-	defer i.tasksMu.Unlock()
-
+	// Cancel and drain the auto-retry goroutine BEFORE acquiring tasksMu.
+	// autoRetryLoop calls attemptRemainingTasks which also acquires tasksMu;
+	// holding the lock while waiting on autoRetryWg would deadlock.
 	if cancel := i.cancelAutoRetry.Load(); cancel != nil {
 		cancel.(context.CancelFunc)()
 	}
-
-	// Wait for auto-retry goroutine to finish
 	i.autoRetryWg.Wait()
+
+	i.tasksMu.Lock()
+	defer i.tasksMu.Unlock()
 
 	// Now, wait for any tasks that might still be running to finish or fail.
 	waitCtx, waitCancel := context.WithTimeout(i.appCtx, i.conf.TaskTimeout+100*time.Millisecond)
