@@ -81,8 +81,18 @@ func newConsensusAnalysis(lg *zerolog.Logger, ctx context.Context, config *confi
 		}
 	}
 
-	// Classify, hash, and group all responses
+	// Classify, hash, and group all responses — deduplicate by upstream ID so
+	// a single upstream reselected via hedge/retry counts only once.
+	seenUpstreams := make(map[string]struct{}, len(responses))
 	for _, r := range responses {
+		if r.Upstream != nil {
+			id := r.Upstream.Id()
+			if _, already := seenUpstreams[id]; already {
+				continue
+			}
+			seenUpstreams[id] = struct{}{}
+		}
+
 		classifyAndHashResponse(r, ctx, config)
 
 		if r.CachedResponseType != ResponseTypeInfrastructureError {
