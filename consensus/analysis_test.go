@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -147,4 +148,63 @@ func TestConsensusWithExhaustedParticipants_StillReachesThreshold(t *testing.T) 
 		"must NOT return ErrConsensusDispute when 3/5 agree")
 	assert.True(t, common.HasErrorCode(winner.Error, common.ErrCodeEndpointExecutionException),
 		"winner should be the agreed-upon execution revert")
+}
+
+// TestClassifyAndHash_NullableMethod_HashAlignment verifies that an upstream
+// returning actual JSON null and slots exhausted with all-missing-data causes
+// both hash to "empty:missing_data" on nullable tx-lookup methods, so they form
+// a single consensus group instead of triggering false misbehavior detection.
+func TestClassifyAndHash_NullableMethod_HashAlignment(t *testing.T) {
+	req := common.NewNormalizedRequest([]byte(
+		`{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":["0xabc"]}`,
+	))
+	ctx := context.WithValue(context.Background(), common.RequestContextKey, req)
+
+	cfg := &config{}
+
+	// Upstream that returned actual JSON null (e.g. blockdaemon confirming tx not found).
+	nullJrr, _ := common.NewJsonRpcResponse(1, nil, nil)
+	actualNull := common.NewNormalizedResponse().WithJsonRpcResponse(nullJrr)
+	rActual := &execResult{Result: actualNull, Err: nil}
+	classifyAndHashResponse(rActual, ctx, cfg)
+
+	// Slot that exhausted with all-missing-data causes.
+	errMap := &sync.Map{}
+	errMap.Store("up-A", common.NewErrEndpointMissingData(
+		common.NewErrJsonRpcExceptionInternal(-32000, -32000, "tx not found", nil, nil), nil,
+	))
+	exhaustedErr := common.NewErrUpstreamsExhausted(
+		nil, errMap, "proj", "evm:11155111", "eth_getTransactionReceipt",
+		100*time.Millisecond, 1, 0, 0, 1,
+	)
+	rExhausted := &execResult{Result: nil, Err: exhaustedErr}
+	classifyAndHashResponse(rExhausted, ctx, cfg)
+
+	assert.Equal(t, ResponseTypeEmpty, rActual.CachedResponseType,
+		"actual null must be ResponseTypeEmpty")
+	assert.Equal(t, ResponseTypeEmpty, rExhausted.CachedResponseType,
+		"allMissingData exhausted must be ResponseTypeEmpty")
+	assert.Equal(t, "empty:missing_data", rActual.CachedHash,
+		"actual null on nullable method must use same hash as allMissingData")
+	assert.Equal(t, "empty:missing_data", rExhausted.CachedHash,
+		"allMissingData exhausted must use empty:missing_data hash")
+}
+
+// TestClassifyAndHash_NonNullableMethod_NullNotNormalized verifies that the hash
+// normalization does NOT apply to methods outside the nullable tx-lookup set,
+// so eth_call null results keep their real hash.
+func TestClassifyAndHash_NonNullableMethod_NullNotNormalized(t *testing.T) {
+	req := common.NewNormalizedRequest([]byte(
+		`{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[]}`,
+	))
+	ctx := context.WithValue(context.Background(), common.RequestContextKey, req)
+
+	nullJrr, _ := common.NewJsonRpcResponse(1, nil, nil)
+	actualNull := common.NewNormalizedResponse().WithJsonRpcResponse(nullJrr)
+	r := &execResult{Result: actualNull, Err: nil}
+	classifyAndHashResponse(r, ctx, &config{})
+
+	assert.Equal(t, ResponseTypeEmpty, r.CachedResponseType)
+	assert.NotEqual(t, "empty:missing_data", r.CachedHash,
+		"non-nullable methods must NOT get the normalized hash")
 }

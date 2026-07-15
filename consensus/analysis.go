@@ -464,6 +464,20 @@ func classifyAndHashResponse(r *execResult, ctx context.Context, config *config)
 	// Use NormalizedResponse-aware emptyish check to capture method-specific semantics (e.g., EVM logs)
 	if r.Result != nil && r.Result.IsResultEmptyish(ctx) {
 		r.CachedResponseType = ResponseTypeEmpty
+		// Normalize the hash for nullable tx-lookup methods so that an upstream returning
+		// actual JSON null lands in the same consensus group as slots that exhausted with
+		// all-missing-data causes. Without this alignment, a healthy upstream that returns
+		// {"result":null} hashes differently from exhausted slots ("empty:missing_data"),
+		// triggering false misbehavior detection against a correct upstream.
+		if req, ok := ctx.Value(common.RequestContextKey).(*common.NormalizedRequest); ok && req != nil {
+			if method, err := req.Method(); err == nil && isNullableTransactionMethod(method) {
+				if size, err := jr.Size(ctx); err == nil {
+					r.CachedResponseSize = size
+				}
+				r.CachedHash = "empty:missing_data"
+				return
+			}
+		}
 	} else {
 		r.CachedResponseType = ResponseTypeNonEmpty
 	}
