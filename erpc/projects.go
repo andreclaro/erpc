@@ -134,6 +134,26 @@ func (p *PreparedProject) Forward(ctx context.Context, networkId string, nq *com
 		Logger()
 
 	resp, err := p.doForward(ctx, network, nq)
+	// (nil, nil) bypasses the success branch (which requires resp != nil) and
+	// lands in the failure branch with err = nil, producing an empty error label
+	// and severity:info on erpc_network_failed_request_total. For nullable
+	// tx-lookup methods the EVM spec requires {"result":null}, so synthesize it
+	// here. For all other methods treat (nil, nil) as a dispute so the failure
+	// is at least observable with a labeled error in the metric.
+	if err == nil && resp == nil {
+		if common.IsNullableTransactionMethod(method) {
+			jrrReq, _ := nq.JsonRpcRequest()
+			var reqId interface{}
+			if jrrReq != nil {
+				reqId = jrrReq.ID
+			}
+			resp = common.NewNormalizedResponse().WithRequest(nq).WithJsonRpcResponse(
+				common.MustNewJsonRpcResponse(reqId, nil, nil),
+			)
+		} else {
+			err = common.NewErrConsensusDispute("forward returned nil response and nil error", nil, nil)
+		}
+	}
 
 	shadowUpstreams := network.ShadowUpstreams()
 	if len(shadowUpstreams) > 0 {

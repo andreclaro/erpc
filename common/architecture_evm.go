@@ -156,3 +156,16 @@ type EvmProbeEarliestInfo struct {
 	EarliestBlock    int64                    `json:"earliestBlock"`
 	SchedulerRunning bool                     `json:"schedulerRunning,omitempty"`
 }
+
+// IsNullableTransactionMethod reports whether the EVM spec allows a null result
+// for the given method (pending or unknown transaction lookups).
+func IsNullableTransactionMethod(method string) bool {
+	switch method {
+	case "eth_getTransactionReceipt",
+		"eth_getTransactionByHash",
+		"eth_getTransactionByBlockHashAndIndex",
+		"eth_getTransactionByBlockNumberAndIndex":
+		return true
+	}
+	return false
+}

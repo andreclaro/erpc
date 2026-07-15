@@ -1422,17 +1422,8 @@ func (e *executor) startConsensusSpan(ctx context.Context, labels metricsLabels)
 	)
 }
 
-// isNullableTransactionMethod reports whether the EVM spec allows a null result
-// for the given method (pending or unknown transaction lookups).
 func isNullableTransactionMethod(method string) bool {
-	switch method {
-	case "eth_getTransactionReceipt",
-		"eth_getTransactionByHash",
-		"eth_getTransactionByBlockHashAndIndex",
-		"eth_getTransactionByBlockNumberAndIndex":
-		return true
-	}
-	return false
+	return common.IsNullableTransactionMethod(method)
 }
 
 func isCompositionDispute(err error) bool {
