@@ -419,10 +419,17 @@ func classifyAndHashResponse(r *execResult, ctx context.Context, config *config)
 			var exhausted *common.ErrUpstreamsExhausted
 			if errors.As(r.Err, &exhausted) {
 				if causes := exhausted.Errors(); len(causes) > 0 && allMissingData(causes) {
-					r.CachedResponseType = ResponseTypeEmpty
-					r.CachedHash = "empty:missing_data"
-					r.CachedResponseSize = 0
-					return
+					// Only reclassify as empty for methods where null is a valid EVM-spec
+					// response (pending/unknown tx lookups). For any other method a null
+					// quorum is a spec violation — keep it as an infrastructure error.
+					if req, ok := ctx.Value(common.RequestContextKey).(*common.NormalizedRequest); ok && req != nil {
+						if method, err := req.Method(); err == nil && isNullableTransactionMethod(method) {
+							r.CachedResponseType = ResponseTypeEmpty
+							r.CachedHash = "empty:missing_data"
+							r.CachedResponseSize = 0
+							return
+						}
+					}
 				}
 			}
 			r.CachedResponseType = ResponseTypeInfrastructureError

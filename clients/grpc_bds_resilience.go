@@ -313,7 +313,8 @@ func (p *bdsPool) recycleConn(c *bdsConn, reason string) {
 		if reason == "age" {
 			old := c.conn
 			time.AfterFunc(bdsAgeRecycleLinger, func() { _ = old.Close() })
-		} else {
+		} else if reason != "chainid_mismatch" && reason != "closed" {
+			// chainid_mismatch and closed: conn already closed by the caller before recycleConn
 			_ = c.conn.Close()
 		}
 	}

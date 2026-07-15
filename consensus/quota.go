@@ -179,7 +179,7 @@ func resolveMinAgreement(groups []*responseGroup, reqs []*common.ConsensusRequir
 	// has a higher count — if one does, it would win via later generic-threshold
 	// rules, bypassing minAgreement entirely. That is a composition failure.
 	for _, g := range atThreshold {
-		if !groupSatisfiesAgreementQuotas(g, reqs) && g.Count > maxCount {
+		if !groupSatisfiesAgreementQuotas(g, reqs) && g.Count >= maxCount {
 			return minAgreementCompositionDispute, nil
 		}
 	}

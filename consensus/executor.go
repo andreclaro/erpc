@@ -172,18 +172,14 @@ func (e *executor) Run(
 		// a dispute error, so return the latter.
 		if out.Error == nil || common.HasErrorCode(out.Error, common.ErrCodeEndpointMissingData) {
 			method, _ := originalReq.Method()
-			switch method {
-			case "eth_getTransactionReceipt",
-				"eth_getTransactionByHash",
-				"eth_getTransactionByBlockHashAndIndex",
-				"eth_getTransactionByBlockNumberAndIndex":
+			if isNullableTransactionMethod(method) {
 				jrrReq, _ := originalReq.JsonRpcRequest()
 				var reqId interface{}
 				if jrrReq != nil {
 					reqId = jrrReq.ID
 				}
 				nullJrr := common.MustNewJsonRpcResponse(reqId, nil, nil)
-				return common.NewNormalizedResponse().WithJsonRpcResponse(nullJrr), nil
+				return common.NewNormalizedResponse().WithRequest(originalReq).WithJsonRpcResponse(nullJrr), nil
 			}
 		}
 		if out.Error == nil {
@@ -1424,6 +1420,19 @@ func (e *executor) startConsensusSpan(ctx context.Context, labels metricsLabels)
 			attribute.String("request.method", labels.method),
 		),
 	)
+}
+
+// isNullableTransactionMethod reports whether the EVM spec allows a null result
+// for the given method (pending or unknown transaction lookups).
+func isNullableTransactionMethod(method string) bool {
+	switch method {
+	case "eth_getTransactionReceipt",
+		"eth_getTransactionByHash",
+		"eth_getTransactionByBlockHashAndIndex",
+		"eth_getTransactionByBlockNumberAndIndex":
+		return true
+	}
+	return false
 }
 
 func isCompositionDispute(err error) bool {

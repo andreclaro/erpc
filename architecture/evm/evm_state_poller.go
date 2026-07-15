@@ -32,6 +32,8 @@ const DefaultToleratedBlockHeadRollback = common.DefaultToleratedBlockHeadRollba
 
 var _ common.EvmStatePoller = &EvmStatePoller{}
 
+var errChainIdMajorHeadMoveSkipped = errors.New("major head-move chain-id check failed, discarding sample")
+
 type EvmStatePoller struct {
 	Enabled bool
 
@@ -463,7 +465,7 @@ func (e *EvmStatePoller) PollLatestBlockNumber(ctx context.Context) (int64, erro
 		// A major move must pass a fresh chain-identity check before entering
 		// the shared counter / tracker (see verifyChainIdOnMajorHeadMove).
 		if !e.verifyChainIdOnMajorHeadMove(ctx, "latest", e.latestBlockShared.GetValue(), blockNum) {
-			return 0, nil
+			return 0, errChainIdMajorHeadMoveSkipped
 		}
 
 		// Directly update tracker with the correct timestamp for this locally-fetched block

@@ -53,6 +53,19 @@ func (p *TransportPool) GetOrCreate(key string) *http.Transport {
 	return t
 }
 
+// Delete removes the transport for key from the pool and drains its idle
+// connections. Call this when an upstream is permanently removed to release
+// the file descriptors and TLS sessions it holds.
+func (p *TransportPool) Delete(key string) {
+	p.mu.Lock()
+	t := p.transports[key]
+	delete(p.transports, key)
+	p.mu.Unlock()
+	if t != nil {
+		t.CloseIdleConnections()
+	}
+}
+
 // size reports how many distinct transports the pool currently holds. Used by
 // tests to assert deduplication.
 func (p *TransportPool) size() int {
