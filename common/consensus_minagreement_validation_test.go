@@ -17,14 +17,14 @@ func TestConsensusPolicyConfig_MinAgreementValidation(t *testing.T) {
 
 	t.Run("valid mixed-consensus config", func(t *testing.T) {
 		c := base(
-			&ConsensusRequiredParticipant{Tag: "type:internal", MinParticipants: 1, MinAgreement: 1},
-			&ConsensusRequiredParticipant{Tag: "type:external", MinParticipants: 1, MinAgreement: 1},
+			&ConsensusRequiredParticipant{Tag: "provider:internal", MinParticipants: 1, MinAgreement: 1},
+			&ConsensusRequiredParticipant{Tag: "provider:external", MinParticipants: 1, MinAgreement: 1},
 		)
 		require.NoError(t, c.Validate())
 	})
 
 	t.Run("minAgreement exceeding minParticipants is rejected", func(t *testing.T) {
-		c := base(&ConsensusRequiredParticipant{Tag: "type:internal", MinParticipants: 1, MinAgreement: 2})
+		c := base(&ConsensusRequiredParticipant{Tag: "provider:internal", MinParticipants: 1, MinAgreement: 2})
 		err := c.Validate()
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "minAgreement")
@@ -32,27 +32,27 @@ func TestConsensusPolicyConfig_MinAgreementValidation(t *testing.T) {
 	})
 
 	t.Run("minAgreement exceeding agreementThreshold is rejected", func(t *testing.T) {
-		c := base(&ConsensusRequiredParticipant{Tag: "type:internal", MinParticipants: 3, MinAgreement: 3})
+		c := base(&ConsensusRequiredParticipant{Tag: "provider:internal", MinParticipants: 3, MinAgreement: 3})
 		err := c.Validate()
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "agreementThreshold")
 	})
 
 	t.Run("negative minAgreement is rejected", func(t *testing.T) {
-		c := base(&ConsensusRequiredParticipant{Tag: "type:internal", MinParticipants: 1, MinAgreement: -1})
+		c := base(&ConsensusRequiredParticipant{Tag: "provider:internal", MinParticipants: 1, MinAgreement: -1})
 		require.Error(t, c.Validate())
 	})
 
 	t.Run("minAgreement omitted (pool-only) stays valid", func(t *testing.T) {
-		c := base(&ConsensusRequiredParticipant{Tag: "type:internal", MinParticipants: 1})
+		c := base(&ConsensusRequiredParticipant{Tag: "provider:internal", MinParticipants: 1})
 		require.NoError(t, c.Validate())
 	})
 
 	t.Run("overlapping tags with sum > agreementThreshold is valid", func(t *testing.T) {
-		// An upstream can carry both type:internal and region:us-east, so a single
+		// An upstream can carry both provider:internal and region:us-east, so a single
 		// node satisfies both quotas — the cross-entry sum is not a hard constraint.
 		c := base(
-			&ConsensusRequiredParticipant{Tag: "type:internal", MinParticipants: 2, MinAgreement: 1},
+			&ConsensusRequiredParticipant{Tag: "provider:internal", MinParticipants: 2, MinAgreement: 1},
 			&ConsensusRequiredParticipant{Tag: "region:us-east", MinParticipants: 2, MinAgreement: 1},
 		)
 		require.NoError(t, c.Validate())

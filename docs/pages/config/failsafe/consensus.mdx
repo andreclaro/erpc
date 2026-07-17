@@ -531,8 +531,8 @@ tag is hard-disputed regardless of `disputeBehavior`. Upstreams are tagged `type
       disputeBehavior: returnError
       requiredParticipants:
         - tag: "type:internal"
-          minParticipants: 1   # invite >=1 internal into the pool
-          minAgreement: 1       # >=1 internal must be in the winning group
+          minParticipants: 1   # invite >=1 self-operated node into the pool
+          minAgreement: 1       # >=1 self-operated node must be in the winning group
         - tag: "type:external"
           minParticipants: 1
           minAgreement: 1`}
