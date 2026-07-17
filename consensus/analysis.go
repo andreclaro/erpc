@@ -63,10 +63,9 @@ type consensusAnalysis struct {
 
 func newConsensusAnalysis(lg *zerolog.Logger, ctx context.Context, config *config, participants []common.Upstream, responses []*execResult) *consensusAnalysis {
 	analysis := &consensusAnalysis{
-		config:            config,
-		groups:            make(map[string]*responseGroup),
-		totalParticipants: len(responses),
-		allParticipants:   participants,
+		config:          config,
+		groups:          make(map[string]*responseGroup),
+		allParticipants: participants,
 	}
 
 	// Try to extract original request and compute leader upstream once
@@ -127,6 +126,7 @@ func newConsensusAnalysis(lg *zerolog.Logger, ctx context.Context, config *confi
 		} else if group.FirstError == nil && r.Err != nil {
 			group.FirstError = r.Err
 		}
+		analysis.totalParticipants++
 	}
 
 	// After grouping, compute tie flags among valid groups by response type (exclude infrastructure errors)

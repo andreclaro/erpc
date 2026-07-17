@@ -1237,7 +1237,6 @@ func (c *ConsensusPolicyConfig) Validate() error {
 		}
 	}
 
-
 	return nil
 }
 
