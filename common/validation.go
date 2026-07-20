@@ -877,7 +877,9 @@ func (j *JwtStrategyConfig) Validate() error {
 	}
 	if jwksURL != "" {
 		parsed, err := url.Parse(jwksURL)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		// Prefer Hostname() over Host: values like "https://:443/jwks" parse with
+		// Host=":443" but an empty hostname, which cannot be fetched.
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
 			return fmt.Errorf("auth.*.jwt.verificationJwksUrl must be a valid HTTP or HTTPS URL, got: %s", j.VerificationJwksUrl)
 		}
 	}

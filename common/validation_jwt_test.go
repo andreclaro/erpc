@@ -82,6 +82,14 @@ func TestJwtStrategyConfigValidateVerificationJwksUrl(t *testing.T) {
 		assert.Contains(t, err.Error(), "must be a valid HTTP or HTTPS URL")
 	})
 
+	t.Run("port-only host is rejected", func(t *testing.T) {
+		// url.Parse sets Host=":443" but Hostname() is empty.
+		cfg := &JwtStrategyConfig{VerificationJwksUrl: "https://:443/jwks"}
+		err := cfg.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must be a valid HTTP or HTTPS URL")
+	})
+
 	t.Run("whitespace-only URL falls back to keys requirement", func(t *testing.T) {
 		cfg := &JwtStrategyConfig{VerificationJwksUrl: "   "}
 		err := cfg.Validate()
