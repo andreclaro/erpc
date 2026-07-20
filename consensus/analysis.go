@@ -87,6 +87,9 @@ func newConsensusAnalysis(lg *zerolog.Logger, ctx context.Context, config *confi
 		if r.Upstream != nil {
 			id := r.Upstream.Id()
 			if _, already := seenUpstreams[id]; already {
+				if r.Result != nil {
+					r.Result.Release()
+				}
 				continue
 			}
 			seenUpstreams[id] = struct{}{}

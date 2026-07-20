@@ -338,7 +338,7 @@ func TestMinAgreement_ShortCircuitGuard(t *testing.T) {
 
 	t.Run("does not short-circuit unsatisfied winner while required upstreams pending", func(t *testing.T) {
 		// 2 externals agree (count 2 >= threshold), only 2 of 3 participants in;
-		// the internal node (circle-1) has not responded yet. Must NOT short-circuit.
+		// the internal node (internal-1) has not responded yet. Must NOT short-circuit.
 		int1 := common.NewFakeUpstream("internal-1", common.WithTags("provider:internal"))
 		ext1 := common.NewFakeUpstream("alchemy-1", common.WithTags("provider:external"))
 		ext2 := common.NewFakeUpstream("quicknode-1", common.WithTags("provider:external"))

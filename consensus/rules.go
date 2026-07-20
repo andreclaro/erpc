@@ -222,6 +222,9 @@ var consensusRules = []consensusRule{
 		},
 		Action: func(a *consensusAnalysis) *slotResult {
 			if g := a.getLeaderGroupNonError(); g != nil {
+				if anyAgreementQuota(a.config.requiredParticipants) && !groupSatisfiesAgreementQuotas(g, a.config.requiredParticipants) {
+					return &slotResult{Error: common.NewErrConsensusCompositionDispute("below-threshold winner does not satisfy requiredParticipants minAgreement tag quotas", a.participants(), nil)}
+				}
 				return &slotResult{Result: g.LargestResult}
 			}
 			// If leader exists but only has an error, return that error (prefer leader strictly),
@@ -249,6 +252,9 @@ var consensusRules = []consensusRule{
 		},
 		Action: func(a *consensusAnalysis) *slotResult {
 			if g := a.getLeaderGroupNonError(); g != nil {
+				if anyAgreementQuota(a.config.requiredParticipants) && !groupSatisfiesAgreementQuotas(g, a.config.requiredParticipants) {
+					return &slotResult{Error: common.NewErrConsensusCompositionDispute("below-threshold winner does not satisfy requiredParticipants minAgreement tag quotas", a.participants(), nil)}
+				}
 				return &slotResult{Result: g.LargestResult}
 			}
 			// If leader only has an error, return that error; otherwise low participants
@@ -284,6 +290,9 @@ var consensusRules = []consensusRule{
 		},
 		Action: func(a *consensusAnalysis) *slotResult {
 			if g := a.getLeaderGroupNonError(); g != nil {
+				if anyAgreementQuota(a.config.requiredParticipants) && !groupSatisfiesAgreementQuotas(g, a.config.requiredParticipants) {
+					return &slotResult{Error: common.NewErrConsensusCompositionDispute("below-threshold winner does not satisfy requiredParticipants minAgreement tag quotas", a.participants(), nil)}
+				}
 				return &slotResult{Result: g.LargestResult}
 			}
 			return &slotResult{
@@ -788,6 +797,9 @@ var consensusRules = []consensusRule{
 			if best.ResponseType == ResponseTypeConsensusError {
 				return &slotResult{Error: best.FirstError}
 			}
+			if anyAgreementQuota(a.config.requiredParticipants) && !groupSatisfiesAgreementQuotas(best, a.config.requiredParticipants) {
+				return &slotResult{Error: common.NewErrConsensusCompositionDispute("below-threshold winner does not satisfy requiredParticipants minAgreement tag quotas", a.participants(), nil)}
+			}
 			return &slotResult{Result: best.LargestResult}
 		},
 	},
@@ -806,9 +818,15 @@ var consensusRules = []consensusRule{
 						Error: common.NewErrConsensusDispute("not enough agreement among responses", a.participants(), nil),
 					}
 				}
+				if anyAgreementQuota(a.config.requiredParticipants) && !groupSatisfiesAgreementQuotas(bestNonEmpty, a.config.requiredParticipants) {
+					return &slotResult{Error: common.NewErrConsensusCompositionDispute("below-threshold winner does not satisfy requiredParticipants minAgreement tag quotas", a.participants(), nil)}
+				}
 				return &slotResult{Result: bestNonEmpty.LargestResult}
 			}
 			if bestEmpty := a.getBestEmpty(); bestEmpty != nil {
+				if anyAgreementQuota(a.config.requiredParticipants) && !groupSatisfiesAgreementQuotas(bestEmpty, a.config.requiredParticipants) {
+					return &slotResult{Error: common.NewErrConsensusCompositionDispute("below-threshold winner does not satisfy requiredParticipants minAgreement tag quotas", a.participants(), nil)}
+				}
 				return &slotResult{Result: bestEmpty.LargestResult}
 			}
 			if bestError := a.getBestError(); bestError != nil {
