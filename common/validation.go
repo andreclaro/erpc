@@ -871,8 +871,15 @@ func (s *SecretStrategyConfig) Validate() error {
 }
 
 func (j *JwtStrategyConfig) Validate() error {
-	if len(j.VerificationKeys) == 0 && strings.TrimSpace(j.VerificationJwksUrl) == "" {
+	jwksURL := strings.TrimSpace(j.VerificationJwksUrl)
+	if len(j.VerificationKeys) == 0 && jwksURL == "" {
 		return fmt.Errorf("auth.*.jwt.verificationKeys or auth.*.jwt.verificationJwksUrl is required")
+	}
+	if jwksURL != "" {
+		parsed, err := url.Parse(jwksURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("auth.*.jwt.verificationJwksUrl must be a valid HTTP or HTTPS URL, got: %s", j.VerificationJwksUrl)
+		}
 	}
 	for claim, values := range j.ClaimMatchers {
 		if len(values) == 0 {
