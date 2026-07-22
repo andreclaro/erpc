@@ -167,6 +167,20 @@ way as other `X-ERPC-Skip-*` directives.
    and recovery speed. To be decided based on observed internal-node dispute patterns.
    Candidates: `5m` / `0.8`.
 
+2. **`agreementThreshold` is redundant when `minAgreement` is configured.** When
+   `requiredParticipants[].minAgreement` is set, the effective agreement threshold is fully
+   determined by `sum(minAgreement)` — specifying both is redundant and a potential source
+   of misconfiguration (what is the correct behavior when they conflict?). Proposed change
+   (applicable to #1008 and extended here to `minAgreementFallback`):
+   - **Without `minAgreement`**: `agreementThreshold` required as today.
+   - **With `minAgreement`**: `agreementThreshold` derived as `sum(minAgreement)`; config
+     validator rejects an explicit value to prevent silent conflicts.
+   - **With `minAgreementFallback`**: effective fallback threshold derived as
+     `sum(minAgreementFallback)` — no separate `agreementThresholdFallback` field needed.
+
+   This is a breaking config change for operators who currently set both fields. To be
+   resolved in #1008 or as part of this PR.
+
 ## 7. Test matrix
 
 | Area | Cases |
