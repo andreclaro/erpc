@@ -24,6 +24,13 @@ security vs. availability requirements: `fallbackAllowedUsers` gives operators p
 control over which callers may activate the fallback, so high-security services can opt out
 while availability-sensitive ones benefit automatically.
 
+Security approval is centralized at the eRPC config layer. Permitted callers are declared in
+`fallbackAllowedUsers` — clients do not need to opt in or pass any special header to use
+fallback. The only client-facing directive is opt-out (`X-ERPC-Skip-Consensus-Fallback: true`),
+for callers that explicitly require the standard policy to hold. This means security teams
+approve fallback access by reviewing eRPC configuration, not by auditing per-client header
+usage across services.
+
 ## 2. Prerequisite
 
 `minAgreementFallback` is only valid when `requiredParticipants` entries with `minAgreement`
