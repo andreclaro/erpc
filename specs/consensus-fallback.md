@@ -57,7 +57,8 @@ consensus:
 | `fallbackTrigger` | `"realtime" \| "circuit-breaker"` | — | Required when any group has `minAgreementFallback`. Pick-one. |
 | `fallbackWindow` | `Duration` | TBD | Circuit-breaker: rolling window for dispute-rate tracking. |
 | `fallbackThreshold` | `float` | TBD | Circuit-breaker: `ErrConsensusCompositionDispute` rate (`0..1`) over `fallbackWindow` to trip the breaker. |
-| `fallbackAllowedUsers` | `[]string` | `nil` (all) | `userId` values permitted to activate fallback. Omit = all authenticated callers. Unauthenticated requests are blocked when this list is set. |
+| `fallbackAllowedUsers` | `[]string` | `nil` (all) | `userId` values permitted to activate fallback. Omit = all authenticated callers. Unauthenticated requests are always blocked. |
+| `fallbackProbeRate` | `float` | `0.05` | Circuit-breaker only: fraction of requests (`0..1`) that attempt standard evaluation while the breaker is tripped, to detect recovery. |
 
 ### 3.2 Evaluation order
 
@@ -68,7 +69,7 @@ consensus:
    `X-ERPC-Consensus-Policy: standard`.
 3. **Fallback eligibility check.** Fallback proceeds only when all of the following hold:
    - Standard policy failed with `ErrConsensusCompositionDispute`.
-   - Caller's `userId` is in `fallbackAllowedUsers`, or the list is empty.
+   - Caller's `userId` is non-empty (authenticated) AND (`fallbackAllowedUsers` is empty OR `userId` is in `fallbackAllowedUsers`).
    - `X-ERPC-Skip-Consensus-Fallback: true` was not sent.
    - `fallbackTrigger: circuit-breaker` — the breaker is tripped for this network (see §3.3).
      `fallbackTrigger: realtime` — no additional gate.
@@ -90,11 +91,12 @@ Stateless. No per-network state is maintained. Suitable for testing or simple de
 
 **`circuit-breaker`** — tracks a per-network rolling rate of `ErrConsensusCompositionDispute`
 errors against total consensus requests over `fallbackWindow`. Once the rate crosses
-`fallbackThreshold`, the network enters fallback mode. While tripped, requests skip standard
-evaluation and evaluate directly against fallback quotas — subject to `fallbackAllowedUsers`
-and `X-ERPC-Skip-Consensus-Fallback` as always. The breaker resets when the standard policy
-success rate recovers above threshold. Fallback successes do not count toward reset.
-Circuit-breaker is the recommended production mode.
+`fallbackThreshold`, the network enters fallback mode. While tripped, most requests evaluate
+directly against fallback quotas — subject to `fallbackAllowedUsers` and
+`X-ERPC-Skip-Consensus-Fallback` as always. A configurable fraction of requests
+(`fallbackProbeRate`, default `0.05`) still attempt standard evaluation while tripped; a
+standard-policy success from a probe request resets the breaker. Fallback successes do not
+count toward reset. Circuit-breaker is the recommended production mode.
 
 ### 3.4 Misbehaving upstreams and sitout
 
@@ -129,9 +131,9 @@ way as other `X-ERPC-Skip-*` directives.
 - **I3 — Directive suppression.** `X-ERPC-Skip-Consensus-Fallback: true` always prevents
   fallback evaluation, regardless of trigger mode or breaker state. The caller receives
   `X-ERPC-Consensus-Policy: standard` and the standard policy error.
-- **I4 — User gate.** When `fallbackAllowedUsers` is set, a caller whose `userId` is not in
-  the list never activates fallback. Unauthenticated callers (empty `userId`) are blocked.
-  Omitting `fallbackAllowedUsers` allows all authenticated callers.
+- **I4 — User gate.** Unauthenticated callers (empty `userId`) never activate fallback,
+  regardless of `fallbackAllowedUsers`. When the list is set, a caller whose `userId` is not
+  in it is also blocked. Omitting `fallbackAllowedUsers` allows all authenticated callers.
 - **I5 — `eth_sendRawTransaction` exemption.** The method is exempt from `minAgreementFallback`
   enforcement, identical to the `minAgreement` exemption in #1008. No fallback attempt is made.
 - **I6 — `lowParticipantsBehavior` priority.** The low-participant check fires before fallback
@@ -140,9 +142,11 @@ way as other `X-ERPC-Skip-*` directives.
 - **I7 — Circuit-breaker counts composition disputes only.** The failure counter increments
   on `ErrConsensusCompositionDispute` from the standard policy evaluation. It does not
   increment on `lowParticipantsBehavior` errors or infrastructure / timeout errors.
-- **I8 — Breaker reset only on standard success.** A fallback-mode success does not decrement
-  the counter or advance breaker reset. Only a standard policy success while the breaker is
-  tripped resets it.
+- **I8 — Breaker reset only on standard success via probe.** A fallback-mode success does not
+  decrement the counter or advance breaker reset. Only a standard policy success from a probe
+  request (sampled at `fallbackProbeRate`) while the breaker is tripped resets it. Without
+  probe sampling, the breaker has no path to observe recovery and would remain tripped
+  indefinitely.
 - **I9 — Header absent on skip.** `X-ERPC-Consensus-Policy` is absent when
   `X-ERPC-Skip-Consensus` bypasses consensus. No header is written.
 - **I10 — Prerequisite enforcement.** Config load fails (startup error) when any entry has
@@ -188,11 +192,11 @@ way as other `X-ERPC-Skip-*` directives.
 | Standard-only (I1) | No `minAgreementFallback` → identical to #1008 in all scenarios |
 | Dispute-triggered activation (I2) | Standard fails with composition dispute → fallback evaluates; standard fails with low-participants → fallback blocked |
 | Directive suppression (I3) | `X-ERPC-Skip-Consensus-Fallback: true` with realtime and circuit-breaker modes |
-| User gate (I4) | Allowlist set: callers in/out/unauthenticated; allowlist omitted: all authenticated pass |
+| User gate (I4) | Unauthenticated always blocked; allowlist set: callers in/out; allowlist omitted: all authenticated pass |
 | `eth_sendRawTransaction` (I5) | Composition dispute on that method → no fallback attempted |
 | `lowParticipantsBehavior` priority (I6) | Low-participant threshold not met → fires before fallback; does not increment breaker counter |
 | Counter scope (I7) | Composition dispute increments counter; low-participants error does not; timeout error does not |
-| Breaker reset (I8) | Standard success while tripped → resets; fallback success while tripped → no reset |
+| Breaker reset (I8) | Probe request standard success while tripped → resets; fallback success while tripped → no reset; no probe path → breaker never resets |
 | Header absent on skip (I9) | `X-ERPC-Skip-Consensus` set → no `X-ERPC-Consensus-Policy` header in response |
 | Prerequisite validation (I10) | `minAgreementFallback` without `minAgreement` → startup error; `minAgreementFallback` without `fallbackTrigger` → startup error |
 | Realtime mode end-to-end | Standard fails composition dispute → fallback succeeds → `X-ERPC-Consensus-Policy: fallback` |
