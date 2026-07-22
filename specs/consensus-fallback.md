@@ -9,12 +9,20 @@ Mixed-node consensus (#1008) enforces per-tag composition quotas on the winning 
 A typical deployment requires responses from at least two tagged groups — for example,
 `provider:internal ≥ 1` AND `provider:external ≥ 1` — before a result is returned.
 
-When internal nodes accumulate a high rate of composition disputes — because they are
-out-of-sync, returning stale data, compromised, or being placed into sitout by
-`punishMisbehavior` — the standard policy consistently fails with `ErrConsensusCompositionDispute`
-even when other participant groups agree. There is no mechanism today to activate a relaxed
-quorum composition as a controlled, observable, and access-gated response to sustained
-standard-policy failures.
+Internal nodes can become unhealthy in two ways that both produce `ErrConsensusCompositionDispute`:
+
+- **Absent** — nodes are down, unreachable, or placed into sitout by `punishMisbehavior`.
+- **Disputing** — nodes are responding but with wrong data (out-of-sync, stale, compromised).
+
+In both cases the standard policy fails consistently even when other participant groups agree.
+Today the only recourse is a **manual failover with security approval** — a slow, expensive
+process that trades availability for control.
+
+This feature replaces that manual process with an automatic, configurable fallback that relaxes
+per-group composition quotas under controlled conditions. Different services have different
+security vs. availability requirements: `fallbackAllowedUsers` gives operators per-service
+control over which callers may activate the fallback, so high-security services can opt out
+while availability-sensitive ones benefit automatically.
 
 ## 2. Prerequisite
 
