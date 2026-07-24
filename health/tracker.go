@@ -1213,9 +1213,7 @@ func (t *Tracker) updateNetworkLagMetrics(
 				// predicates/scoring silently no-op. Mirror onto the All rollup
 				// (which getUpsKeys always populates) so lag is seen at every grain.
 				if k.finality != common.DataFinalityStateAll {
-					if av, ok := t.upsMetrics.Load(upstreamKey{k.ups, k.method, common.DataFinalityStateAll}); ok {
-						setLag(av.(*TrackedMetrics), lag)
-					}
+					setLag(t.getUpsMetrics(upstreamKey{k.ups, k.method, common.DataFinalityStateAll}), lag)
 				}
 				gauge := getGauge(t.projectId, k.ups.VendorName(), k.ups.NetworkLabel(), k.ups.Id())
 				gauge.Set(float64(lag))
@@ -1261,9 +1259,7 @@ func (t *Tracker) updateSingleUpstreamLag(
 				// a per-finality slot rather than the {method, All} one (see
 				// updateNetworkLagMetrics) — so per-method-grain reads see the lag.
 				if k.finality != common.DataFinalityStateAll {
-					if av, ok := t.upsMetrics.Load(upstreamKey{k.ups, k.method, common.DataFinalityStateAll}); ok {
-						setLag(av.(*TrackedMetrics), lag)
-					}
+					setLag(t.getUpsMetrics(upstreamKey{k.ups, k.method, common.DataFinalityStateAll}), lag)
 				}
 			}
 		}
