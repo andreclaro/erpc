@@ -445,6 +445,39 @@ func TestFinalizationLagPersistsAcrossResets(t *testing.T) {
 	assert.Equal(t, int64(0), metrics2Updated.FinalizationLag.Load(), "upstream2 should now be caught up in finalization")
 }
 
+// TestWildcardLagMirroredForPeerUpstreams is the regression test for the
+// incident where blockNumberLagAbove silently never fired for CB-open upstreams.
+//
+// The scenario: ups2 is lagging far behind ups1. ups2's own poller never fires
+// (simulating a CB-open upstream). Only ups1 calls SetLatestBlockNumber. The fix
+// ensures updateNetworkLagMetrics mirrors the computed lag onto {ups2,"*",All} so
+// evalScope:network policies read the correct non-zero value.
+func TestWildcardLagMirroredForPeerUpstreams(t *testing.T) {
+	tracker := NewTracker(&log.Logger, "test-project", 5*time.Minute)
+	tracker.Bootstrap(context.Background())
+
+	ups1 := common.NewFakeUpstream("upstream1")
+	ups2 := common.NewFakeUpstream("upstream2")
+
+	// Register both upstreams with traffic so their per-method buckets exist.
+	tracker.RecordUpstreamRequest(ups1, "eth_blockNumber", common.DataFinalityStateUnknown)
+	tracker.RecordUpstreamRequest(ups2, "eth_blockNumber", common.DataFinalityStateUnknown)
+
+	// Only ups1's poller fires — ups2 simulates a CB-open upstream whose poller
+	// is stalled. ups2 never calls SetLatestBlockNumber; its stored block stays 0.
+	// updateNetworkLagMetrics must still mirror lag = 1000-0 onto {ups2,"*",All}.
+	tracker.SetLatestBlockNumber(ups1, 1000, 0)
+
+	// evalScope:network reads {ups, "*", All}.BlockHeadLag
+	ups2WildcardLag := tracker.GetUpstreamMethodMetrics(ups2, "*", common.DataFinalityStateAll).BlockHeadLag.Load()
+	require.EqualValues(t, 1000, ups2WildcardLag,
+		"peer upstream lag must reach {ups,\"*\",All} via updateNetworkLagMetrics even without its own poller firing")
+
+	// ups1 is at the tip — its wildcard lag must be 0.
+	ups1WildcardLag := tracker.GetUpstreamMethodMetrics(ups1, "*", common.DataFinalityStateAll).BlockHeadLag.Load()
+	require.EqualValues(t, 0, ups1WildcardLag)
+}
+
 func TestSetLatestBlockTimestampForNetwork(t *testing.T) {
 	t.Run("SetsTimestampAndRecordsDistance", func(t *testing.T) {
 		tracker := NewTracker(&log.Logger, "test-project", 5*time.Minute)
