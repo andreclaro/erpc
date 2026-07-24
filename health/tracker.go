@@ -1223,7 +1223,12 @@ func (t *Tracker) updateNetworkLagMetrics(
 				// and bypass blockNumberLagAbove silently. Write it unconditionally
 				// so the predicate fires regardless of whether the upstream's own
 				// poller last wrote to it.
-				setLag(t.getUpsMetrics(upstreamKey{k.ups, "*", common.DataFinalityStateAll}), lag)
+				// Use LoadOrStore rather than getUpsMetrics to avoid adding {*,All}
+				// to the upstreamsByNetwork index (which would cause a redundant
+				// extra iteration on the next updateNetworkLagMetrics call).
+				wildcardKey := upstreamKey{k.ups, "*", common.DataFinalityStateAll}
+				wildcardTm, _ := t.upsMetrics.LoadOrStore(wildcardKey, newTrackedMetrics(t.logger))
+				setLag(wildcardTm.(*TrackedMetrics), lag)
 				gauge := getGauge(t.projectId, k.ups.VendorName(), k.ups.NetworkLabel(), k.ups.Id())
 				gauge.Set(float64(lag))
 			}
@@ -1272,7 +1277,10 @@ func (t *Tracker) updateSingleUpstreamLag(
 				}
 				// Mirror onto the {*, All} wildcard-method aggregate for evalScope:network
 				// policies (same reasoning as in updateNetworkLagMetrics above).
-				setLag(t.getUpsMetrics(upstreamKey{k.ups, "*", common.DataFinalityStateAll}), lag)
+				// Use LoadOrStore directly to avoid adding {*,All} to the index.
+				wk := upstreamKey{k.ups, "*", common.DataFinalityStateAll}
+				wtm, _ := t.upsMetrics.LoadOrStore(wk, newTrackedMetrics(t.logger))
+				setLag(wtm.(*TrackedMetrics), lag)
 			}
 		}
 	}
