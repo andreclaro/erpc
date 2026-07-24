@@ -463,14 +463,18 @@ func TestWildcardLagMirroredForPeerUpstreams(t *testing.T) {
 	tracker.RecordUpstreamRequest(ups1, "eth_blockNumber", common.DataFinalityStateUnknown)
 	tracker.RecordUpstreamRequest(ups2, "eth_blockNumber", common.DataFinalityStateUnknown)
 
-	// Only ups1's poller fires — ups2 simulates a CB-open upstream whose poller
-	// is stalled. ups2 never calls SetLatestBlockNumber; its stored block stays 0.
-	// updateNetworkLagMetrics must still mirror lag = 1000-0 onto {ups2,"*",All}.
+	// ups2 reports a stale block (simulating its last report before going CB-open).
+	// After this, ups2's own poller never fires again.
+	tracker.SetLatestBlockNumber(ups2, 900, 0)
+
+	// ups1 advances the tip to 1000. updateNetworkLagMetrics now computes
+	// ups2's lag as 100 and must mirror it onto {ups2,"*",All} — the peer-write
+	// path that was previously missing.
 	tracker.SetLatestBlockNumber(ups1, 1000, 0)
 
 	// evalScope:network reads {ups, "*", All}.BlockHeadLag
 	ups2WildcardLag := tracker.GetUpstreamMethodMetrics(ups2, "*", common.DataFinalityStateAll).BlockHeadLag.Load()
-	require.EqualValues(t, 1000, ups2WildcardLag,
+	require.EqualValues(t, 100, ups2WildcardLag,
 		"peer upstream lag must reach {ups,\"*\",All} via updateNetworkLagMetrics even without its own poller firing")
 
 	// ups1 is at the tip — its wildcard lag must be 0.
