@@ -749,7 +749,17 @@ func (t *Tracker) getMetadata(mtdKey metadataKey) *NetworkMetadata {
 	return actual.(*NetworkMetadata)
 }
 
-// getUpsMetrics fetches or creates *TrackedMetrics from sync.Map
+// loadOrStoreUpsMetrics is like getUpsMetrics but does not register the key in
+// the upstreamsByNetwork index. Use for buckets (e.g. the {*,All} wildcard
+// aggregate) that must not appear as iterable index entries.
+func (t *Tracker) loadOrStoreUpsMetrics(k upstreamKey) *TrackedMetrics {
+	if v, ok := t.upsMetrics.Load(k); ok {
+		return v.(*TrackedMetrics)
+	}
+	v, _ := t.upsMetrics.LoadOrStore(k, newTrackedMetrics(t.logger))
+	return v.(*TrackedMetrics)
+}
+
 func (t *Tracker) getUpsMetrics(k upstreamKey) *TrackedMetrics {
 	if v, ok := t.upsMetrics.Load(k); ok {
 		return v.(*TrackedMetrics)
@@ -1223,12 +1233,7 @@ func (t *Tracker) updateNetworkLagMetrics(
 				// and bypass blockNumberLagAbove silently. Write it unconditionally
 				// so the predicate fires regardless of whether the upstream's own
 				// poller last wrote to it.
-				// Use LoadOrStore rather than getUpsMetrics to avoid adding {*,All}
-				// to the upstreamsByNetwork index (which would cause a redundant
-				// extra iteration on the next updateNetworkLagMetrics call).
-				wildcardKey := upstreamKey{k.ups, "*", common.DataFinalityStateAll}
-				wildcardTm, _ := t.upsMetrics.LoadOrStore(wildcardKey, newTrackedMetrics(t.logger))
-				setLag(wildcardTm.(*TrackedMetrics), lag)
+				setLag(t.loadOrStoreUpsMetrics(upstreamKey{k.ups, "*", common.DataFinalityStateAll}), lag)
 				gauge := getGauge(t.projectId, k.ups.VendorName(), k.ups.NetworkLabel(), k.ups.Id())
 				gauge.Set(float64(lag))
 			}
@@ -1277,10 +1282,7 @@ func (t *Tracker) updateSingleUpstreamLag(
 				}
 				// Mirror onto the {*, All} wildcard-method aggregate for evalScope:network
 				// policies (same reasoning as in updateNetworkLagMetrics above).
-				// Use LoadOrStore directly to avoid adding {*,All} to the index.
-				wk := upstreamKey{k.ups, "*", common.DataFinalityStateAll}
-				wtm, _ := t.upsMetrics.LoadOrStore(wk, newTrackedMetrics(t.logger))
-				setLag(wtm.(*TrackedMetrics), lag)
+				setLag(t.loadOrStoreUpsMetrics(upstreamKey{k.ups, "*", common.DataFinalityStateAll}), lag)
 			}
 		}
 	}
