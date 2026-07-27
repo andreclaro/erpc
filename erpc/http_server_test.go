@@ -8374,10 +8374,10 @@ func TestHttpServer_AdminMethodFilter(t *testing.T) {
 		assert.False(t, hasError, "expected no error for erpc_listCordoned with no filter")
 	})
 
-	t.Run("ignoreMethods blocks exact match", func(t *testing.T) {
+	t.Run("denyMethods blocks exact match", func(t *testing.T) {
 		baseURL, cleanup := newServer(t, &common.AdminConfig{
 			Auth:          secretAuth,
-			IgnoreMethods: []string{"erpc_listCordoned"},
+			DenyMethods: []string{"erpc_listCordoned"},
 		})
 		defer cleanup()
 
@@ -8388,10 +8388,10 @@ func TestHttpServer_AdminMethodFilter(t *testing.T) {
 		assert.Contains(t, errMap["message"], "method not supported")
 	})
 
-	t.Run("ignoreMethods wildcard blocks matching methods", func(t *testing.T) {
+	t.Run("denyMethods wildcard blocks matching methods", func(t *testing.T) {
 		baseURL, cleanup := newServer(t, &common.AdminConfig{
 			Auth:          secretAuth,
-			IgnoreMethods: []string{"erpc_*Cordoned"},
+			DenyMethods: []string{"erpc_*Cordoned"},
 		})
 		defer cleanup()
 
@@ -8402,10 +8402,10 @@ func TestHttpServer_AdminMethodFilter(t *testing.T) {
 		assert.Contains(t, errMap["message"], "method not supported")
 	})
 
-	t.Run("ignoreMethods does not block non-matching methods", func(t *testing.T) {
+	t.Run("denyMethods does not block non-matching methods", func(t *testing.T) {
 		baseURL, cleanup := newServer(t, &common.AdminConfig{
 			Auth:          secretAuth,
-			IgnoreMethods: []string{"erpc_cordonUpstream"},
+			DenyMethods: []string{"erpc_cordonUpstream"},
 		})
 		defer cleanup()
 
@@ -8452,10 +8452,10 @@ func TestHttpServer_AdminMethodFilter(t *testing.T) {
 		assert.Contains(t, errMap["message"], "method not supported")
 	})
 
-	t.Run("allowMethods re-admits method ignored by ignoreMethods", func(t *testing.T) {
+	t.Run("allowMethods re-admits method blocked by denyMethods", func(t *testing.T) {
 		baseURL, cleanup := newServer(t, &common.AdminConfig{
 			Auth:          secretAuth,
-			IgnoreMethods: []string{"erpc_*"},
+			DenyMethods: []string{"erpc_*"},
 			AllowMethods:  []string{"erpc_listCordoned"},
 		})
 		defer cleanup()

@@ -2227,7 +2227,7 @@ func stripAddrDecorations(s string) string {
 // IgnoreMethods is evaluated first; AllowMethods can re-admit a method that was ignored.
 func isAdminMethodBlocked(cfg *common.AdminConfig, method string) (bool, error) {
 	blocked := false
-	for _, pattern := range cfg.IgnoreMethods {
+	for _, pattern := range cfg.DenyMethods {
 		match, err := common.WildcardMatch(pattern, method)
 		if err != nil {
 			return false, err
