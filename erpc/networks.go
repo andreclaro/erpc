@@ -878,6 +878,62 @@ func (n *Network) tryShortCircuitFutureBlock(ctx context.Context, req *common.No
 	return resp, true
 }
 
+// resolveRequestBlockNumber returns the concrete block number for the request,
+// or 0 if it cannot be determined (fail-open). Prefers the cached value from
+// normalization, falls back to extraction.
+func resolveRequestBlockNumber(ctx context.Context, req *common.NormalizedRequest) int64 {
+	if v := req.EvmBlockNumber(); v != nil {
+		if n64, ok := v.(int64); ok && n64 > 0 {
+			return n64
+		}
+	}
+	if _, x, err := evm.ExtractBlockReferenceFromRequest(ctx, req); err == nil && x > 0 {
+		return x
+	}
+	return 0
+}
+
+// tryShortCircuitNetworkBlockUnavailable returns a JSON-RPC -32001 error response
+// (ok=true) when the network has a blockAvailability bound configured and the
+// request's concrete block number falls outside it. Fails open on unresolvable
+// block numbers (by-hash, tags, range methods, static methods).
+func (n *Network) tryShortCircuitNetworkBlockUnavailable(ctx context.Context, req *common.NormalizedRequest, method string) (*common.NormalizedResponse, bool) {
+	if n.cfg == nil || n.cfg.Architecture != common.ArchitectureEvm || n.cfg.Evm == nil {
+		return nil, false
+	}
+	ba := n.cfg.Evm.BlockAvailability
+	if ba == nil || (ba.Lower == nil && ba.Upper == nil) {
+		return nil, false
+	}
+
+	latest := n.EvmHighestLatestBlockNumber(ctx)
+	minBound, maxBound := common.ResolveBlockAvailabilityBounds(ba, latest)
+	if minBound == math.MinInt64 && maxBound == math.MaxInt64 {
+		return nil, false // nothing to enforce
+	}
+
+	bn := resolveRequestBlockNumber(ctx, req)
+	if bn <= 0 {
+		return nil, false // fail-open: unresolvable
+	}
+
+	var msg string
+	if minBound != math.MinInt64 && bn < minBound {
+		msg = fmt.Sprintf("historical block not available: block %d is below this network's availability window (latestBlock: %d)", bn, latest)
+	} else if maxBound != math.MaxInt64 && bn > maxBound {
+		msg = fmt.Sprintf("block %d is above this network's availability window (latestBlock: %d)", bn, latest)
+	}
+	if msg == "" {
+		return nil, false
+	}
+
+	jrr, err := common.NewJsonRpcResponse(req.ID(), nil, common.NewErrJsonRpcExceptionExternal(-32001, msg, ""))
+	if err != nil {
+		return nil, false
+	}
+	return common.NewNormalizedResponse().WithRequest(req).WithJsonRpcResponse(jrr), true
+}
+
 // servedTip computes the majority served tip for one axis over the
 // selection-policy-eligible upstreams — the freshest block a strict majority of
 // them already has (see evm.PickServedTip) — lets the trajectory referee prefer
@@ -1802,6 +1858,16 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 			return resp, err
 		}
 		forwardSpan.SetAttributes(attribute.Bool("cache.hit", false))
+	}
+
+	// Network-level block availability gate: short-circuit with a JSON-RPC -32001
+	// error before touching any upstream. Only fires after the cache layer so cached
+	// responses are still served. Fail-open on unresolvable block numbers.
+	if resp, ok := n.tryShortCircuitNetworkBlockUnavailable(ctx, req, method); ok {
+		if mlx != nil {
+			mlx.Close(ctx, resp, nil)
+		}
+		return resp, nil
 	}
 
 	_, upstreamSpan := common.StartDetailSpan(ctx, "PolicyEngine.GetOrdered")
