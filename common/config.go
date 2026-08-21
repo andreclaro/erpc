@@ -2572,6 +2572,15 @@ type EvmServedTipConfig struct {
 	// Empty means only the global (all-eligible) majority is computed.
 	GuaranteedMethods []string `yaml:"guaranteedMethods,omitempty" json:"guaranteedMethods,omitempty"`
 
+	// RequiredGroups is a list of upstream selectors. When non-empty, the served
+	// tip for the network-wide lane is the minimum of the strict-majority tips
+	// computed independently within each selector-matched group. This guarantees
+	// the advertised block is servable by at least one upstream from every
+	// required group, which is necessary when requests are later routed through
+	// consensus that needs participation from each group. Empty (default) keeps
+	// the existing global-majority behavior.
+	RequiredGroups []string `yaml:"requiredGroups,omitempty" json:"requiredGroups,omitempty"`
+
 	// MaxRegressionBlocks is how far below the corroborated LIVE upstream head
 	// (the second-highest live head) the majority pick may fall before it is
 	// treated as a poisoned ballot rather than as reality. While a pick is below
