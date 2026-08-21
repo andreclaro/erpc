@@ -122,6 +122,26 @@ func TestEvmNetworkConfig_Validate_ServedTip(t *testing.T) {
 		require.Error(t, err, "a bare number must never be read as 5 minutes")
 		assert.Contains(t, err.Error(), "duration")
 	})
+
+	t.Run("valid requiredGroups selectors pass", func(t *testing.T) {
+		e := baseValidEvmNetworkConfig()
+		e.ServedTip = &EvmServedTipConfig{
+			EnabledFor:     []string{"latest"},
+			RequiredGroups: []string{"type:external", "type:internal", "tier-*"},
+		}
+		require.NoError(t, e.Validate())
+	})
+
+	t.Run("invalid requiredGroups selector rejected", func(t *testing.T) {
+		e := baseValidEvmNetworkConfig()
+		e.ServedTip = &EvmServedTipConfig{
+			EnabledFor:     []string{"latest"},
+			RequiredGroups: []string{"type:external", "tier:&"},
+		}
+		err := e.Validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "requiredGroups")
+	})
 }
 
 // TestNetworkConfig_SetDefaults_InheritsServedTip ensures a global

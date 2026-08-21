@@ -830,7 +830,7 @@ func TestServedTip_GuaranteedMethodFloor_DoesNotUndoTheGuardsHold(t *testing.T) 
 	assert.Equal(t, healthy, network.EvmHighestLatestBlockNumber(ctx),
 		"the floor must not undo the guard's hold: live upstreams serve eth_getLogs, "+
 			"they are merely absent, so the cap-only floor is a transient lie")
-	assert.Zero(t, network.guaranteedMethodFloor(ctx, false),
+	assert.Zero(t, network.guaranteedMethodFloor(ctx, false, "latest"),
 		"and the method must contribute no floor at all while that is true")
 
 	advance(servedTipRegressionTTL + time.Second)
@@ -2191,4 +2191,204 @@ func TestServedTip_TrajectoryReferee_DisabledByZeroWindow(t *testing.T) {
 	assert.Equal(t, before, servedTipTrajectoryCount(network, "latest", "override"))
 	assert.Zero(t, network.servedLatestAnchor.trajectory.SampleCount(),
 		"a disabled referee must not even record a head track")
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Group-aware served tip tests
+// ═════════════════════════════════════════════════════════════════════════════
+
+// withServedTipSelector returns a ctx bound to a NormalizedRequest carrying the
+// given use-upstream selector, mirroring the helper in TestServedTip_SelectorScoped.
+func withServedTipSelector(ctx context.Context, sel string) context.Context {
+	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`))
+	req.SetDirectives(&common.RequestDirectives{UseUpstream: sel})
+	return context.WithValue(ctx, common.RequestContextKey, req)
+}
+
+// TestServedTip_RequiredGroups_TwoGroupsFastSlow verifies the headline behavior:
+// the network-wide tip is the minimum of the per-group strict-majority tips, so
+// every required group can serve it.
+func TestServedTip_RequiredGroups_TwoGroupsFastSlow(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fixtures := []servedTipFixture{
+		{id: "ext-1", chainID: 123, latestBlock: 200, tags: []string{"type:external"}},
+		{id: "ext-2", chainID: 123, latestBlock: 200, tags: []string{"type:external"}},
+		{id: "int-1", chainID: 123, latestBlock: 100, tags: []string{"type:internal"}},
+		{id: "int-2", chainID: 123, latestBlock: 100, tags: []string{"type:internal"}},
+	}
+	nw, _ := setupServedTipNetworkWith(t, ctx, fixtures, &common.EvmServedTipConfig{
+		EnabledFor:     []string{"latest"},
+		RequiredGroups: []string{"type:external", "type:internal"},
+	})
+
+	assert.Equal(t, int64(100), nw.EvmHighestLatestBlockNumber(ctx),
+		"group-aware tip = min(external majority 200, internal majority 100)")
+}
+
+// TestServedTip_RequiredGroups_OneGroupLags checks that a lagger inside one
+// group lowers that group's majority, which lowers the global tip.
+func TestServedTip_RequiredGroups_OneGroupLags(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fixtures := []servedTipFixture{
+		{id: "ext-1", chainID: 123, latestBlock: 201, tags: []string{"type:external"}},
+		{id: "ext-2", chainID: 123, latestBlock: 200, tags: []string{"type:external"}},
+		{id: "int-1", chainID: 123, latestBlock: 100, tags: []string{"type:internal"}},
+		{id: "int-2", chainID: 123, latestBlock: 99, tags: []string{"type:internal"}},
+	}
+	nw, _ := setupServedTipNetworkWith(t, ctx, fixtures, &common.EvmServedTipConfig{
+		EnabledFor:     []string{"latest"},
+		RequiredGroups: []string{"type:external", "type:internal"},
+	})
+
+	assert.Equal(t, int64(99), nw.EvmHighestLatestBlockNumber(ctx),
+		"external majority = 200, internal majority = 99, global tip = 99")
+}
+
+// TestServedTip_RequiredGroups_SingleUpstreamGroup verifies that a group with
+// only one upstream still participates: its only head becomes that group's
+// majority.
+func TestServedTip_RequiredGroups_SingleUpstreamGroup(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fixtures := []servedTipFixture{
+		{id: "ext-1", chainID: 123, latestBlock: 200, tags: []string{"type:external"}},
+		{id: "int-1", chainID: 123, latestBlock: 100, tags: []string{"type:internal"}},
+		{id: "int-2", chainID: 123, latestBlock: 99, tags: []string{"type:internal"}},
+	}
+	nw, _ := setupServedTipNetworkWith(t, ctx, fixtures, &common.EvmServedTipConfig{
+		EnabledFor:     []string{"latest"},
+		RequiredGroups: []string{"type:external", "type:internal"},
+	})
+
+	assert.Equal(t, int64(99), nw.EvmHighestLatestBlockNumber(ctx),
+		"single-upstream external majority = 200, internal majority = 99, global tip = 99")
+}
+
+// TestServedTip_RequiredGroups_EmptySelectorIgnored verifies that a required
+// group selector matching no upstreams is skipped rather than forcing the tip
+// to zero.
+func TestServedTip_RequiredGroups_EmptySelectorIgnored(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fixtures := []servedTipFixture{
+		{id: "int-1", chainID: 123, latestBlock: 100, tags: []string{"type:internal"}},
+		{id: "int-2", chainID: 123, latestBlock: 100, tags: []string{"type:internal"}},
+	}
+	nw, _ := setupServedTipNetworkWith(t, ctx, fixtures, &common.EvmServedTipConfig{
+		EnabledFor:     []string{"latest"},
+		RequiredGroups: []string{"type:internal", "type:ghost"},
+	})
+
+	assert.Equal(t, int64(100), nw.EvmHighestLatestBlockNumber(ctx),
+		"empty group selector is ignored; internal majority 100 is served")
+}
+
+// TestServedTip_RequiredGroups_SelectorScopedIgnored verifies that a request
+// carrying a use-upstream selector uses the scoped majority within that subset,
+// not the global group-aware tip.
+func TestServedTip_RequiredGroups_SelectorScopedIgnored(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fixtures := []servedTipFixture{
+		{id: "ext-1", chainID: 123, latestBlock: 200, tags: []string{"type:external"}},
+		{id: "ext-2", chainID: 123, latestBlock: 200, tags: []string{"type:external"}},
+		{id: "int-1", chainID: 123, latestBlock: 100, tags: []string{"type:internal"}},
+		{id: "int-2", chainID: 123, latestBlock: 100, tags: []string{"type:internal"}},
+	}
+	nw, _ := setupServedTipNetworkWith(t, ctx, fixtures, &common.EvmServedTipConfig{
+		EnabledFor:     []string{"latest"},
+		RequiredGroups: []string{"type:external", "type:internal"},
+	})
+
+	assert.Equal(t, int64(100), nw.EvmHighestLatestBlockNumber(ctx),
+		"global group-aware tip = 100")
+	assert.Equal(t, int64(200), nw.EvmHighestLatestBlockNumber(withServedTipSelector(ctx, "type:external")),
+		"selector-scoped request ignores requiredGroups and returns external majority 200")
+	assert.Equal(t, int64(100), nw.EvmHighestLatestBlockNumber(withServedTipSelector(ctx, "type:internal")),
+		"selector-scoped request returns internal majority 100")
+}
+
+// TestServedTip_RequiredGroups_RegressionGuardHealthy verifies that the
+// deliberate lag of the slow group is NOT treated as a regression: the guard
+// reference is the min of per-group corroborated heads.
+func TestServedTip_RequiredGroups_RegressionGuardHealthy(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fixtures := []servedTipFixture{
+		{id: "ext-1", chainID: 123, latestBlock: 200, tags: []string{"type:external"}},
+		{id: "ext-2", chainID: 123, latestBlock: 199, tags: []string{"type:external"}},
+		{id: "int-1", chainID: 123, latestBlock: 100, tags: []string{"type:internal"}},
+		{id: "int-2", chainID: 123, latestBlock: 99, tags: []string{"type:internal"}},
+	}
+	nw, _ := setupServedTipNetworkWith(t, ctx, fixtures, &common.EvmServedTipConfig{
+		EnabledFor:     []string{"latest"},
+		RequiredGroups: []string{"type:external", "type:internal"},
+	})
+
+	before := servedTipRegressionCount(nw, "latest", "held")
+	assert.Equal(t, int64(99), nw.EvmHighestLatestBlockNumber(ctx),
+		"global group-aware tip = min(199 external corroborated, 99 internal corroborated)")
+	assert.Equal(t, before, servedTipRegressionCount(nw, "latest", "held"),
+		"the deliberate gap between fast and slow groups must not trigger a regression hold")
+}
+
+// TestServedTip_RequiredGroups_GuaranteedMethodFloor verifies that the method
+// floor also respects required groups, so a guaranteed method's tip is the
+// minimum group-majority among its supporting upstreams.
+func TestServedTip_RequiredGroups_GuaranteedMethodFloor(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForEvmStatePoller()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fixtures := []servedTipFixture{
+		{id: "ext-1", chainID: 123, latestBlock: 200, tags: []string{"type:external"}},
+		{id: "ext-2", chainID: 123, latestBlock: 200, tags: []string{"type:external"}, ignoreMethods: []string{"trace_block"}},
+		{id: "int-1", chainID: 123, latestBlock: 100, tags: []string{"type:internal"}},
+		{id: "int-2", chainID: 123, latestBlock: 100, tags: []string{"type:internal"}, ignoreMethods: []string{"trace_block"}},
+	}
+	// Only ext-1 and int-1 support trace_block. Their per-group majorities are
+	// 200 and 100 respectively, so the floor = 100.
+	nw, _ := setupServedTipNetworkWith(t, ctx, fixtures, &common.EvmServedTipConfig{
+		EnabledFor:        []string{"latest"},
+		RequiredGroups:    []string{"type:external", "type:internal"},
+		GuaranteedMethods: []string{"trace_block"},
+	})
+
+	assert.Equal(t, int64(100), nw.EvmHighestLatestBlockNumber(ctx),
+		"group-aware guaranteed-method floor = min(external trace majority 200, internal trace majority 100)")
 }

@@ -1534,6 +1534,11 @@ func (e *EvmNetworkConfig) Validate() error {
 				return fmt.Errorf("network.*.evm.servedTip.guaranteedMethods has invalid pattern %q: %w", m, err)
 			}
 		}
+		for _, g := range e.ServedTip.RequiredGroups {
+			if err := ValidatePattern(g); err != nil {
+				return fmt.Errorf("network.*.evm.servedTip.requiredGroups has invalid selector %q: %w", g, err)
+			}
+		}
 	}
 	if e.SafeBlockSource != "" {
 		if err := ValidatePattern(e.SafeBlockSource); err != nil {
