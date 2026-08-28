@@ -2205,6 +2205,9 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 				cp := *defaults.Evm.ServedTip
 				n.Evm.ServedTip = &cp
 			}
+			if n.Evm.BlockAvailability == nil && defaults.Evm.BlockAvailability != nil {
+				n.Evm.BlockAvailability = defaults.Evm.BlockAvailability.Copy()
+			}
 			if n.Evm.SafeBlockSource == "" {
 				n.Evm.SafeBlockSource = defaults.Evm.SafeBlockSource
 			}
