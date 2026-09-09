@@ -201,7 +201,9 @@ consensus")`. The selector package must not import `consensus/`, so sitout
 state moves to **`health.Tracker`**:
 
 - Executor records sitout via `tracker.Cordon(upstream, "*", "misbehaving in
-  consensus")` and `tracker.Uncordon(...)` on timer expiry.
+  consensus")` and `tracker.Uncordon(...)` on timer expiry. The claim is
+  idempotent: a second punishment for the same upstream while already in
+  sitout is a no-op (the timer is not reset).
 - The misbehavior **rate limiter** also moves to `health.Tracker` (keyed by
   upstream ID) so that reaching a sitout is global across policies. The
   misbehavior **exporter** stays per-policy — it is a reporting sink, not a
@@ -234,7 +236,7 @@ distinguish them from consensus punishment:
 | `"misbehaving in consensus"` | Consensus punishment | Block fallback (stay on `standard`) |
 | `"chain identity mismatch"` | Wrong chain — availability | Allow fallback |
 | `"svm state poller:"` | Lag / unhealthy — availability | Allow fallback |
-| anything else | Operator cordon | Treat as availability (fail open to fallback) |
+| anything else | Unknown / future cordon | Block fallback (fail closed) |
 
 The eval ctx exposes `health` as a structured value, not a string match:
 `{ state: "healthy" \| "unhealthy" \| "cordoned", cordonReason?: string }`.
@@ -317,6 +319,19 @@ Goal: recent → internal+external; historical (outside internal
    already the normalized, terminal, non-misbehavior edge classification
    (`consensus/analysis.go`). Covers stale/misconfigured `blockAvailability`
    and error-shaped pruning. A single value-voting match holds the quota.
+
+   The waiver is **round-complete**: it only evaluates after all participants
+   have responded or the round has otherwise terminated (wait cap, short-
+   circuit, or timeout). It does not alter the wait-cap arming gate at
+   `consensus/executor.go:490` — that gate still holds arming until every
+   quota tag is covered by distinct upstreams, so a round cannot time out
+   early while a required participant is still in flight.
+
+   Load-time validation: a `requiredParticipants` entry with
+   `waiveAgreementOnMissingData: true` is rejected unless at least one other
+   entry has `waiveAgreementOnMissingData: false` (or omits the flag). A
+   policy where every quota is waivable is invalid — there must always be a
+   never-waivable floor.
 3. **Empty-waiver with block proof (v1.1 — spec now, not in milestones).**
    Null-shaped pruning (`eth_getTransactionByHash` post-EIP-4444) is ambiguous
    at the source — but the winning tx/receipt/log carries its own
@@ -340,7 +355,7 @@ policy + waiver covers it with zero JS.
 | Pruned tx, node returns MissingData error | Waiver → external 2-agreement |
 | Pruned tx, node returns `null` | v1: dispute. v1.1: empty-waiver with block proof serves |
 | Data never existed (all null / all MissingData) | `null` served (empty ≥ threshold) / agreed MissingData error — correct |
-| Internal + external both return MissingData, one external returns the value | **Composition dispute** — MissingData is a `ResponseTypeConsensusError`, so the generic threshold rule can make it the winner, but `enforceWinnerComposition` does **not** exempt consensus-error groups. The internal `minAgreement` quota fails and the round disputes. The waiver only fires when **all** tag-matching participants returned MissingData; here one external returned a value, so the waiver does not fire. |
+| Internal + external both return MissingData, one external returns the value | **Composition dispute** — MissingData is a `ResponseTypeConsensusError`, so the generic threshold rule can make it the winner, but `enforceWinnerComposition` does **not** exempt consensus-error groups. The external `minAgreement: 2` quota fails (only one external voted) and the round disputes. The waiver only fires when **all** tag-matching participants returned MissingData; here one external returned a value, so the waiver does not fire. |
 | Just-mined tx not yet on internal (internal null) | Dispute → retry succeeds. Serving it needs minAgreement-0 + preferNonEmpty = externals outvote internal — rejected |
 | Internal wrong value (misbehavior) | Quota holds → composition dispute + `punishMisbehavior` |
 | Internal outage (infra error ≠ MissingData) | Quota holds → dispute for unauthorized; authorized roles get `fallback` on the next request (§6) |
@@ -350,7 +365,8 @@ policy + waiver covers it with zero JS.
 ### 7.3 Requirements
 
 - **R1** waiver fields on `requiredParticipants[]` (opt-in, default off) +
-  executor change localized to `enforceWinnerComposition`.
+  executor change localized to `enforceWinnerComposition`; wait-cap arming
+  gate at `executor.go:490` unchanged.
 - **R2** `blockAvailability` on every internal upstream;
   `canServeBlock(n)` uses existing `EvmAssertBlockAvailability`.
 - **R3** archive externals tagged, `minAgreement: 2`, never waivable.
@@ -364,6 +380,9 @@ policy + waiver covers it with zero JS.
 - **R8** selector must distinguish automatic availability cordons (chain
   identity mismatch, SVM lag) from consensus punishment; only the exact
   `"misbehaving in consensus"` reason blocks fallback.
+- **R9** load-time validation rejects a policy where every
+  `requiredParticipants` quota is waivable; at least one quota must be
+  never-waivable.
 
 ---
 

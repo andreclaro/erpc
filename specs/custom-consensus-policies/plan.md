@@ -91,7 +91,14 @@ fixture validates and compiles.
    `waiveAgreementOnMissingData` and every tag-matching participant returned
    `ErrEndpointMissingData`, skip that quota. Emit
    `consensus_composition_waived_total{tag,reason="missing_data"}` + log.
-2. **Characterization tests** — one per edge-matrix row in feature.md §7.2
+   The waiver is round-complete: it only evaluates after all participants
+   have responded or the round has otherwise terminated. The wait-cap arming
+   gate at `executor.go:490` is unchanged — it still holds arming until
+   every quota tag is covered by distinct upstreams.
+2. **Load-time validation** — reject a policy where every
+   `requiredParticipants` quota is waivable; at least one must be
+   never-waivable.
+3. **Characterization tests** — one per edge-matrix row in feature.md §7.2
    (v1 rows only; null-shape stays dispute). Existing consensus tests run
    unchanged against the default policy (zero regression).
 
