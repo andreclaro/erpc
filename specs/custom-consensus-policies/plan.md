@@ -18,7 +18,7 @@ correctness pieces.
 | Decision | Choice |
 |----------|--------|
 | When JS runs | **Pre-round** only — selects which policy to run |
-| What JS returns | Policy **name** (primary); inline object as escape hatch |
+| What JS returns | Policy **name** only; no inline object in v1 |
 | Auth / roles | Inside `customPolicy.evalFunction` via `ctx.user` — no separate claim→policy allowlist |
 | Round grading | Stays in declarative `ConsensusPolicyConfig` / executor |
 | Mid-round switch | **Never** — fail-visible under the selected policy |
@@ -26,7 +26,10 @@ correctness pieces.
 | Empty/null pruning | Spec for v1.1 (`waiveAgreementOnEmptyOutsideRetention`); **not** in v1 milestones |
 | `blockAvailability` | Existing config + `EvmAssertBlockAvailability` — no new dynamic model |
 | Fallback policy shape | Plain `{ maxParticipants, agreementThreshold }` — no tag quotas |
-| Decision cache | Auto-derived keys from accessed paths; gen-counter invalidation |
+| Decision cache | **Not in v1** — add only if measured eval cost forces it |
+| Sitout state | Moved to `health.Tracker` (cordon reason) so selector reads it without importing `consensus/` |
+| Header + metric | Reimplemented here (`X-eRPC-Consensus-Policy`, `consensus_policy` label); not dependent on #1041 |
+| Default policy | Must be the strictest; fail-closed target |
 
 ---
 
@@ -44,20 +47,23 @@ correctness pieces.
 
 Package: `internal/consensus/policy/` — no imports from `consensus/` executor.
 
-1. **Sobek pool** — compile once at startup (`sobek.Program`); pre-warm VMs;
-   borrow per eval; `evalTimeout` hard cap.
+1. **Sobek pool** — compile once at startup (`sobek.Program`); pre-warm 8 VMs;
+   borrow per eval; `evalTimeout` hard cap. Pool exhaustion fails closed to
+   default policy + `consensus_policy_eval_bypassed_total{reason="pool_exhausted"}`.
 2. **`EvalContext`** types — request, user, upstream refs (id, tags, health,
    blockAvailability), network.
 3. **Stdlib v1** — `withTag`, `healthy`, `anyPunished`, `canServeBlock` (wraps
    `EvmAssertBlockAvailability`), `hasRole`.
 4. **API** — `Compile(js) (*Policy, error)`, `Evaluate(ctx) (name string, err error)`.
    Empty / null → `""` (default). Unknown-name resolution is the caller's job.
-5. **Unit tests first on fallthrough** — nil user, empty upstreams, empty
-   eval, timeout, throw → error (caller fails closed). Then happy-path name /
-   object returns and each stdlib helper.
+5. **Benchmark** — measure eval latency on a pre-warmed VM; report result in
+   the PR (gates the future decision-cache phase).
+6. **Unit tests first on fallthrough** — nil user, empty upstreams, empty
+   eval, timeout, throw → error (caller fails closed). Then happy-path name
+   returns and each stdlib helper.
 
 **Acceptance**: `go test ./internal/consensus/policy/...` green; package has
-zero imports from `consensus/` executor.
+zero imports from `consensus/` executor; benchmark result posted.
 
 ---
 
@@ -71,8 +77,7 @@ zero imports from `consensus/` executor.
    `ConsensusPolicyConfig.Validate()`; `customPolicy.evalFunction` smoke-compiles;
    unknown cross-refs rejected at load where statically knowable.
 4. Defaults: inline `consensus:` with no `policies` → anonymous default policy.
-   `evalTimeout` default (suggest `50ms`, match selection-policy order of
-   magnitude).
+   `evalTimeout` default `50ms`.
 5. Tygo regen for TypeScript config types.
 
 **Acceptance**: existing configs load unchanged; a `policies` + `customPolicy`
@@ -80,33 +85,14 @@ fixture validates and compiles.
 
 ---
 
-## Phase 3 — Executor wiring + MissingData waiver
+## Phase 3 — Auth + health plumbing
 
-1. **Pre-round resolution** in the consensus path: build `EvalContext` from
-   auth + upstream registry + request; evaluate (or cache lookup); resolve
-   name → config; run existing executor under that config.
-2. **Fail closed** — eval error / timeout / unknown name → default policy +
-   log.
-3. **Header + metric** — `X-eRPC-Consensus-Policy`, `consensus_policy` label
-   (lifted from #1041).
-4. **Waiver** in `enforceWinnerComposition`: if
-   `waiveAgreementOnMissingData` and every tag-matching participant returned
-   `ErrEndpointMissingData`, skip that quota. Emit
-   `consensus_composition_waived_total{tag,reason="missing_data"}` + log.
-5. **Characterization tests** — one per edge-matrix row in feature.md §7.2
-   (v1 rows only; null-shape stays dispute). Existing consensus tests run
-   unchanged against the default policy (zero regression).
-
-**Acceptance**: UC1 (standard mixed-node), UC2 (role-gated fallback), UC3
-(historical via waiver) pass as config-level fixtures; no mid-round switch
-behavior exists.
-
----
-
-## Phase 4 — Auth + health plumbing
-
-1. Expose JWT roles/claims on `ctx.user` (reuse existing auth resolution).
-2. Expose healthy vs punished/sitout distinctly on upstream health refs (R7).
+1. Expose JWT roles/claims on `ctx.user` (**new plumbing** — `common.User`
+   gains `Roles`; JWT strategy populates from a configurable claim; other
+   strategies leave it empty).
+2. Move consensus sitout state to `health.Tracker` cordon reason
+   (`"misbehaving in consensus"`); selector reads `CordonedReason` to
+   distinguish punished from unhealthy.
 3. `blockNumber` extraction for eval ctx (numeric request params).
 4. Fallback eval refuse-to-fire when `anyPunished()` is true — tested.
 
@@ -115,7 +101,42 @@ callers never get `fallback` / `generous-dev`.
 
 ---
 
-## Phase 5 — Decision cache
+## Phase 4 — Executor wiring
+
+1. **Pre-round resolution** in the consensus path: build `EvalContext` from
+   auth + upstream registry + request; evaluate; resolve name → config; run
+   existing executor under that config.
+2. **Fail closed** — eval error / timeout / unknown name / pool exhaustion →
+   default policy + log.
+3. **Header + metric** — `X-eRPC-Consensus-Policy`, `consensus_policy` label,
+   `consensus_policy_eval_duration_seconds`,
+   `consensus_policy_eval_failed_total{reason}`.
+
+**Acceptance**: UC1 (standard mixed-node), UC2 (role-gated fallback), UC3
+(historical via waiver) pass as config-level fixtures; no mid-round switch
+behavior exists.
+
+---
+
+## Phase 5 — MissingData waiver
+
+1. **Waiver** in `enforceWinnerComposition`: if
+   `waiveAgreementOnMissingData` and every tag-matching participant returned
+   `ErrEndpointMissingData`, skip that quota. Emit
+   `consensus_composition_waived_total{tag,reason="missing_data"}` + log.
+2. **Characterization tests** — one per edge-matrix row in feature.md §7.2
+   (v1 rows only; null-shape stays dispute). Existing consensus tests run
+   unchanged against the default policy (zero regression).
+
+**Acceptance**: UC3 (historical via waiver) passes; mixed MissingData group
+winning is accepted as "not found" (no value-group change).
+
+---
+
+## Phase 6 — Decision cache (optional, future)
+
+Only if the Phase 1 benchmark shows eval cost matters. Design is in
+feature.md §5; implementation is a follow-on PR.
 
 1. Tracking-ctx first eval per (network, method) to derive key schema.
 2. Health-tracker generation counter invalidation.
@@ -132,7 +153,7 @@ bypass/miss rates.
 
 ---
 
-## Phase 6 — Docs + E2E
+## Phase 7 — Docs + E2E
 
 1. Docs page under `docs/pages/config/` for `consensus.policies` /
    `customPolicy` / waiver fields (agent-first: Config schema table, Edge
@@ -148,6 +169,9 @@ bypass/miss rates.
 
 - `waiveAgreementOnEmptyOutsideRetention` + `blockEvidenceFields` (v1.1 —
   build when dispute traces show the null shape).
+- Decision cache (Phase 6 is a future optimization, gated on measured eval
+  cost).
+- Inline policy object return from eval (name only in v1).
 - Mid-round policy switching / post-round JS grading.
 - #1069 bounded-deviation value logic.
 - Separate claim→policy allowlist outside JS.

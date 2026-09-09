@@ -15,6 +15,15 @@ The **Custom Consensus Policies Engine** lets operators define **named declarati
 consensus policies** and a **pre-round freeform JS selector** (`customPolicy`) that
 picks which policy governs each request.
 
+After v1, an operator can:
+
+- Run strict internal+external consensus for production callers, and a
+  permissive `generous-dev` policy for a dev role — without code changes.
+- Automatically fall back to external-only consensus when internal nodes are
+  down, but only for authorized roles.
+- Serve historical data via external archive consensus when internal nodes
+  have pruned it, without hardcoding retention windows.
+
 Freeform JS decides **which** declarative policy to run — never **how** the round
 is graded. The consensus executor and its `ConsensusPolicyConfig` contract stay
 unchanged. Open-ended operator logic (caller role, upstream health, block
@@ -26,7 +35,7 @@ availability) resolves into one bounded interface — a named
 
 - `consensus.policies.<name>`: named map of full `ConsensusPolicyConfig`.
 - `consensus.customPolicy.evalFunction`: JS evaluated **per request, before the
-  round**, returning a policy name (or inline policy object).
+  round**, returning a policy name.
 - Eval context: request (method, blockNumber, network), user/roles, upstreams
   (tags, health, blockAvailability).
 - Role-gated automatic fallback when internals are unavailable for availability
@@ -34,8 +43,7 @@ availability) resolves into one bounded interface — a named
 - Historical serving: recent → internal+external; historical (outside internal
   `blockAvailability`) → external-only with ≥2 agreeing, via a declarative
   MissingData composition waiver.
-- Observability: chosen policy name on every served round (header + metric);
-  optional decision cache.
+- Observability: chosen policy name on every served round (header + metric).
 - Zero migration: today's inline `consensus:` block becomes the default policy.
 
 ### Non-goals
@@ -46,6 +54,8 @@ availability) resolves into one bounded interface — a named
   start (fail-visible, not fail-silent).
 - No separate claim→policy allowlist outside JS. Role→policy lives in
   `customPolicy.evalFunction` via `ctx.user`.
+- No inline policy object return in v1 — eval returns a **name** only.
+- No decision cache in v1 — added only if measured eval cost forces it.
 - #1069-style bounded-deviation value logic stays executor-side (separate
   change).
 - Empty-response waiver with block proof is **spec'd for v1.1**, not in v1
@@ -88,29 +98,34 @@ consensus:
 | Field | Type | Description |
 |---|---|---|
 | `policies` | `map[string]ConsensusPolicyConfig` | Named policies. Each value is a complete consensus config (same fields as today's inline block). |
-| `customPolicy.evalFunction` | `string` | JS function. Signature `(ctx) => string \| object \| null`. If omitted, the default/inline policy applies to every request. |
+| `customPolicy.evalFunction` | `string` | JS function. Signature `(ctx) => string \| null`. If omitted, the default/inline policy applies to every request. |
 | `customPolicy.evalTimeout` | `Duration` | Hard wall-clock cap on each eval. Fail closed to default on timeout. |
 | `requiredParticipants[].waiveAgreementOnMissingData` | `bool` | Opt-in, default `false`. See §6. |
 
 **Backward compatibility:** an inline `consensus:` block with no `policies` map
 is one anonymous default policy — zero operator migration. All existing fields
 (`agreementThreshold`, `requiredParticipants`, `punishMisbehavior`, …) keep
-working. From #1041 lift the `X-eRPC-Consensus-Policy` header and
-`consensus_policy` metric; ordered YAML `acceptancePolicies` is superseded.
+working. This design **reimplements** the `X-eRPC-Consensus-Policy` header and
+`consensus_policy` metric (not dependent on #1041). Ordered YAML
+`acceptancePolicies` is superseded.
+
+**Default policy must be the strictest.** The anonymous default (or the policy
+returned when eval fails/returns null) is the fail-closed target. Operators
+must configure it as the most restrictive policy; the spec assumes `standard`
+is that policy.
 
 ---
 
 ## 3. Eval interface
 
 ```js
-(ctx) => string | object | null
+(ctx) => string | null
 // ctx.request   { method, blockNumber: number|null, network }
 // ctx.user      { roles: string[], claims: object } | null
 // ctx.upstreams [{ id, tags, health, blockAvailability: {lower, upper} | null }]
 //
 // return "name" → run policies[name]
 //                 (unknown name → fail closed to default + warn log)
-// return {…}    → inline ConsensusPolicyConfig (escape hatch; weaker observability)
 // return null   → default policy
 ```
 
@@ -142,10 +157,9 @@ auth/ , health/              ← supply ctx.user and upstream health/availabilit
 
 ### 4.1 Request flow
 
-1. Auth resolves user/roles (existing).
+1. Auth resolves user/roles (**new plumbing** — see §4.3).
 2. Build `EvalContext` (request, user, upstream refs, network).
-3. `selector.Evaluate(ctx)` bounded by `evalTimeout` → policy name
-   (decision-cache lookup first — §5).
+3. `selector.Evaluate(ctx)` bounded by `evalTimeout` → policy name.
 4. Resolve name → `ConsensusPolicyConfig` (unknown/empty → default).
 5. Existing executor runs under that config — untouched code path.
 6. Emit `X-eRPC-Consensus-Policy: <name>` header + `consensus_policy` metric
@@ -157,35 +171,72 @@ with an error/warn log — never to a more permissive policy.
 ### 4.2 Latency
 
 Eval runs once per request **before** fan-out and does not extend consensus wait
-windows. Cache hit ≈ map lookup (µs). Cache miss ≈ Sobek bytecode on a
-pre-warmed VM (tens–low hundreds of µs) — negligible vs upstream RTT.
+windows. Sobek bytecode on a pre-warmed VM is tens–low hundreds of µs —
+negligible vs upstream RTT. A decision cache is **not** in v1; add only if
+profiles force it.
+
+### 4.3 Auth plumbing (new)
+
+`common.User` today carries `Id`, `RateLimitBudget`, `AllowClientDirectives` —
+**no roles or claims**. `auth/strategy_jwt.go` validates required claims and
+claim matchers, then discards the claim map. `ctx.user.hasRole()` therefore
+requires new plumbing:
+
+- Add `Roles []string` to `common.User`.
+- JWT strategy populates `Roles` from a configurable claim (default
+  `roles`, comma-separated or array).
+- All other strategies (`secret`, `network`, `database`, `siwe`) leave
+  `Roles` empty — `hasRole` returns false.
+- Roles are **never** accepted from client-controlled headers, query params,
+  or body fields — only from the verified token.
+
+This is a hard dependency of UC2 (role-gated fallback) and role-gated
+historical access.
+
+### 4.4 Sitout state ownership
+
+Today `punishMisbehavior` sitout lives in a private executor map
+(`misbehavingUpstreamsSitoutTimer`) plus `upstream.Cordon("*", "misbehaving in
+consensus")`. The selector package must not import `consensus/`, so sitout
+state moves to **`health.Tracker`**:
+
+- Executor records sitout via `tracker.Cordon(upstream, "*", "misbehaving in
+  consensus")` and `tracker.Uncordon(...)` on timer expiry.
+- Selector reads `tracker.CordonedReason(upstream, "*")` and treats
+  `"misbehaving in consensus"` as punished; other cordon reasons are operator
+  cordons, not punishment.
+- `anyPunished()` is true iff any upstream that would otherwise be eligible
+  is currently cordoned with the consensus-misbehavior reason.
+
+This keeps the zero-import rule for `internal/consensus/policy/` and gives
+both executor and selector a shared, race-safe source of truth.
+
+### 4.5 Sobek pool
+
+- Pool size: **8 pre-warmed VMs** (bounded; matches selection-policy order of
+  magnitude).
+- Pool exhaustion under burst: **fail closed to default policy** and count a
+  bypass (`consensus_policy_eval_bypassed_total{reason="pool_exhausted"}`).
+  Do not block the request path on a VM borrow.
+- Memory per VM: small (empty Sobek runtime + stdlib); bounded by pool size.
+- `evalTimeout` caps wall-clock per eval; a runaway eval poisons only the
+  borrowed VM, which is discarded.
 
 ---
 
-## 5. Decision cache
+## 5. Decision cache (future work)
 
-Freeform JS cannot declare its dependencies — the cache key is **auto-derived
-from what the eval actually reads**:
+Not in v1. The eval is measured in microseconds against upstream RTT in
+milliseconds; a cache adds dependency-tracking complexity for no forced
+benefit. If profiles later show eval cost matters, the design is:
 
-- First eval per (network, method) runs with a tracking ctx; property getters
-  record accessed paths (`user.roles`, `request.blockNumber`,
-  `upstreams[].health`, …). Key schema = accessed paths; key = their values.
-  Fallback: operator-declared `cacheKeys` if sobek getter tracking proves
-  impractical.
-- Health/availability reads fold into one health-tracker **generation counter**
-  (bumped on any upstream state transition) — O(1) invalidation. Tradeoff: a
-  single flapping upstream invalidates all cached decisions for the network;
-  correctness over hit rate.
-- `request.blockNumber` buckets by the union of configured `blockAvailability`
-  boundaries; a per-(network, method) **cardinality guard** disables caching
-  for evals whose keys explode.
-- Evals touching time/random/external state are marked **uncacheable** and
-  always execute — safe fallthrough.
-- Cache stores the policy **name** only; name→config resolution happens after
-  the hit (survives config reload). Errors are never cached.
-- Bounded LRU + TTL backstop.
-- Metrics: `consensus_policy_cache_hits_total`, `_misses_total`,
-  `_bypassed_total{reason}`.
+- Auto-derive cache keys from accessed ctx paths (getter tracking), with
+  operator-declared `cacheKeys` as fallback.
+- Health/availability reads fold into a health-tracker generation counter for
+  O(1) invalidation.
+- `blockNumber` buckets by `blockAvailability` boundaries; cardinality guard
+  disables caching for exploding keys.
+- Cache stores policy **name** only; errors never cached.
 
 ---
 
@@ -214,8 +265,8 @@ downgraded.
 
 | Rule | Behavior |
 |---|---|
-| Availability vs punishment | Sitout must be distinct from unhealthy in `ctx.upstreams[].health`. Punished → stay on `standard` → hard dispute. An attacker who gets internals punished must not force a downgrade. |
-| In-flight failure | No mid-round switch. That round disputes under `standard`; the tracker records it; the *next* request's eval picks `fallback`. Cache invalidation is immediate via the health generation counter. |
+| Availability vs punishment | Sitout is distinct from unhealthy in `ctx.upstreams[].health` (§4.4). Punished → stay on `standard` → hard dispute. An attacker who gets internals punished must not force a downgrade. |
+| In-flight failure | No mid-round switch. That round disputes under `standard`; the tracker records it; the *next* request's eval picks `fallback`. |
 | Recovery | Internals healthy again → eval returns `standard`. Automatic both ways. Header `X-eRPC-Consensus-Policy: fallback` makes the degraded grade explicit. |
 
 ---
@@ -260,6 +311,7 @@ policy + waiver covers it with zero JS.
 | Pruned tx, node returns MissingData error | Waiver → external 2-agreement |
 | Pruned tx, node returns `null` | v1: dispute. v1.1: empty-waiver with block proof serves |
 | Data never existed (all null / all MissingData) | `null` served (empty ≥ threshold) / agreed MissingData error — correct |
+| Internal + external both return MissingData, one external returns the value | **Acceptable** — MissingData is an agreed-upon error, so the MissingData group can win ≥ threshold and serve the "not found" error. The waiver only fires on composition failure, not on a value-group win. No change to value grouping. |
 | Just-mined tx not yet on internal (internal null) | Dispute → retry succeeds. Serving it needs minAgreement-0 + preferNonEmpty = externals outvote internal — rejected |
 | Internal wrong value (misbehavior) | Quota holds → composition dispute + `punishMisbehavior` |
 | Internal outage (infra error ≠ MissingData) | Quota holds → dispute for unauthorized; authorized roles get `fallback` on the next request (§6) |
@@ -290,9 +342,18 @@ policy + waiver covers it with zero JS.
 | `X-eRPC-Consensus-Policy` response header | Chosen policy name on every served round |
 | `consensus_policy` metric label | Same, on consensus metrics |
 | `consensus_composition_waived_total{tag,reason}` | Waiver fires (`missing_data` / later `empty_outside_retention`) |
-| `consensus_policy_cache_hits_total` / `_misses_total` / `_bypassed_total{reason}` | Decision-cache health |
+| `consensus_policy_eval_duration_seconds` | Eval latency histogram |
+| `consensus_policy_eval_failed_total{reason}` | Fail-closed selections split by reason (`timeout`, `throw`, `unknown_name`, `pool_exhausted`) |
 | Warn log on unknown policy name | Config typo signal |
 | Error log on eval failure/timeout | Fail-closed fallback |
+
+**Alerting:** page on sustained non-default policy selection (e.g. `fallback`
+> 5 min) or a step change in `consensus_composition_waived_total`. These are
+security signals, not only availability signals.
+
+**Metric cardinality:** `consensus_policy` label cardinality is bounded by the
+number of named policies (expected ≤ 10 per network). No per-request unbounded
+labels.
 
 ---
 
@@ -306,3 +367,48 @@ policy + waiver covers it with zero JS.
 - Fallback must not fire on punishment (R7).
 - Empty-waiver (v1.1) must not fire without block proof outside retention —
   closes the correlated-externals-outvote-internal hole for recent data.
+- Role gating turns the JWT into a **correctness control**, not only a rate
+  limit. A leaked token can select a weaker consensus grade; the
+  `X-eRPC-Consensus-Policy` header lets callers detect a degraded grade.
+
+---
+
+## 10. Rollout, rollback, and reload
+
+- **Enablement:** per-network config. Add `policies` + `customPolicy` to one
+  network first; others keep the inline default.
+- **Rollback:** remove `customPolicy` (or fix `evalFunction`) and reload
+  config. If config reload is not available, restart the process — recovery
+  time is bounded by pod restart.
+- **Reload:** on config change, recompile the Sobek program and rebuild the
+  VM pool. In-flight requests continue under the policy selected at their
+  start; new requests use the new program. If recompilation fails, keep the
+  previous program and log the error.
+- **Dry-run / validation:** `erpc config validate` (or a dedicated CLI) smoke-
+  compiles `evalFunction` and runs it against synthetic contexts before
+  deploy.
+
+---
+
+## 11. Open questions answered
+
+1. **Why freeform JS instead of a declarative selector?** The three example
+   policies are selected by two predicates today, but the operator need is an
+   open-ended set (role, health, block range, method, future dimensions). A
+   declarative matcher would grow a new match-rule DSL per dimension; freeform
+   JS is the weakest commitment that handles the observed cases and the
+   unseen ones. The selection-policy precedent (`internal/policy`) already
+   pays the Sobek cost.
+2. **Why a second Sobek engine instead of reusing `internal/policy`?** The
+   selection-policy engine is per-network, tick-based, and owns slot state,
+   sticky stores, and probers. The consensus selector is per-request,
+   stateless, and returns a name, not an ordered upstream list. Reusing it
+   would couple two different lifecycles and force consensus to inherit
+   selection-policy concepts (slots, ticks, eviction). A small standalone
+   package is the weaker commitment.
+3. **If the MissingData waiver shipped alone, how much of #1088 is solved?**
+   Historical serving (UC3) is solved. Role-gated fallback (UC2) and custom
+   operator policies (UC5) still need the selector.
+4. **Measured eval cost?** Not yet measured; a benchmark is required in
+   Phase 1. The design assumes tens–low hundreds of µs; if measurement shows
+   otherwise, the decision-cache phase is re-evaluated.
