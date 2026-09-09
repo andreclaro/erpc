@@ -202,16 +202,45 @@ state moves to **`health.Tracker`**:
 
 - Executor records sitout via `tracker.Cordon(upstream, "*", "misbehaving in
   consensus")` and `tracker.Uncordon(...)` on timer expiry.
+- The misbehavior **rate limiter** also moves to `health.Tracker` (keyed by
+  upstream ID) so that reaching a sitout is global across policies. The
+  misbehavior **exporter** stays per-policy — it is a reporting sink, not a
+  correctness signal.
 - Selector reads `tracker.CordonedReason(upstream, "*")` and treats
-  `"misbehaving in consensus"` as punished; other cordon reasons are operator
-  cordons, not punishment.
+  `"misbehaving in consensus"` as punished.
 - `anyPunished()` is true iff any upstream that would otherwise be eligible
   is currently cordoned with the consensus-misbehavior reason.
 
 This keeps the zero-import rule for `internal/consensus/policy/` and gives
 both executor and selector a shared, race-safe source of truth.
 
-### 4.5 Sobek pool
+### 4.5 Automatic cordons vs punishment
+
+Not every cordon is punishment. The health tracker also cordons upstreams
+automatically for availability reasons:
+
+- **EVM chain-identity mismatch** (`architecture/evm/evm_state_poller.go`) —
+  the upstream is serving a different chain; cordon reason starts with
+  `"chain identity mismatch"`.
+- **SVM lag / unhealthy** (`architecture/svm/svm_state_poller.go`) — shred-
+  insert lag or `getHealth` failure; cordon reason starts with `"svm state
+  poller:"`.
+
+These are **availability** failures, not misbehavior. The selector must
+distinguish them from consensus punishment:
+
+| Cordon reason prefix | Meaning | Fallback behavior |
+|---|---|---|
+| `"misbehaving in consensus"` | Consensus punishment | Block fallback (stay on `standard`) |
+| `"chain identity mismatch"` | Wrong chain — availability | Allow fallback |
+| `"svm state poller:"` | Lag / unhealthy — availability | Allow fallback |
+| anything else | Operator cordon | Treat as availability (fail open to fallback) |
+
+The eval ctx exposes `health` as a structured value, not a string match:
+`{ state: "healthy" \| "unhealthy" \| "cordoned", cordonReason?: string }`.
+`anyPunished()` checks `cordonReason == "misbehaving in consensus"` exactly.
+
+### 4.6 Sobek pool
 
 - Pool size: **8 pre-warmed VMs** (bounded; matches selection-policy order of
   magnitude).
@@ -311,7 +340,7 @@ policy + waiver covers it with zero JS.
 | Pruned tx, node returns MissingData error | Waiver → external 2-agreement |
 | Pruned tx, node returns `null` | v1: dispute. v1.1: empty-waiver with block proof serves |
 | Data never existed (all null / all MissingData) | `null` served (empty ≥ threshold) / agreed MissingData error — correct |
-| Internal + external both return MissingData, one external returns the value | **Acceptable** — MissingData is an agreed-upon error, so the MissingData group can win ≥ threshold and serve the "not found" error. The waiver only fires on composition failure, not on a value-group win. No change to value grouping. |
+| Internal + external both return MissingData, one external returns the value | **Composition dispute** — MissingData is a `ResponseTypeConsensusError`, so the generic threshold rule can make it the winner, but `enforceWinnerComposition` does **not** exempt consensus-error groups. The internal `minAgreement` quota fails and the round disputes. The waiver only fires when **all** tag-matching participants returned MissingData; here one external returned a value, so the waiver does not fire. |
 | Just-mined tx not yet on internal (internal null) | Dispute → retry succeeds. Serving it needs minAgreement-0 + preferNonEmpty = externals outvote internal — rejected |
 | Internal wrong value (misbehavior) | Quota holds → composition dispute + `punishMisbehavior` |
 | Internal outage (infra error ≠ MissingData) | Quota holds → dispute for unauthorized; authorized roles get `fallback` on the next request (§6) |
@@ -332,6 +361,9 @@ policy + waiver covers it with zero JS.
   policy name, unlisted method) first.
 - **R7** punished/sitout distinct from unhealthy in eval ctx; fallback eval
   must refuse to fire when any matching internal is punished.
+- **R8** selector must distinguish automatic availability cordons (chain
+  identity mismatch, SVM lag) from consensus punishment; only the exact
+  `"misbehaving in consensus"` reason blocks fallback.
 
 ---
 

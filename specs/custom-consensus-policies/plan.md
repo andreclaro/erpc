@@ -27,7 +27,7 @@ correctness pieces.
 | `blockAvailability` | Existing config + `EvmAssertBlockAvailability` — no new dynamic model |
 | Fallback policy shape | Plain `{ maxParticipants, agreementThreshold }` — no tag quotas |
 | Decision cache | **Not in v1** — add only if measured eval cost forces it |
-| Sitout state | Moved to `health.Tracker` (cordon reason) so selector reads it without importing `consensus/` |
+| Sitout state | Moved to `health.Tracker` (cordon reason + rate limiter) so selector reads it without importing `consensus/`; exporter stays per-policy |
 | Header + metric | Reimplemented here (`X-eRPC-Consensus-Policy`, `consensus_policy` label); not dependent on #1041 |
 | Default policy | Must be the strictest; fail-closed target |
 
@@ -85,23 +85,44 @@ fixture validates and compiles.
 
 ---
 
-## Phase 3 — Auth + health plumbing
+## Phase 3 — MissingData waiver
+
+1. **Waiver** in `enforceWinnerComposition`: if
+   `waiveAgreementOnMissingData` and every tag-matching participant returned
+   `ErrEndpointMissingData`, skip that quota. Emit
+   `consensus_composition_waived_total{tag,reason="missing_data"}` + log.
+2. **Characterization tests** — one per edge-matrix row in feature.md §7.2
+   (v1 rows only; null-shape stays dispute). Existing consensus tests run
+   unchanged against the default policy (zero regression).
+
+**Acceptance**: UC3 (historical via waiver) passes; mixed MissingData group
+winning is a composition dispute (the waiver does not fire when any matching
+participant returned a value).
+
+---
+
+## Phase 4 — Auth + health plumbing
 
 1. Expose JWT roles/claims on `ctx.user` (**new plumbing** — `common.User`
    gains `Roles`; JWT strategy populates from a configurable claim; other
    strategies leave it empty).
 2. Move consensus sitout state to `health.Tracker` cordon reason
-   (`"misbehaving in consensus"`); selector reads `CordonedReason` to
-   distinguish punished from unhealthy.
-3. `blockNumber` extraction for eval ctx (numeric request params).
-4. Fallback eval refuse-to-fire when `anyPunished()` is true — tested.
+   (`"misbehaving in consensus"`); move the misbehavior rate limiter to
+   `health.Tracker` keyed by upstream ID so reaching a sitout is global
+   across policies. The misbehavior exporter stays per-policy.
+3. Selector reads `CordonedReason` and treats only the exact reason
+   `"misbehaving in consensus"` as punishment; automatic cordons (EVM chain
+   identity mismatch, SVM lag) are availability failures and allow fallback.
+4. `blockNumber` extraction for eval ctx (numeric request params).
+5. Fallback eval refuse-to-fire when `anyPunished()` is true — tested.
 
 **Acceptance**: punished internals never select `fallback`; unauthorized
-callers never get `fallback` / `generous-dev`.
+callers never get `fallback` / `generous-dev`; chain-mismatch-cordoned
+internals do allow `fallback` for authorized roles.
 
 ---
 
-## Phase 4 — Executor wiring
+## Phase 5 — Executor wiring
 
 1. **Pre-round resolution** in the consensus path: build `EvalContext` from
    auth + upstream registry + request; evaluate; resolve name → config; run
@@ -115,21 +136,6 @@ callers never get `fallback` / `generous-dev`.
 **Acceptance**: UC1 (standard mixed-node), UC2 (role-gated fallback), UC3
 (historical via waiver) pass as config-level fixtures; no mid-round switch
 behavior exists.
-
----
-
-## Phase 5 — MissingData waiver
-
-1. **Waiver** in `enforceWinnerComposition`: if
-   `waiveAgreementOnMissingData` and every tag-matching participant returned
-   `ErrEndpointMissingData`, skip that quota. Emit
-   `consensus_composition_waived_total{tag,reason="missing_data"}` + log.
-2. **Characterization tests** — one per edge-matrix row in feature.md §7.2
-   (v1 rows only; null-shape stays dispute). Existing consensus tests run
-   unchanged against the default policy (zero regression).
-
-**Acceptance**: UC3 (historical via waiver) passes; mixed MissingData group
-winning is accepted as "not found" (no value-group change).
 
 ---
 
@@ -182,7 +188,7 @@ bypass/miss rates.
 
 - **Punished vs unhealthy indistinguishability** — if health refs collapse
   sitout into "unhealthy", fallback becomes an attacker-forced downgrade. R7
-  is load-bearing; block Phase 4 on a distinct signal.
+  is load-bearing; block Phase 5 on a distinct signal.
 - **Decision-cache key explosion** — freeform JS over `blockNumber` without
   bucketing. Cardinality guard must disable caching, not OOM.
 - **Sobek getter tracking** — if impractical, STOP and fall back to declared
