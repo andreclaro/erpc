@@ -88,7 +88,7 @@ consensus:
     evalFunction: |
       (ctx) => {
         const internals = ctx.upstreams.withTag("type:internal")
-        if (internals.healthy().length === 0 && !internals.anyPunished())
+        if (internals.allUnavailable())
           return ctx.user?.hasRole("brp:consensus-fallback") ? "fallback" : "standard"
         if (ctx.user?.hasRole("brp:dev")) return "generous-dev"
         return "standard"
@@ -123,6 +123,9 @@ is that policy.
 // ctx.request   { method, blockNumber: number|null, network }
 // ctx.user      { roles: string[], claims: object } | null
 // ctx.upstreams [{ id, tags, health, blockAvailability: {lower, upper} | null }]
+//   health = { state: "healthy" | "unhealthy" | "cordoned",
+//              cordonClass?: "punishment" | "availability" | "operator",
+//              cordonReason?: string }   // diagnostic only — never matched
 //
 // return "name" → run policies[name]
 //                 (unknown name → fail closed to default + warn log)
@@ -139,8 +142,9 @@ Grow only when forced by observed configs:
 | Helper | Behavior |
 |---|---|
 | `upstreams.withTag(t)` | Filter by tag |
-| `upstreams.healthy()` | Exclude unhealthy |
-| `upstreams.anyPunished()` | True iff any upstream that **would otherwise be eligible to participate** (healthy or sitout) is currently in sitout — not "ever punished" |
+| `upstreams.healthy()` | Keep only `state == "healthy"` — cordoned upstreams of any class are excluded (cordon = out of rotation) |
+| `upstreams.anyPunished()` | True iff any upstream that **would otherwise be eligible to participate** is cordoned with `cordonClass == "punishment"` — not "ever punished" |
+| `upstreams.allUnavailable()` | True iff every member is unhealthy or cordoned with `cordonClass == "availability"`. The fail-closed fallback predicate: `punishment`, `operator`, and any future cordon class block it |
 | `upstreams.canServeBlock(n)` | Uses existing `EvmAssertBlockAvailability` |
 | `user.hasRole(r)` | Role check |
 
@@ -201,46 +205,44 @@ consensus")`. The selector package must not import `consensus/`, so sitout
 state moves to **`health.Tracker`**:
 
 - Executor records sitout via `tracker.Cordon(upstream, "*", "misbehaving in
-  consensus")` and `tracker.Uncordon(...)` on timer expiry. The claim is
-  idempotent: a second punishment for the same upstream while already in
-  sitout is a no-op (the timer is not reset).
+  consensus", CordonClassPunishment)` and `tracker.Uncordon(...)` on timer
+  expiry. The claim is idempotent: a second punishment for the same upstream
+  while already in sitout is a no-op (the timer is not reset).
 - The misbehavior **rate limiter** also moves to `health.Tracker` (keyed by
   upstream ID) so that reaching a sitout is global across policies. The
   misbehavior **exporter** stays per-policy — it is a reporting sink, not a
   correctness signal.
-- Selector reads `tracker.CordonedReason(upstream, "*")` and treats
-  `"misbehaving in consensus"` as punished.
+- `Tracker.Cordon` gains a typed **`cordonClass`** parameter stored alongside
+  the free-text reason (§4.5). The selector reads the class — never the
+  reason string.
 - `anyPunished()` is true iff any upstream that would otherwise be eligible
-  is currently cordoned with the consensus-misbehavior reason.
+  is currently cordoned with class `punishment`.
 
 This keeps the zero-import rule for `internal/consensus/policy/` and gives
 both executor and selector a shared, race-safe source of truth.
 
-### 4.5 Automatic cordons vs punishment
+### 4.5 Cordon classes
 
-Not every cordon is punishment. The health tracker also cordons upstreams
-automatically for availability reasons:
+Not every cordon is punishment, and not every non-punishment cordon is an
+availability failure. `Tracker.Cordon` records a **typed class** alongside
+the free-text reason; the selector matches on the class, never the reason
+string (otherwise the eval would couple to the message text of every
+cordon-producing call site):
 
-- **EVM chain-identity mismatch** (`architecture/evm/evm_state_poller.go`) —
-  the upstream is serving a different chain; cordon reason starts with
-  `"chain identity mismatch"`.
-- **SVM lag / unhealthy** (`architecture/svm/svm_state_poller.go`) — shred-
-  insert lag or `getHealth` failure; cordon reason starts with `"svm state
-  poller:"`.
+| `cordonClass` | Set by | Meaning | Fallback |
+|---|---|---|---|
+| `punishment` | Consensus executor misbehavior sitout (`consensus/executor.go`) | Punished for misbehavior | **Blocks** fallback |
+| `availability` | EVM state poller chain-identity mismatch (`architecture/evm/evm_state_poller.go`); SVM state poller lag/unhealthy (`architecture/svm/svm_state_poller.go`) | Automatic availability failure | **Allows** fallback |
+| `operator` | Admin API (`erpc/admin.go`) | Deliberate operator cordon | **Blocks** fallback (fail closed) |
 
-These are **availability** failures, not misbehavior. The selector must
-distinguish them from consensus punishment:
+The class is required at the call site, so there is no runtime "unknown"
+row: a cordon class added in the future blocks fallback until the selector
+explicitly maps it to `availability` — fail closed by construction.
 
-| Cordon reason prefix | Meaning | Fallback behavior |
-|---|---|---|
-| `"misbehaving in consensus"` | Consensus punishment | Block fallback (stay on `standard`) |
-| `"chain identity mismatch"` | Wrong chain — availability | Allow fallback |
-| `"svm state poller:"` | Lag / unhealthy — availability | Allow fallback |
-| anything else | Unknown / future cordon | Block fallback (fail closed) |
-
-The eval ctx exposes `health` as a structured value, not a string match:
-`{ state: "healthy" \| "unhealthy" \| "cordoned", cordonReason?: string }`.
-`anyPunished()` checks `cordonReason == "misbehaving in consensus"` exactly.
+The eval ctx exposes `health` as a structured value:
+`{ state, cordonClass?, cordonReason? }` (§3). `cordonReason` is diagnostic
+only. The reference fallback predicate is `allUnavailable()` (§3.1), which
+is true only when every member is unhealthy or `availability`-cordoned.
 
 ### 4.6 Sobek pool
 
@@ -286,8 +288,7 @@ fallback:
 Eval (pre-round):
 
 ```js
-internals.healthy().length === 0 && !internals.anyPunished()
-  && ctx.user.hasRole("brp:consensus-fallback")
+internals.allUnavailable() && ctx.user.hasRole("brp:consensus-fallback")
   → "fallback"
 ```
 
@@ -296,7 +297,7 @@ downgraded.
 
 | Rule | Behavior |
 |---|---|
-| Availability vs punishment | Sitout is distinct from unhealthy in `ctx.upstreams[].health` (§4.4). Punished → stay on `standard` → hard dispute. An attacker who gets internals punished must not force a downgrade. |
+| Availability vs punishment | Cordons carry a typed class (§4.5). The reference eval uses `allUnavailable()`, which is fail closed: `punishment`, `operator`, and any future cordon class block fallback. An attacker who gets internals punished must not force a downgrade. |
 | In-flight failure | No mid-round switch. That round disputes under `standard`; the tracker records it; the *next* request's eval picks `fallback`. |
 | Recovery | Internals healthy again → eval returns `standard`. Automatic both ways. Header `X-eRPC-Consensus-Policy: fallback` makes the degraded grade explicit. |
 
@@ -377,9 +378,10 @@ policy + waiver covers it with zero JS.
   policy name, unlisted method) first.
 - **R7** punished/sitout distinct from unhealthy in eval ctx; fallback eval
   must refuse to fire when any matching internal is punished.
-- **R8** selector must distinguish automatic availability cordons (chain
-  identity mismatch, SVM lag) from consensus punishment; only the exact
-  `"misbehaving in consensus"` reason blocks fallback.
+- **R8** cordons carry a typed `cordonClass` (`punishment` / `availability` /
+  `operator`) read by the selector — never the reason string; the reference
+  fallback predicate `allUnavailable()` is fail closed for every class
+  except `availability`, including any class added in the future.
 - **R9** load-time validation rejects a policy where every
   `requiredParticipants` quota is waivable; at least one quota must be
   never-waivable.
@@ -415,7 +417,8 @@ labels.
   point. No separate claim→policy allowlist outside JS.
 - Eval failure / timeout / unknown name → default policy (never more
   permissive).
-- Fallback must not fire on punishment (R7).
+- Fallback must not fire on punishment (R7) and fails closed on `operator`
+  or any future cordon class (R8).
 - Empty-waiver (v1.1) must not fire without block proof outside retention —
   closes the correlated-externals-outvote-internal hole for recent data.
 - Role gating turns the JWT into a **correctness control**, not only a rate

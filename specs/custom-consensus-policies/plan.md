@@ -27,7 +27,7 @@ correctness pieces.
 | `blockAvailability` | Existing config + `EvmAssertBlockAvailability` — no new dynamic model |
 | Fallback policy shape | Plain `{ maxParticipants, agreementThreshold }` — no tag quotas |
 | Decision cache | **Not in v1** — add only if measured eval cost forces it |
-| Sitout state | Moved to `health.Tracker` (cordon reason + rate limiter) so selector reads it without importing `consensus/`; exporter stays per-policy |
+| Sitout state | Moved to `health.Tracker` (typed `cordonClass` + rate limiter) so selector reads it without importing `consensus/`; exporter stays per-policy |
 | Header + metric | Reimplemented here (`X-eRPC-Consensus-Policy`, `consensus_policy` label); not dependent on #1041 |
 | Default policy | Must be the strictest; fail-closed target |
 
@@ -52,8 +52,9 @@ Package: `internal/consensus/policy/` — no imports from `consensus/` executor.
    default policy + `consensus_policy_eval_bypassed_total{reason="pool_exhausted"}`.
 2. **`EvalContext`** types — request, user, upstream refs (id, tags, health,
    blockAvailability), network.
-3. **Stdlib v1** — `withTag`, `healthy`, `anyPunished`, `canServeBlock` (wraps
-   `EvmAssertBlockAvailability`), `hasRole`.
+3. **Stdlib v1** — `withTag`, `healthy`, `anyPunished`, `allUnavailable`
+   (fail-closed fallback predicate over typed cordon classes),
+   `canServeBlock` (wraps `EvmAssertBlockAvailability`), `hasRole`.
 4. **API** — `Compile(js) (*Policy, error)`, `Evaluate(ctx) (name string, err error)`.
    Empty / null → `""` (default). Unknown-name resolution is the caller's job.
 5. **Benchmark** — measure eval latency on a pre-warmed VM; report result in
@@ -113,19 +114,25 @@ participant returned a value).
 1. Expose JWT roles/claims on `ctx.user` (**new plumbing** — `common.User`
    gains `Roles`; JWT strategy populates from a configurable claim; other
    strategies leave it empty).
-2. Move consensus sitout state to `health.Tracker` cordon reason
-   (`"misbehaving in consensus"`); move the misbehavior rate limiter to
-   `health.Tracker` keyed by upstream ID so reaching a sitout is global
-   across policies. The misbehavior exporter stays per-policy.
-3. Selector reads `CordonedReason` and treats only the exact reason
-   `"misbehaving in consensus"` as punishment; automatic cordons (EVM chain
-   identity mismatch, SVM lag) are availability failures and allow fallback.
+2. Move consensus sitout state to `health.Tracker`. `Tracker.Cordon` gains a
+   typed `cordonClass` (`punishment` / `availability` / `operator`) stored
+   alongside the free-text reason. Call sites: consensus executor →
+   `punishment`; EVM state poller (chain identity) and SVM state poller
+   (lag/unhealthy) → `availability`; admin API → `operator`. Move the
+   misbehavior rate limiter to `health.Tracker` keyed by upstream ID so
+   reaching a sitout is global across policies. The misbehavior exporter
+   stays per-policy.
+3. Selector reads the typed class — never the reason string. Reference
+   fallback predicate is `allUnavailable()`: true iff every member is
+   unhealthy or `availability`-cordoned — fail closed for `punishment`,
+   `operator`, and any future class.
 4. `blockNumber` extraction for eval ctx (numeric request params).
 5. Fallback eval refuse-to-fire when `anyPunished()` is true — tested.
 
 **Acceptance**: punished internals never select `fallback`; unauthorized
-callers never get `fallback` / `generous-dev`; chain-mismatch-cordoned
-internals do allow `fallback` for authorized roles.
+callers never get `fallback` / `generous-dev`; operator-cordoned internals
+block `fallback`; availability-cordoned (chain-mismatch, SVM lag) internals
+allow `fallback` for authorized roles.
 
 ---
 
