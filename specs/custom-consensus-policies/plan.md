@@ -22,7 +22,7 @@ correctness pieces.
 | Auth / roles | Inside `customPolicy.evalFunction` via `ctx.user` — no separate claim→policy allowlist |
 | Round grading | Stays in declarative `ConsensusPolicyConfig` / executor |
 | Mid-round switch | **Never** — fail-visible under the selected policy |
-| Historical safety net | `waiveAgreementOnMissingData` on `requiredParticipants[]` |
+| Historical safety net | Role-gated: `standard` (no waiver), `standard-waive-missing` (waiver), `historical` (external-only for known-old blocks) |
 | Empty/null pruning | Spec for v1.1 (`waiveAgreementOnEmptyOutsideRetention`); **not** in v1 milestones |
 | `blockAvailability` | Existing config + `EvmAssertBlockAvailability` — no new dynamic model |
 | Fallback policy shape | Plain `{ maxParticipants, agreementThreshold }` — no tag quotas |
@@ -122,9 +122,11 @@ fixture validates and compiles.
    (v1 rows only; null-shape stays dispute). Existing consensus tests run
    unchanged against the default policy (zero regression).
 
-**Acceptance**: UC3 (historical via waiver) passes; mixed MissingData group
-winning is a composition dispute (the waiver does not fire when any matching
-participant returned a value); a config whose only never-waivable entry has
+**Acceptance**: UC3 (role-gated historical) passes: unauthorized on `standard`
+dispute on MissingData; `standard-waive-missing` serves via waiver; `historical`
+serves external-only for known-old blocks. Mixed MissingData group winning is
+a composition dispute (the waiver does not fire when any matching participant
+returned a value); a config whose only never-waivable entry has
 `minAgreement: 0` is rejected at load time.
 
 ---
@@ -194,9 +196,10 @@ zero upstreams returns false and the round stays on `standard`.
    pressure; post both runs in the PR.
 
 **Acceptance**: UC1 (standard mixed-node), UC2 (role-gated fallback), UC3
-(historical via waiver) pass as config-level fixtures; no mid-round switch
-behavior exists; the load benchmark shows the selector's p99 delta over the
-no-selector baseline within noise (≪ 1ms) at 256-way concurrency.
+(role-gated historical: `standard` / `standard-waive-missing` / `historical`)
+pass as config-level fixtures; no mid-round switch behavior exists; the load
+benchmark shows the selector's p99 delta over the no-selector baseline within
+noise (≪ 1ms) at 256-way concurrency.
 
 ---
 

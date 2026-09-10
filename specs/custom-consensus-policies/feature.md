@@ -21,8 +21,10 @@ After v1, an operator can:
   permissive `generous-dev` policy for a dev role — without code changes.
 - Automatically fall back to external-only consensus when internal nodes are
   down, but only for authorized roles.
-- Serve historical data via external archive consensus when internal nodes
-  have pruned it, without hardcoding retention windows.
+- Serve historical / pruned data only for authorized roles: known-old blocks
+  via an external-only `historical` policy; unknown-block methods (tx-hash)
+  via `standard-waive-missing` (same composition as `standard` + MissingData
+  waiver). Unauthorized callers stay on strict `standard` and dispute.
 
 Freeform JS decides **which** declarative policy to run — never **how** the round
 is graded. The consensus executor and its `ConsensusPolicyConfig` contract stay
@@ -40,9 +42,9 @@ availability) resolves into one bounded interface — a named
   (tags, health, blockAvailability).
 - Role-gated automatic fallback when internals are unavailable for availability
   reasons (not punishment).
-- Historical serving: recent → internal+external; historical (outside internal
-  `blockAvailability`) → external-only with ≥2 agreeing, via a declarative
-  MissingData composition waiver.
+- Role-gated historical serving via three integrity grades: `standard` (no
+  waiver), `standard-waive-missing` (waiver for pruned/MissingData),
+  `historical` (external-only for known-old blocks).
 - Observability: chosen policy name on every served round (header + metric).
 - Zero migration: today's inline `consensus:` block becomes the default policy.
 
@@ -68,13 +70,25 @@ availability) resolves into one bounded interface — a named
 ```yaml
 consensus:
   policies:                          # each value = full ConsensusPolicyConfig
-    standard:
+    standard:                        # default / fail-closed — no MissingData waiver
+      maxParticipants: 3
+      agreementThreshold: 2
+      disputeBehavior: returnError
+      requiredParticipants:
+        - { tag: "type:internal", minParticipants: 1, minAgreement: 1 }
+        - { tag: "type:external", minParticipants: 2, minAgreement: 2 }
+    standard-waive-missing:          # same composition as standard; waiver for pruned/MissingData
       maxParticipants: 3
       agreementThreshold: 2
       disputeBehavior: returnError
       requiredParticipants:
         - { tag: "type:internal", minParticipants: 1, minAgreement: 1, waiveAgreementOnMissingData: true }
         - { tag: "type:external", minParticipants: 2, minAgreement: 2 }  # never waived
+    historical:                      # known-old block — external-only (skip internals)
+      maxParticipants: 3
+      agreementThreshold: 2
+      requiredParticipants:
+        - { tag: "type:external", minParticipants: 2, minAgreement: 2 }
     fallback:                        # internals down; healthy pool is the externals
       maxParticipants: 3
       agreementThreshold: 2
@@ -94,17 +108,33 @@ consensus:
         // Genuine outage (unhealthy or availability-cordoned only) → fallback.
         if (internals.allUnavailable())
           return ctx.user?.hasRole("brp:consensus-fallback") ? "fallback" : "standard"
+        // Historical access is role-gated — unauthorized stay on standard (dispute on miss).
+        if (ctx.user?.hasRole("brp:historical")) {
+          const n = ctx.request.blockNumber
+          if (n !== null && internals.canServeBlock(n).length === 0)
+            return "historical"              // known-old: external-only, no internal call
+          if (n === null)
+            return "standard-waive-missing"  // tx-hash etc.: try internals, waive MissingData
+        }
         if (ctx.user?.hasRole("brp:dev")) return "generous-dev"
         return "standard"
       }
 ```
+
+Three integrity grades for data serving (plus `fallback` / `generous-dev`):
+
+| Policy | Composition | MissingData waiver | When selected |
+|---|---|---|---|
+| `standard` | internal + external | No | Default / fail-closed; unauthorized callers |
+| `standard-waive-missing` | same as `standard` | Yes (internals) | Authorized role + unknown block (`blockNumber` null, e.g. tx-hash) |
+| `historical` | external only | n/a | Authorized role + known-old block (`canServeBlock` empty) |
 
 | Field | Type | Description |
 |---|---|---|
 | `policies` | `map[string]ConsensusPolicyConfig` | Named policies. Each value is a complete consensus config (same fields as today's inline block). |
 | `customPolicy.evalFunction` | `string` | JS function. Signature `(ctx) => string \| null`. If omitted, the default/inline policy applies to every request. |
 | `customPolicy.evalTimeout` | `Duration` | Hard wall-clock cap on each eval. Fail closed to default on timeout. |
-| `requiredParticipants[].waiveAgreementOnMissingData` | `bool` | Opt-in, default `false`. See §6. |
+| `requiredParticipants[].waiveAgreementOnMissingData` | `bool` | Opt-in, default `false`. Put on `standard-waive-missing`, not on the fail-closed `standard`. See §7. |
 
 **Backward compatibility:** an inline `consensus:` block with no `policies` map
 is one anonymous default policy — zero operator migration. All existing fields
@@ -377,21 +407,36 @@ downgraded.
 
 ## 7. Serving historical data
 
-Goal: recent → internal+external; historical (outside internal
-`blockAvailability`) → external-only with ≥2 agreeing.
+Goal: recent → internal+external under `standard`; pruned / historical data
+only for authorized roles — via `standard-waive-missing` (unknown block) or
+`historical` (known-old block, external-only). Unauthorized callers dispute
+when internals miss.
 
-### 7.1 Three layers
+### 7.1 Policy split (primary) + waiver (safety net)
 
-1. **Pre-round (primary).** Internals configure `blockAvailability`; the
-   block-availability guard already short-circuits out-of-range requests with
-   `ErrEndpointMissingData` before any provider call (`common/config.go`).
-2. **MissingData waiver (safety net, v1).** New
+Three named grades (§2 table):
+
+| Policy | Role | Pre-round | Post-round |
+|---|---|---|---|
+| `standard` | everyone (default) | Mixed internal+external | No waiver — MissingData on internals → composition dispute |
+| `standard-waive-missing` | `brp:historical` + `blockNumber == null` | Same mixed composition | Waiver releases internal quota when **all** matching participants returned `ErrEndpointMissingData` |
+| `historical` | `brp:historical` + known-old (`canServeBlock` empty) | External-only — internals never called | External `minAgreement: 2` |
+
+Layers that make those grades work:
+
+1. **Pre-round (primary for known blocks).** Internals configure
+   `blockAvailability`; the block-availability guard already short-circuits
+   out-of-range requests with `ErrEndpointMissingData` before any provider call
+   (`common/config.go`). Eval uses `canServeBlock(n)` to pick `historical`
+   instead of calling internals at all.
+2. **MissingData waiver (safety net for unknown-block methods).** New
    `requiredParticipants[].waiveAgreementOnMissingData`: in
    `enforceWinnerComposition` a failing `minAgreement` quota is waived iff
    **every** tag-matching participant returned `ErrEndpointMissingData` —
    already the normalized, terminal, non-misbehavior edge classification
    (`consensus/analysis.go`). Covers stale/misconfigured `blockAvailability`
-   and error-shaped pruning. A single value-voting match holds the quota.
+   and error-shaped pruning on tx-hash / block-hash methods where
+   `blockNumber` is null. A single value-voting match holds the quota.
 
    The waiver is **round-complete**: it only evaluates after all participants
    have responded or the round has otherwise terminated (wait cap, short-
@@ -418,17 +463,18 @@ Goal: recent → internal+external; historical (outside internal
    `preferHighestValueFor`); unlisted method → no waiver → dispute. Fabricated
    recent tx + internal null → proof fails → quota holds → dispute.
 
-Role-gating historical access (optional): two policies differing only in the
-waiver flags; eval picks via `hasRole`. If historical is open to all, one
-policy + waiver covers it with zero JS.
+Role-gating is the default recommendation when archive cost or blast radius
+matters: never put the waiver on fail-closed `standard`. If historical is
+open to all, put the waiver on `standard` (or omit the role check) with zero
+extra JS.
 
 ### 7.2 Edge-case matrix
 
 | Scenario | Outcome |
 |----------|---------|
-| Old block, `blockAvailability` correct | Guard short-circuit → MissingData → waiver → external 2-agreement; internal never called |
-| Old block, `blockAvailability` stale/wrong | Provider error normalized to MissingData → waiver (net when `blockAvailability` lies) |
-| Pruned tx, node returns MissingData error | Waiver → external 2-agreement |
+| Old block, `blockAvailability` correct | Guard short-circuit → MissingData. **`historical`**: external-only serve. **`standard-waive-missing`**: waiver → external 2-agreement. **`standard`**: composition dispute |
+| Old block, `blockAvailability` stale/wrong | Provider error normalized to MissingData → same split by selected policy |
+| Pruned tx, node returns MissingData error | Tx-hash → `standard-waive-missing` (role) → waiver; unauthorized on `standard` → dispute |
 | Pruned tx, node returns `null` | v1: dispute. v1.1: empty-waiver with block proof serves |
 | Data never existed (all null / all MissingData) | `null` served (empty ≥ threshold) / agreed MissingData error — correct |
 | Internal + external both return MissingData, one external returns the value | **Composition dispute** — MissingData is a `ResponseTypeConsensusError`, so the generic threshold rule can make it the winner, but `enforceWinnerComposition` does **not** exempt consensus-error groups. The external `minAgreement: 2` quota fails (only one external voted) and the round disputes. The waiver only fires when **all** tag-matching participants returned MissingData; here one external returned a value, so the waiver does not fire. |
