@@ -1,7 +1,7 @@
 # Custom Consensus Policies Engine — Engineering Design Review
 
 **Reviewed documents**: [feature.md](./feature.md) (~1,826 words), [plan.md](./plan.md) (~933 words)
-**Review date**: 2026-09-09
+**Review date**: 2026-09-09 (Revisions 1-3); 2026-09-10 (Revisions 4-6)
 **Reviewed against**: the eRPC codebase at `8f7ddef1` (`feat/custom-consensus-policies-spec`)
 
 ---

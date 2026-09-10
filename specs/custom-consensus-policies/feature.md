@@ -3,7 +3,7 @@
 **Status**: Accepted direction, pre-implementation
 **Issue**: [#1088](https://github.com/erpc/erpc/issues/1088)
 **Direction**: [@aramalipoor](https://github.com/erpc/erpc/issues/1088#issuecomment-5492667906)
-**Last revised**: 2026-09-09
+**Last revised**: 2026-09-10
 
 Companion: [plan.md](./plan.md)
 

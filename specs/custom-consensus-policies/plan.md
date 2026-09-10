@@ -1,7 +1,7 @@
 # Custom Consensus Policies Engine — Implementation Plan
 
 **Status**: Draft — for review
-**Last revised**: 2026-09-09
+**Last revised**: 2026-09-10
 **Branch**: `feat/custom-consensus-policies-spec` (spec PR); implementation on a
 follow-on branch
 **Spec**: [feature.md](./feature.md) — single source of truth for behavior
