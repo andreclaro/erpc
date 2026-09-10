@@ -87,7 +87,11 @@ consensus:
     evalTimeout: 50ms                # hard cap; fail closed to default on timeout
     evalFunction: |
       (ctx) => {
+        // Punishment or admin cordon anywhere → never downgrade.
+        if (ctx.upstreams.anyPunished()) return "standard"
+        if (ctx.upstreams.anyOperatorCordon()) return "standard"
         const internals = ctx.upstreams.withTag("type:internal")
+        // Genuine outage (unhealthy or availability-cordoned only) → fallback.
         if (internals.allUnavailable())
           return ctx.user?.hasRole("brp:consensus-fallback") ? "fallback" : "standard"
         if (ctx.user?.hasRole("brp:dev")) return "generous-dev"
@@ -146,8 +150,9 @@ Grow only when forced by observed configs:
 |---|---|
 | `upstreams.withTag(t)` | Filter by tag |
 | `upstreams.healthy()` | Keep only `state == "healthy"` — cordoned upstreams of any class are excluded (cordon = out of rotation) |
-| `upstreams.anyPunished()` | True iff any upstream that **would otherwise be eligible to participate** holds a `punishment` cordon — not "ever punished". Kept so an eval can tell punishment apart from operator action; `allUnavailable()` is the predicate for the fallback decision itself |
-| `upstreams.allUnavailable()` | True iff the set is **non-empty** and every member is either unhealthy-but-uncordoned or holds `availability` cordons and nothing else. **False on an empty set** — a tag matching no upstream is a config error, not an outage. The fail-closed fallback predicate: `punishment`, `operator`, and any future cordon class block it |
+| `upstreams.anyPunished()` | True iff any upstream that **would otherwise be eligible to participate** holds a `punishment` cordon — not "ever punished" |
+| `upstreams.anyOperatorCordon()` | True iff any eligible upstream holds an `operator` (admin) cordon — deliberate human action, undifferentiated between maintenance and distrust |
+| `upstreams.allUnavailable()` | True iff the set is **non-empty** and every member is either unhealthy-but-uncordoned or holds `availability` cordons and nothing else. **False on an empty set** — a tag matching no upstream is a config error, not an outage. Whitelist of availability only: `punishment`, `operator`, and any future cordon class make it false |
 | `upstreams.canServeBlock(n)` | Uses existing `EvmAssertBlockAvailability` |
 | `user.hasRole(r)` | Role check |
 
@@ -225,7 +230,9 @@ state moves to **`health.Tracker`**:
   tracker holds cordon state per class** (§4.5). The selector reads the class
   set — never the reason string.
 - `anyPunished()` is true iff any upstream that would otherwise be eligible
-  holds a `punishment` cordon.
+  holds a `punishment` cordon; `anyOperatorCordon()` is the matching helper
+  for the `operator` class. Both are the explicit fail-closed gates in the
+  reference eval (§2 / §6).
 
 This keeps the zero-import rule for `internal/consensus/policy/` and gives
 both executor and selector a shared, race-safe source of truth.
@@ -339,19 +346,30 @@ fallback:
   agreementThreshold: 2
 ```
 
-Eval (pre-round):
+Eval (pre-round) — two explicit block checks over **all** upstreams, then
+availability:
 
 ```js
-internals.allUnavailable() && ctx.user.hasRole("brp:consensus-fallback")
-  → "fallback"
+if (ctx.upstreams.anyPunished())       → "standard"  // integrity sit-out, any node
+if (ctx.upstreams.anyOperatorCordon()) → "standard"  // admin cordon, any node
+if (internals.allUnavailable()
+    && ctx.user.hasRole("brp:consensus-fallback")) → "fallback"
 ```
+
+Both block checks run on the full upstream set, not just internals: an active
+sit-out or admin cordon anywhere means no degraded grade is served — even when
+internals are genuinely down. Both lines are redundant in safety terms for
+internals (`allUnavailable()` is already false while any member holds a
+`punishment` or `operator` cordon); stating them first makes the two
+fail-closed reasons readable and keeps them from drifting apart in operator
+edits.
 
 Unauthorized callers stay on `standard` and dispute — never silently
 downgraded.
 
 | Rule | Behavior |
 |---|---|
-| Availability vs punishment | Cordons carry a typed class (§4.5). The reference eval uses `allUnavailable()`, which is fail closed: `punishment`, `operator`, and any future cordon class block fallback. An attacker who gets internals punished must not force a downgrade. |
+| Availability vs punishment / admin | Cordons carry a typed class (§4.5). The reference eval checks `anyPunished()` and `anyOperatorCordon()` over **all** upstreams first: either pins the request to `standard`. Fallback then requires `allUnavailable()` on internals (whitelist of availability only). An attacker who gets any node punished, or an admin who cordons a node they distrust, must not force a downgrade. |
 | In-flight failure | No mid-round switch. That round disputes under `standard`; the tracker records it; the *next* request's eval picks `fallback`. |
 | Recovery | Internals healthy again → eval returns `standard`. Automatic both ways. Header `X-eRPC-Consensus-Policy: fallback` makes the degraded grade explicit. |
 
@@ -418,6 +436,8 @@ policy + waiver covers it with zero JS.
 | Internal wrong value (misbehavior) | Quota holds → composition dispute + `punishMisbehavior` |
 | Internal outage (infra error ≠ MissingData) | Quota holds → dispute for unauthorized; authorized roles get `fallback` on the next request (§6) |
 | Internal punished/sitout (misbehavior) | Eval stays on `standard` → hard dispute — never falls through to `fallback` |
+| External punished while internals down | Eval stays on `standard` — any punishment pins the network to the strictest policy, even at availability cost |
+| Admin cordons an internal (any reason) | Eval stays on `standard` via `anyOperatorCordon()` — admin action is undifferentiated, so fail closed |
 | Externals disagree (one archive, one not) | No group ≥ 2 → dispute. Operator pins archive externals via tags |
 
 ### 7.3 Requirements
@@ -433,8 +453,10 @@ policy + waiver covers it with zero JS.
   log on every waiver fire; policy name header/metric as above.
 - **R6** tests: one per matrix row; fallthrough cases (nil user, unknown
   policy name, unlisted method) first.
-- **R7** punished/sitout distinct from unhealthy in eval ctx; fallback eval
-  must refuse to fire when any matching internal is punished.
+- **R7** punished/sitout and operator cordons distinct from unhealthy /
+  availability in eval ctx; the fallback eval must refuse to fire when **any**
+  upstream — internal or external — is punished (`anyPunished`) or admin-
+  cordoned (`anyOperatorCordon`).
 - **R8** cordons carry a typed `cordonClass` (`punishment` / `availability` /
   `operator`) read by the selector — never the reason string. The tracker
   holds one flag per class, so classes do not overwrite each other and
@@ -481,11 +503,14 @@ labels.
   point. No separate claim→policy allowlist outside JS.
 - Eval failure / timeout / unknown name → default policy (never more
   permissive).
-- Fallback must not fire on punishment (R7) and fails closed on `operator`
-  or any future cordon class (R8). Per-class cordon state is part of that
-  guarantee: with a single shared flag, a later availability cordon or an
-  unrelated source's `Uncordon` would clear or downgrade an active punishment
-  and re-open the downgrade (§4.5).
+- Fallback must not fire while **any** upstream is punished or admin-cordoned
+  (R7) and fails closed on any future cordon class (R8). The reference eval
+  names both blockers explicitly (`anyPunished`, `anyOperatorCordon`);
+  `allUnavailable()` is a whitelist of availability and is a third line of
+  defense. Per-class cordon state is part of that guarantee: with a single
+  shared flag, a later availability cordon or an unrelated source's
+  `Uncordon` would clear or downgrade an active punishment and re-open the
+  downgrade (§4.5).
 - `allUnavailable()` is false on an empty set, so a tag that matches no
   upstream cannot select `fallback`. A typo'd tag is a config error, and the
   vacuous reading of "all members are unavailable" would turn it into a

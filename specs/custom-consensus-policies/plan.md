@@ -52,14 +52,25 @@ Package: `internal/consensus/policy/` — no imports from `consensus/` executor.
    default policy + `consensus_policy_eval_bypassed_total{reason="pool_exhausted"}`.
 2. **`EvalContext`** types — request, user, upstream refs (id, tags, health,
    blockAvailability), network.
-3. **Stdlib v1** — `withTag`, `healthy`, `anyPunished`, `allUnavailable`
-   (fail-closed fallback predicate over typed cordon classes; **false on an
-   empty set**), `canServeBlock` (wraps `EvmAssertBlockAvailability`),
-   `hasRole`.
+3. **Stdlib v1** — `withTag`, `healthy`, `anyPunished`, `anyOperatorCordon`,
+   `allUnavailable` (fail-closed availability whitelist; **false on an empty
+   set**), `canServeBlock` (wraps `EvmAssertBlockAvailability`), `hasRole`.
 4. **API** — `Compile(js) (*Policy, error)`, `Evaluate(ctx) (name string, err error)`.
    Empty / null → `""` (default). Unknown-name resolution is the caller's job.
-5. **Benchmark** — measure eval latency on a pre-warmed VM; report result in
-   the PR (gates the future decision-cache phase).
+5. **Micro-benchmark** — `go test -bench` in the selector package, results
+   posted in the PR. Cases:
+   - **Steady-state eval** of the §2 reference function on a pre-warmed VM,
+     at 5 / 20 / 50 upstreams — the number compared against upstream RTT.
+   - **Ctx binding** alone (building + binding `EvalContext` to the VM) —
+     isolates per-request fixed cost from eval logic.
+   - **Cold vs warm** — first eval on a fresh VM vs pooled VM, to size the
+     pre-warm pool.
+   - **Concurrent throughput** — parallel evals across the 8-VM pool;
+     verifies pool-exhaustion fail-closed fires instead of queueing.
+   - **Timeout path** — a looping eval must hit `evalTimeout`, fail closed,
+     and the poisoned VM is discarded.
+   Decision rule: p99 steady-state ≪ 1ms → decision cache stays
+   unbuilt; materially worse → re-open Phase 6 before continuing.
 6. **Unit tests first on fallthrough** — nil user, empty upstreams, empty
    eval, timeout, throw → error (caller fails closed). Then happy-path name
    returns and each stdlib helper.
@@ -144,18 +155,22 @@ participant returned a value); a config whose only never-waivable entry has
    global across policies. The misbehavior exporter stays per-policy.
 5. Selector reads the class set — never the reason string. `health.state` is
    `"cordoned"` whenever the set is non-empty, so a failing health check on a
-   punished upstream cannot report `"unhealthy"`. Reference fallback predicate
-   is `allUnavailable()`.
+   punished upstream cannot report `"unhealthy"`. Reference eval checks
+   `anyPunished()` and `anyOperatorCordon()` over the full upstream set first
+   (either → `standard`), then `allUnavailable()` on internals for the
+   fallback decision.
 6. `blockNumber` extraction for eval ctx (numeric request params).
 
-**Acceptance**: punished internals never select `fallback`; unauthorized
-callers never get `fallback` / `generous-dev`; operator-cordoned internals
-block `fallback`; availability-cordoned (chain-mismatch, SVM lag) internals
-allow `fallback` for authorized roles. Order-independence is tested directly:
-punish an upstream, then availability-cordon it, and `allUnavailable()` is
-still false; uncordon the availability class and the punishment cordon
-survives. `allUnavailable()` on an internal tag matching zero upstreams
-returns false and the round stays on `standard`.
+**Acceptance**: punished internals never select `fallback`; a punished
+**external** with internals down also keeps the network on `standard`; an
+**admin-cordoned** upstream (any method scope relevant to the request) keeps
+the network on `standard` via `anyOperatorCordon()`; unauthorized callers
+never get `fallback` / `generous-dev`; availability-cordoned (chain-mismatch,
+SVM lag) internals allow `fallback` for authorized roles. Order-independence
+is tested directly: punish an upstream, then availability-cordon it, and
+`allUnavailable()` is still false; uncordon the availability class and the
+punishment cordon survives. `allUnavailable()` on an internal tag matching
+zero upstreams returns false and the round stays on `standard`.
 
 ---
 
@@ -169,10 +184,19 @@ returns false and the round stays on `standard`.
 3. **Header + metric** — `X-eRPC-Consensus-Policy`, `consensus_policy` label,
    `consensus_policy_eval_duration_seconds`,
    `consensus_policy_eval_failed_total{reason}`.
+4. **Load benchmark** — follow the `erpc/failsafe_load_test.go` pattern
+   (`BenchmarkLoad_Consensus_3of5_256w`): HTTP-layer concurrent load,
+   `runLatencyLoadTest`-style harness reporting `req/s`, p50/p95/p99/p999,
+   max, err%, heap delta. Run the same 3-of-5 consensus fixture twice —
+   selector disabled (baseline) vs `customPolicy` enabled with the §2
+   reference eval — same concurrency and wall-clock. The p99 delta between
+   the two runs is the true per-request cost of the selector under realistic
+   pressure; post both runs in the PR.
 
 **Acceptance**: UC1 (standard mixed-node), UC2 (role-gated fallback), UC3
 (historical via waiver) pass as config-level fixtures; no mid-round switch
-behavior exists.
+behavior exists; the load benchmark shows the selector's p99 delta over the
+no-selector baseline within noise (≪ 1ms) at 256-way concurrency.
 
 ---
 
