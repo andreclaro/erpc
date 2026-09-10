@@ -1,0 +1,145 @@
+---
+title: "Request lifecycle - Inside eRPC"
+description: "One JSON-RPC call through eRPC in slow motion — goroutines, the multiplexer leader/follower pattern, and the bookkeeping that outlives your response."
+---
+
+import { LLMsTxtLink, AISection, SourceLink, PromptExample } from "../../components";
+import { TimelineRace } from "../../components/explainer/TimelineRace";
+import { requestLifecycleScenario } from "../../components/explainer/scenarios/request-lifecycle";
+
+<LLMsTxtLink />
+
+# The life of a request, in slow motion
+
+The [Inside eRPC](/inside-erpc) overview shows *which* stages a request passes through.
+This page zooms into *how* those stages run concurrently: which goroutines exist, who
+waits on whom, and which work is allowed to outlive your response.
+
+The timeline below tells one story. Another client already sent request **R1**
+(`eth_getBlockByNumber("0x1a2b3c")`). Your client sends **R2** — byte-identical.
+eRPC does not call the upstream twice: R1 becomes the **leader**, R2 a **follower**
+that rides R1's result home. Meanwhile the cache write happens *after* both clients
+were answered — your latency never pays for bookkeeping.
+
+<TimelineRace scenario={requestLifecycleScenario} caption="One request R2 joining its identical twin R1 mid-flight — multiplexing dedups identical in-flight calls down to a single upstream round trip." />
+
+## The workflow
+
+1. **R1 was registered first** (another client, a few ms earlier). It passed the
+   multiplexer as the **leader** and is already at the executor.
+2. Your **R2 arrives**: the HTTP handler parses the URL and body, and spawns one
+   goroutine per JSON-RPC element (batch bodies fan out the same way).
+3. **Multiplexer check** — before anything downstream runs, R2's cache hash is
+   `LoadOrStore`'d into the in-flight map. A twin exists → R2 becomes a
+   **follower** and blocks on `mlx.done`. Zero upstream quota consumed.
+4. The leader continues: **cache GET** → MISS → **failsafe executor**
+   (`timeout( retry( hedge( )))`) → **upstream round trip** (34ms).
+5. The leader's response arrives; `Multiplexer.Close` clones it once and every
+   follower's `CopyResponseForRequest` rewrites the JSON-RPC **id to its own** —
+   R2 gets a response that is byte-identical except for the id it sent.
+6. Both clients receive **200 OK** with `X-ERPC-*` diagnostic headers. Only then
+   does the **async cache writer** persist the response, in its own goroutine
+   with a 10s budget — after the answer already left.
+
+## In the source
+
+### HTTP ingress & batch fan-out — `erpc/http_server.go`
+
+- Batch detection (`[`) splits the body into elements, each processed as its own
+  request concurrently; `erpc/http_batch_resp.go` reassembles them in order.
+- Response bodies stream: the `conditionalGzipWriter` delays the gzip decision
+  until enough bytes exist, because JSON-RPC responses arrive as many small
+  writes (issue #990). `WriteHeader` is deferred so `Content-Encoding` can still
+  be set when compression kicks in.
+
+### The multiplexer — `erpc/multiplexer.go` + `erpc/networks.go`
+
+- `handleMultiplexing` (`networks.go:3050`): `LoadOrStore` on
+  `n.inFlightRequests`. First request with a given key leads; identical later
+  ones follow and block on `mlx.done`.
+- Keys: `req.CacheHash()` for EVM; SVM uses its own `svm.RequestKey` because
+  CacheHash lowercases params, which would wrongly collapse case-sensitive
+  base58 addresses (`networks.go:3033`).
+- `Multiplexer.Close` (`multiplexer.go:36`) clones the leader's
+  `JsonRpcResponse` once; followers copy it and rewrite the id.
+  `cleanupMultiplexer` (`networks.go:3149`) uses a `copyWg` wait group so no
+  follower ever reads freed buffers.
+- Multiplexing runs **before** the cache read: N identical concurrent requests
+  produce 1 upstream call *and* 1 cache fill. It is on by default
+  (`MultiplexingEnabled`, `common/config.go:2266`).
+
+### Bookkeeping that outlives the caller — `erpc/networks.go:2426`
+
+- The cache write is fire-and-forget: a goroutine with a 10s timeout, the
+  response held alive via `AddRef()/DoneRef()`. A client disconnect never
+  aborts it.
+- The same pattern recurs everywhere: shadow-upstream fan-out runs on the app
+  context, and skip-triggered head polls coalesce through the state poller's
+  own debounce. Lifetimes hang off existing failsafe/HTTP budgets — no new
+  magic timeouts.
+
+### Headers that explain the decision
+
+Every response can carry its execution trace (`server.executionHeaders`):
+`X-ERPC-Cache`, `X-ERPC-Upstream`, `X-ERPC-Upstreams` (per-attempt trace),
+`X-ERPC-Consensus-*`. The full table lives on the
+[Inside eRPC landing page](/inside-erpc#talk-to-erpc).
+
+## First principles
+
+> **⏱ Caller latency is decoupled from bookkeeping.** Cache writes, shadow requests,
+> metrics, and head polls all happen in background goroutines bounded by existing
+> budgets. The response path only does what the response needs.
+
+> **👯 One leader per identical in-flight call.** Correctness work (upstream quota,
+> cache fills) is paid once per unique call, not once per client asking.
+
+## Agent reference
+
+<PromptExample
+  n={1}
+  title="Prove multiplexing is working"
+  prompt="Using my eRPC config and metrics, show me how much upstream traffic the in-flight multiplexer is saving me, and how to disable it for one network if I need per-request isolation."
+  defaultOpen={false}
+/>
+
+Reference URL for agents: `https://docs.erpc.cloud/inside-erpc/request-lifecycle.llms.txt`
+
+<AISection title="Request lifecycle — full agent reference" hint="Concurrency model, multiplexer mechanics, metrics, and source entry points.">
+
+### How it works
+
+Inbound HTTP requests are parsed at the edge (URL `/{project}/{architecture}/{chain}`,
+batch fan-out with one goroutine per element, gzip handled both directions), then
+acquire auth and budget permits. Inside `Network.Forward` the order is: static
+responses → **multiplexer** (in-flight dedup by request hash, leader/follower) →
+cache read → selection-policy ordering → failsafe executor → upstream sweep.
+Response assembly rewrites the JSON-RPC id byte-for-byte for each follower,
+streams the body (gzip decided lazily once enough bytes exist), attaches
+`X-ERPC-*` execution headers, and only then schedules the async cache write in a
+background goroutine with a 10s budget. A client disconnect never aborts the
+cache write or shadow fan-out.
+
+### Observability
+
+| Metric | Type | Labels | When it fires |
+|---|---|---|---|
+| `erpc_network_multiplexed_request_total` | counter | `project`, `network`, `category`, `finality`, `user`, `agent_name` | A request was multiplexed (follower of an identical in-flight call) |
+| `erpc_network_static_response_served_total` | counter | `project`, `network`, `category` | Served from a configured static response without contacting an upstream |
+
+### Source code entry points
+
+- HTTP server, batch fan-out, gzip writer — [<SourceLink file="erpc/http_server.go" lines="420-460" />], [<SourceLink file="erpc/http_server.go" lines="2067-2140" />]
+- Batch response reassembly — [<SourceLink file="erpc/http_batch_resp.go" />]
+- Multiplexer (leader/followers, Close) — [<SourceLink file="erpc/multiplexer.go" />], [<SourceLink file="erpc/networks.go" lines="3043-3171" />]
+- Async cache write — [<SourceLink file="erpc/networks.go" lines="2426-2457" />]
+- Multiplexing default (`MultiplexingEnabled`) — [<SourceLink file="common/config.go" lines="2266-2271" />]
+
+### Related pages
+
+- [Batching & multiplexing](/operation/batch) — the config/behavior reference
+- [Inside eRPC](/inside-erpc) — the animated pipeline overview
+- [Failsafe, in depth](/inside-erpc/failsafe-in-depth) — what the executor lane is doing
+- [Finality & caching](/inside-erpc/finality-and-caching) — what the async writer persists
+
+</AISection>

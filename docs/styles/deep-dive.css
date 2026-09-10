@@ -1,0 +1,138 @@
+/* "Inside eRPC" deep-dive subpage styles. Hand-maintained.
+ *
+ * Scope: .cv-dd-root — shared by the TimelineRace player and the bespoke
+ * deep-dive widgets (ChainReorg, ScoreTicker, RangeSlicer), all under
+ * components/explainer/. Panels are always dark navy so the palette works in
+ * both site themes; the HTML chrome adapts via html[data-theme="light"].
+ */
+
+.cv-dd-root {
+  --bg:        #0a0e1a;
+  --blue:      #60a5fa;
+  --blue-2:    #3b82f6;
+  --green:     #34d399;
+  --amber:     #fbbf24;
+  --crimson:   #f87171;
+  --text:      rgba(255,255,255,0.85);
+  --text-dim:  rgba(255,255,255,0.50);
+  --text-mono: rgba(255,255,255,0.45);
+  --glass:     rgba(255,255,255,0.022);
+  --hairline:  rgba(255,255,255,0.06);
+  font-family: Inter, system-ui, sans-serif;
+}
+
+/* ═══════════════════════ TimelineRace shell ═══════════════════════ */
+
+.cv-dd-root.dd-timeline {
+  margin: 1.25rem 0 1.75rem;
+  background:
+    radial-gradient(900px 380px at 50% 30%, rgba(96,165,250,0.05), transparent 60%),
+    linear-gradient(180deg, #0b101d 0%, var(--bg) 100%);
+  border: 1px solid rgba(148,163,184,0.14);
+  border-radius: 14px;
+  padding: 12px 14px 8px;
+  width: 100%;
+}
+.cv-dd-root .dd-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 6px; }
+.cv-dd-root .dd-tabs { display: flex; flex-wrap: wrap; gap: 8px; flex: 1; }
+.cv-dd-root .dd-tab {
+  appearance: none; border: 1px solid rgba(148,163,184,0.22);
+  background: rgba(148,163,184,0.06); color: var(--text);
+  font: 500 12.5px/1 Inter, system-ui, sans-serif; letter-spacing: 0.02em;
+  padding: 7px 12px; border-radius: 999px; cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+.cv-dd-root .dd-tab:hover { border-color: rgba(96,165,250,0.55); }
+.cv-dd-root .dd-tab[aria-pressed="true"] {
+  border-color: var(--blue); background: rgba(96,165,250,0.14); color: #cfe3ff;
+}
+.cv-dd-root .dd-cap { flex: 1; min-width: 200px; color: var(--text-dim); font: 500 12px/1.4 Inter, system-ui, sans-serif; }
+.cv-dd-root .dd-replay {
+  appearance: none; margin-left: auto; border: 1px solid rgba(148,163,184,0.22);
+  background: transparent; color: var(--text-dim);
+  font: 500 12px/1 Inter, system-ui, sans-serif;
+  padding: 7px 12px; border-radius: 999px; cursor: pointer;
+  transition: border-color 160ms ease, color 160ms ease;
+}
+.cv-dd-root .dd-replay:hover { border-color: rgba(96,165,250,0.55); color: #cfe3ff; }
+.cv-dd-root.dd-timeline svg { width: 100%; height: auto; display: block; }
+
+/* ═══════════════════════ TimelineRace internals ═══════════════════════ */
+
+.cv-dd-root .dd-lane-sep { stroke: var(--hairline); stroke-width: 1; }
+.cv-dd-root .dd-lane-label { fill: var(--text); font: 600 12.5px/1 Inter, system-ui, sans-serif; }
+.cv-dd-root .dd-lane-sub { fill: var(--text-mono); font: 500 10px/1 "JetBrains Mono", ui-monospace, SF Mono, Menlo, monospace; }
+
+.cv-dd-root [data-bar], .cv-dd-root [data-marker] { transform-box: fill-box; }
+.cv-dd-root .dd-bar.tone-blue    { fill: rgba(96,165,250,0.30); stroke: rgba(96,165,250,0.75); stroke-width: 1; }
+.cv-dd-root .dd-bar.tone-green   { fill: rgba(52,211,153,0.26); stroke: rgba(52,211,153,0.7); stroke-width: 1; }
+.cv-dd-root .dd-bar.tone-amber   { fill: rgba(251,191,36,0.24); stroke: rgba(251,191,36,0.7); stroke-width: 1; }
+.cv-dd-root .dd-bar.tone-crimson { fill: rgba(248,113,113,0.24); stroke: rgba(248,113,113,0.7); stroke-width: 1; }
+.cv-dd-root .dd-bar.tone-dim     { fill: rgba(148,163,184,0.14); stroke: rgba(148,163,184,0.4); stroke-width: 1; }
+.cv-dd-root .dd-hatch-bg { fill: rgba(148,163,184,0.10); }
+.cv-dd-root .dd-hatch-line { stroke: rgba(148,163,184,0.45); stroke-width: 1.4; }
+.cv-dd-root .dd-bar-label {
+  fill: rgba(255,255,255,0.92); font: 500 11px/1 Inter, system-ui, sans-serif;
+  pointer-events: none; text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+}
+
+.cv-dd-root .dd-marker circle { fill: currentColor; }
+.cv-dd-root .dd-marker.tone-blue    { color: var(--blue); }
+.cv-dd-root .dd-marker.tone-green   { color: var(--green); }
+.cv-dd-root .dd-marker.tone-amber   { color: var(--amber); }
+.cv-dd-root .dd-marker.tone-crimson { color: var(--crimson); }
+.cv-dd-root .dd-marker.tone-dim     { color: rgba(148,163,184,0.8); }
+.cv-dd-root .dd-marker-glyph { fill: currentColor; font: 700 15px/1 Inter, system-ui, sans-serif; }
+.cv-dd-root .dd-marker-flag { fill: currentColor; }
+.cv-dd-root .dd-marker-label {
+  font: 500 10.5px/1 "JetBrains Mono", ui-monospace, SF Mono, Menlo, monospace;
+  pointer-events: none;
+}
+.cv-dd-root .dd-marker-label.tone-blue    { fill: #9cc3ff; }
+.cv-dd-root .dd-marker-label.tone-green   { fill: #8fe6c3; }
+.cv-dd-root .dd-marker-label.tone-amber   { fill: #fcd34d; }
+.cv-dd-root .dd-marker-label.tone-crimson { fill: #fca5a5; }
+.cv-dd-root .dd-marker-label.tone-dim     { fill: var(--text-dim); }
+
+.cv-dd-root .dd-playhead { stroke: var(--blue); stroke-width: 1.5; opacity: 0.9; filter: drop-shadow(0 0 4px rgba(96,165,250,0.7)); }
+.cv-dd-root .dd-axis { stroke: rgba(148,163,184,0.35); stroke-width: 1; }
+.cv-dd-root .dd-axis-tick { stroke: rgba(148,163,184,0.35); stroke-width: 1; }
+.cv-dd-root .dd-axis-label { fill: var(--text-mono); font: 500 10px/1 "JetBrains Mono", ui-monospace, SF Mono, Menlo, monospace; }
+.cv-dd-root .dd-axis-title { fill: var(--text-dim); font: 500 10.5px/1 Inter, system-ui, sans-serif; }
+
+/* ═══════════════════════ Bespoke widget shell (pages 2, 5, 7) ═══════════════════════ */
+
+.cv-dd-root.dd-widget {
+  margin: 1.25rem 0 1.75rem;
+  background:
+    radial-gradient(900px 380px at 50% 30%, rgba(96,165,250,0.05), transparent 60%),
+    linear-gradient(180deg, #0b101d 0%, var(--bg) 100%);
+  border: 1px solid rgba(148,163,184,0.14);
+  border-radius: 14px;
+  padding: 12px 14px;
+  width: 100%;
+}
+.cv-dd-root.dd-widget .dd-stage { margin-top: 6px; }
+.cv-dd-root.dd-widget .dd-stage svg { width: 100%; height: auto; display: block; }
+
+/* shared SVG text primitives (mirror hero-diagram.css language) */
+.cv-dd-root .dd-t  { fill: var(--text); font: 500 12.5px/1 Inter, system-ui, sans-serif; }
+.cv-dd-root .dd-ts { fill: var(--text-dim); font: 500 11px/1 Inter, system-ui, sans-serif; }
+.cv-dd-root .dd-tm { fill: var(--text-mono); font: 500 10.5px/1 "JetBrains Mono", ui-monospace, SF Mono, Menlo, monospace; }
+.cv-dd-root .dd-ok   { fill: var(--green); }
+.cv-dd-root .dd-err  { fill: var(--crimson); }
+.cv-dd-root .dd-warn { fill: var(--amber); }
+
+/* ═══════════════════════ Light theme chrome ═══════════════════════ */
+
+html[data-theme="light"] .cv-dd-root .dd-tab { color: #334155; }
+html[data-theme="light"] .cv-dd-root .dd-tab[aria-pressed="true"] { color: #1d4ed8; }
+html[data-theme="light"] .cv-dd-root .dd-replay { color: #475569; }
+html[data-theme="light"] .cv-dd-root .dd-replay:hover { color: #1d4ed8; }
+html[data-theme="light"] .cv-dd-root .dd-cap { color: #64748b; }
+
+/* ═══════════════════════ Reduced motion ═══════════════════════ */
+
+@media (prefers-reduced-motion: reduce) {
+  .cv-dd-root .dd-playhead { display: none; }
+}
