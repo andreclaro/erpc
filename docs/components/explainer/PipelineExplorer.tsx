@@ -58,6 +58,14 @@ export function PipelineExplorer({ maxWidth = "1200px" }: PipelineExplorerProps)
 				<div dangerouslySetInnerHTML={{ __html: PIPE_SVG_HTML }} />
 			</div>
 
+			<div className="pipe-log" aria-live="polite">
+				<ol className="pipe-log-lines">
+					<li className="tone-dim">
+						Pick a scenario and press Play — the packet traces the real code path through eRPC.
+					</li>
+				</ol>
+			</div>
+
 			<div className="pipe-stages" role="group" aria-label="Pipeline stages — open details">
 				{PIPE_STAGES.map((st) => (
 					<button
@@ -71,14 +79,6 @@ export function PipelineExplorer({ maxWidth = "1200px" }: PipelineExplorerProps)
 						{st.name}
 					</button>
 				))}
-			</div>
-
-			<div className="pipe-log" aria-live="polite">
-				<ol className="pipe-log-lines">
-					<li className="tone-dim">
-						Pick a scenario and press Play — the packet traces the real code path through eRPC.
-					</li>
-				</ol>
 			</div>
 
 			<div className="pipe-detail" hidden />
