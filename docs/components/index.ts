@@ -13,3 +13,6 @@ export { PromptExample } from "./PromptExample";
 export type { PromptExampleProps } from "./PromptExample";
 export { HeroDiagram } from "./HeroDiagram";
 export type { HeroDiagramProps } from "./HeroDiagram";
+export { PipelineExplorer } from "./explainer/PipelineExplorer";
+export type { PipelineExplorerProps } from "./explainer/PipelineExplorer";
+export { FeatureWidgets } from "./explainer/FeatureWidgets";
