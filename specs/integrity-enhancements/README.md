@@ -52,6 +52,7 @@ Absolute "100% security" is not a meaningful cryptographic claim. This spec defi
 | P4 | **`eth_call` verification** — stateless re-execution over proven state | `02-proof-verification.md` §6 | Last unverifiable read surface |
 | P5 | **Multichain anchoring** — L2s via L1 commitments, per-chain assurance tiers | `04-multichain.md` | Extends guarantee beyond Ethereum mainnet |
 | P6 | **Advisory provider signals** — dRPC signatures/quorum, Ankr vRPC (TEE) | `05-optional-signals.md` | Defense-in-depth, never a gate |
+| P7 | **Client-side verifiability** — proof-carrying responses + anchor transparency so clients need not trust eRPC either | `08-client-trust.md` | Last-mile trust (eRPC → client) |
 
 ## 3a. Conventions (repo rules compliance)
 
@@ -89,6 +90,39 @@ This spec follows the repo design razor (`.cursor/rules/erpc.md`): open-ended se
 
 The anchor is the only new *trust-relevant* component; everything else is wiring existing eRPC machinery (chain view, recompute checks, cache, cordon, export) to it.
 
+### 4a. Composition with existing failsafe machinery
+
+The new layers do not replace the failsafe stack — they sit on top of it and change what its signals mean. Request flow:
+
+```
+request → policy mode → verified-cache lookup ──hit──► serve (verified)
+                        │ miss
+                        ▼
+        forward: consensus(...) or retry(hedge(upstream))     [existing failsafe]
+                        ▼
+        post-forward verification (anchor/proofs) ──fail──► evidence → cordon → next upstream
+                        ▼
+        enforce mode + label (X-ERPC-Verification) → respond [+ optional proof envelope, P7]
+```
+
+| Existing feature | Role today | Role with this spec |
+|---|---|---|
+| retry / hedge / timeout | availability, latency | unchanged; also routes around verification-failing upstreams (failures surface as `ErrEndpointContentValidation`) |
+| circuit breaker | upstream health | unchanged |
+| **consensus failsafe** | de-facto integrity mechanism (voting) | narrows to the unverifiable surface (below); provable winners get async anchor verification (`07` §2) |
+| selection & scoring | routing | new inputs: verification failures (hard penalty), advisory signals (P6 boost), provisional-accuracy reputation (`07` §4) |
+| re-org-aware cache | performance | gains verified-bit (INV-4); serves verified data |
+| cordon / misbehavior export | punishment | upgraded trigger: cryptographic evidence → immediate hard cordon (no dispute token bucket) |
+| rate limits | cost control | also bounds verification-cost DoS (`02` §7) |
+
+**Is consensus still required? Yes.** Three surfaces are unverifiable by construction or by deployment state:
+
+1. **Unfinalized head** (V-provisional) — nothing to prove against until finality; consensus + optimistic attestation is the strongest available control.
+2. **`eth_call` / execution methods** — until P4 (StatelessExecutor) ships, consensus is the interim tier.
+3. **Quorum-tier chains** (BSC, SVM, unknown chains — the razor's fallthrough) — consensus is the *only* integrity mechanism there.
+
+What changes is its role: from *the* integrity mechanism to **provisional-tier control + availability fabric + early-warning**. For provable data it becomes redundant-but-useful — and one asymmetry must be handled explicitly: if the anchor conflicts with *unanimous* cross-vendor consensus, suspect an **anchor bug** (fail-closed + page humans) instead of mass-cordoning honest upstreams (`07` §3).
+
 ## 5. Document index
 
 | Doc | Content |
@@ -100,6 +134,8 @@ The anchor is the only new *trust-relevant* component; everything else is wiring
 | `04-multichain.md` | P5: L2 anchoring (OP Stack, Arbitrum, zk rollups), sidechains, SVM |
 | `05-optional-signals.md` | P6: provider-signature adapters as advisory signals |
 | `06-implementation-plan.md` | Phases, exit criteria, testing/conformance, rollout, risks, red-team checklist |
+| `07-consensus-evolution.md` | Consensus's narrowed-but-required role; "consensus proposes, anchor disposes"; conflict policy; improvement catalog C1–C7 |
+| `08-client-trust.md` | P7: proof-carrying responses, anchor transparency, client SDK, signed/TEE advisory layers, trust matrix |
 
 ## 6. Glossary
 
