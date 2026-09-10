@@ -1,0 +1,163 @@
+---
+title: "Inside eRPC"
+description: "An animated, interactive walkthrough of the eRPC request pipeline — from HTTP ingress through auth, caching, failsafe policies, and the upstream sweep — plus every feature in motion."
+---
+
+import { LLMsTxtLink, AISection, PipelineExplorer, FeatureWidgets } from "../components";
+
+<LLMsTxtLink />
+
+# Inside eRPC
+
+Watch a JSON-RPC call travel the real pipeline: parsed at the edge, authenticated,
+checked against a finality-aware cache, wrapped in nested failsafe policies, and raced
+across upstreams — then returned with headers that explain every decision. Pick a
+scenario, press Play, and click any stage to see what it does and the config that drives it.
+
+<PipelineExplorer />
+
+## Every stage, in order
+
+1. **HTTP ingress** — URL routing (`/{project}/{architecture}/{chain}`), batch fan-out, gzip, CORS.
+2. **Auth** — strategy chain: secret, database, jwt, siwe, network.
+3. **Project** — project-level rate-limit permit, EVM pre-forward hooks.
+4. **Network** — static responses → multiplexer → cache read → selection-policy ordering.
+5. **Failsafe executor** — `timeout( consensus( retry( hedge( upstream ))))`.
+6. **Upstream sweep** — block-availability gate, per-upstream budget, circuit breaker.
+7. **Response** — byte-perfect id, async cache write, `X-ERPC-*` diagnostic headers.
+
+The deep-dive companion is [How eRPC works](/use-cases/how-it-works); per-policy config
+references live under [Failsafe](/config/failsafe).
+
+## Every feature, animated
+
+Each card replays automatically when it scrolls into view — or hit Replay. The caption
+under each title is the real config key that controls the behavior.
+
+<FeatureWidgets />
+
+## Talk to eRPC
+
+Per-request **directives** override behavior without touching config — set them as HTTP
+headers or query params (query wins). Client-set directives can be restricted per project
+with `allowClientDirectives`.
+
+| Directive header | Query param | What it does |
+|---|---|---|
+| `X-ERPC-Retry-Empty` | `retry-empty` | Retry when an upstream answers empty/null |
+| `X-ERPC-Retry-Pending` | `retry-pending` | Poll tx-lookup methods until the tx is mined |
+| `X-ERPC-Skip-Cache-Read` | `skip-cache-read` | Bypass the cache (all connectors, or a matching id) |
+| `X-ERPC-Use-Upstream` | `use-upstream` | Pin the request to an upstream by id, glob, or tag |
+| `X-ERPC-Skip-Interpolation` | `skip-interpolation` | Keep block tags (`latest`) instead of hex in outbound params |
+| `X-ERPC-Skip-Consensus` | `skip-consensus` | Bypass consensus; retry + hedge still apply |
+
+Every response carries **execution headers** (`server.executionHeaders: all | summary | off`):
+
+| Header | Tells you |
+|---|---|
+| `X-ERPC-Cache` | `HIT` or `MISS` |
+| `X-ERPC-Upstream` | Which upstream served the response |
+| `X-ERPC-Upstreams` | Per-attempt trace: id, role, outcome, duration |
+| `X-ERPC-Attempts` / `X-ERPC-Network-Retries` / `X-ERPC-Upstream-Hedges` | How hard eRPC worked for this answer |
+| `X-ERPC-Consensus-Slots` / `X-ERPC-Consensus-Disputes` | Consensus participation and disagreements |
+
+**Auth strategies**: `secret` (API key), `database` (connector-backed keys), `jwt` (JWKS),
+`siwe` (Sign-In with Ethereum), `network` (IP/CIDR allowlist).
+
+**Built-in vendors** (one key unlocks every chain they support): `alchemy`, `ankr`,
+`blastapi`, `blockdaemon`, `blockpi`, `chainstack`, `conduit`, `drpc`, `dwellir`, `envio`,
+`erpc`, `etherspot`, `goldsky`, `infura`, `llama`, `onfinality`, `pimlico`, `quicknode`,
+`repository`, `routemesh`, `satelink`, `superchain`, `tenderly`, `thirdweb`.
+
+## Glossary
+
+- **Project** — the tenant container in your config (`projects[].id`); owns auth, upstreams, and networks. First URL segment.
+- **Network** — one chain inside a project, e.g. `evm:42161`. Owns the cache, failsafe policies, and selection policy.
+- **Upstream** — a single RPC endpoint eRPC can call (yours or a vendor's).
+- **Failsafe** — eRPC's resilience policies: `retry`, `hedge`, `timeout`, `circuitBreaker`, `consensus`.
+- **Hedge** — a speculative parallel copy of your request, fired after an adaptive delay; first good answer wins.
+- **Consensus** — asking several upstreams and returning the answer at least `agreementThreshold` of them agree on.
+- **Finality** — how settled the data is: `finalized`, `unfinalized`, `realtime`, `unknown`. Drives cache TTLs.
+- **Selection policy** — a JS `evalFunc` that re-orders upstreams using live health metrics, evaluated on an interval.
+- **Multiplexing** — identical in-flight requests share one upstream call.
+- **Cordon** — operational exclusion of an upstream (per method or entirely) without undeploying it.
+- **Shadow upstream** — receives a sampled mirror of traffic for comparison; its answers are never served.
+- **Directive** — a per-request override via `X-ERPC-*` header, query param, or `directiveDefaults`.
+
+<AISection title="Inside eRPC — full agent reference">
+
+### How it works
+
+This page is an animated companion to [How eRPC works](/use-cases/how-it-works) (the
+canonical lifecycle reference). The pipeline explorer animates five scenarios — cache hit,
+cold path, hedge race, retry on error, consensus dispute — over a 7-stage model:
+
+| Stage | Source | Key behavior |
+|---|---|---|
+| 1 · HTTP ingress | `erpc/http_server.go` | `parseUrlPath`, batch goroutine fan-out, gzip, CORS, domain aliasing |
+| 2 · Auth | `auth/registry.go` | Strategy chain in order: `secret`, `database`, `jwt`, `siwe`, `network`; first success wins |
+| 3 · Project | `erpc/projects.go` | `rateLimitBudget` permit, `HandleProjectPreForward` EVM hook, shadow fan-out after response |
+| 4 · Network | `erpc/networks.go` | Static responses → multiplexer → `cacheDal.Get` → `policyEngine.GetOrdered*` → pre-forward hooks → future-block short-circuit |
+| 5 · Failsafe executor | `erpc/network_executor.go` | `timeout( consensus( retry( hedge( upstream ))))`; matched by `matchMethod` / `matchFinality` / `matchRequestKind` |
+| 6 · Upstream sweep | `upstream/upstream.go` | Block-availability gate, per-upstream budget permit, circuit breaker, client send, health recording |
+| 7 · Response | `erpc/http_server.go` | `normalizeResponse` id fidelity, async `cacheDal.Set` (10s deadline, `appCtx`), `setResponseHeaders` |
+
+Scope rules worth remembering: **circuit breaker is upstream-scope only** (rejected at
+network scope); **consensus is network-scope only**; cache connectors take
+`failsafeForGets` / `failsafeForSets` with their own retry/hedge/breaker/timeout.
+
+### Config schema
+
+The snippets in each stage's detail panel are real config. Primary references:
+
+| Feature | YAML path | Page |
+|---|---|---|
+| Failsafe policies | `networks[].failsafe[]`, `upstreams[].failsafe[]` | [Failsafe](/config/failsafe) |
+| Cache connectors + policies | `database.evmJsonRpcCache.connectors[]` / `.policies[]` | [Database](/config/database) |
+| Selection policy | `networks[].selectionPolicy` | [Projects](/config/projects) |
+| Rate limiters | `rateLimiters.budgets[].rules[]` | [Rate limiters](/config/rate-limiters) |
+| Auth strategies | `projects[].auth.strategies[]` | [Auth](/config/auth) |
+| Directives | `networks[].directiveDefaults` + `X-ERPC-*` headers | [Directives](/operation/directives) |
+| Execution headers | `server.executionHeaders` | [Server](/config/server) |
+
+### Edge cases & gotchas
+
+1. **Hedge legs returning empty don't win** — a fast `null` from a lagging upstream does
+   not end the race; siblings continue until a non-null result arrives (except methods in
+   `retry.emptyResultAccept`).
+2. **Cache writes never block the response** — the async write goroutine uses `appCtx`
+   with a 10s deadline, so a client disconnect cannot abort it.
+3. **Unfinalized ≠ permanent** — only `finality: finalized` policies should omit `ttl`;
+   unfinalized data with a long TTL will serve re-orged blocks.
+4. **Circuit breaker at network scope is a config error** — validation rejects it; put
+   breakers on `upstreams[].failsafe[]`.
+5. **`useUpstream` bypasses the selection policy** — powerful for debugging, which is why
+   client-set directives are gated by `allowClientDirectives`.
+
+### Observability
+
+Scenario-relevant metrics: `erpc_network_requests_received_total`,
+`erpc_network_hedged_request_total`, `erpc_network_hedge_winner_total`,
+`erpc_network_retry_attempt_total`, `erpc_network_multiplexed_requests_total`,
+`erpc_upstream_attempt_outcome_total`. Full list on
+[How eRPC works](/use-cases/how-it-works) and [Monitoring](/operation/monitoring).
+
+### Source code entry points
+
+- [`erpc/http_server.go`](https://github.com/erpc/erpc/blob/main/erpc/http_server.go) — ingress, batching, directive enrichment, response headers
+- [`erpc/networks.go`](https://github.com/erpc/erpc/blob/main/erpc/networks.go) — `Network.Forward`: multiplexing, cache, ordering, sweep
+- [`erpc/network_executor.go`](https://github.com/erpc/erpc/blob/main/erpc/network_executor.go) — failsafe composition and retry reasons
+- [`upstream/upstream.go`](https://github.com/erpc/erpc/blob/main/upstream/upstream.go) — per-upstream forward + breaker + budgets
+- [`consensus/executor.go`](https://github.com/erpc/erpc/blob/main/consensus/executor.go) — consensus participant slots and agreement
+- [`data/connector.go`](https://github.com/erpc/erpc/blob/main/data/connector.go) — cache connector drivers
+
+### Related pages
+
+- [How eRPC works](/use-cases/how-it-works) — canonical request-lifecycle reference
+- [Survive provider outages](/use-cases/survive-provider-outages) — retry, hedge, circuit breaker
+- [Cut costs & latency](/use-cases/cut-costs-and-latency) — cache policies and TTLs
+- [Scale chains & providers](/use-cases/scale-chains-and-providers) — selection policies and scoring
+- [Trust the data](/use-cases/trust-the-data) — consensus and integrity checks
+- [Lock it down](/use-cases/lock-it-down) — auth strategies and rate limiters
+
+</AISection>
