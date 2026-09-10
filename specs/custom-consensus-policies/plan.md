@@ -27,7 +27,7 @@ correctness pieces.
 | `blockAvailability` | Existing config + `EvmAssertBlockAvailability` — no new dynamic model |
 | Fallback policy shape | Plain `{ maxParticipants, agreementThreshold }` — no tag quotas |
 | Decision cache | **Not in v1** — add only if measured eval cost forces it |
-| Sitout state | Moved to `health.Tracker` (typed `cordonClass` + rate limiter) so selector reads it without importing `consensus/`; exporter stays per-policy |
+| Sitout state | Moved to `health.Tracker` (per-class cordon flags + rate limiter) so selector reads it without importing `consensus/`; exporter stays per-policy |
 | Header + metric | Reimplemented here (`X-eRPC-Consensus-Policy`, `consensus_policy` label); not dependent on #1041 |
 | Default policy | Must be the strictest; fail-closed target |
 
@@ -53,8 +53,9 @@ Package: `internal/consensus/policy/` — no imports from `consensus/` executor.
 2. **`EvalContext`** types — request, user, upstream refs (id, tags, health,
    blockAvailability), network.
 3. **Stdlib v1** — `withTag`, `healthy`, `anyPunished`, `allUnavailable`
-   (fail-closed fallback predicate over typed cordon classes),
-   `canServeBlock` (wraps `EvmAssertBlockAvailability`), `hasRole`.
+   (fail-closed fallback predicate over typed cordon classes; **false on an
+   empty set**), `canServeBlock` (wraps `EvmAssertBlockAvailability`),
+   `hasRole`.
 4. **API** — `Compile(js) (*Policy, error)`, `Evaluate(ctx) (name string, err error)`.
    Empty / null → `""` (default). Unknown-name resolution is the caller's job.
 5. **Benchmark** — measure eval latency on a pre-warmed VM; report result in
@@ -96,16 +97,24 @@ fixture validates and compiles.
    have responded or the round has otherwise terminated. The wait-cap arming
    gate at `executor.go:490` is unchanged — it still holds arming until
    every quota tag is covered by distinct upstreams.
-2. **Load-time validation** — reject a policy where every
-   `requiredParticipants` quota is waivable; at least one must be
-   never-waivable.
+2. **Load-time validation** — reject a policy unless at least one
+   `requiredParticipants` entry is both never-waivable **and** carries
+   `minAgreement > 0` (R9). The quota condition is not redundant: both
+   `anyAgreementQuota` and `resultsSatisfyAgreementQuotas` skip entries with
+   `minAgreement <= 0` (`consensus/quota.go`), so a never-waivable entry
+   without a quota passes a flag-only check while enforcing nothing.
+   Also reject two policies sharing an S3 `misbehaviorsDestination.path`
+   unless each `filePattern` contains `{timestampMs}` (R10) — the exporter
+   is per-policy, and without the placeholder two exporters resolve the same
+   key and each S3 PUT overwrites the previous archive.
 3. **Characterization tests** — one per edge-matrix row in feature.md §7.2
    (v1 rows only; null-shape stays dispute). Existing consensus tests run
    unchanged against the default policy (zero regression).
 
 **Acceptance**: UC3 (historical via waiver) passes; mixed MissingData group
 winning is a composition dispute (the waiver does not fire when any matching
-participant returned a value).
+participant returned a value); a config whose only never-waivable entry has
+`minAgreement: 0` is rejected at load time.
 
 ---
 
@@ -114,25 +123,39 @@ participant returned a value).
 1. Expose JWT roles/claims on `ctx.user` (**new plumbing** — `common.User`
    gains `Roles`; JWT strategy populates from a configurable claim; other
    strategies leave it empty).
-2. Move consensus sitout state to `health.Tracker`. `Tracker.Cordon` gains a
-   typed `cordonClass` (`punishment` / `availability` / `operator`) stored
-   alongside the free-text reason. Call sites: consensus executor →
+2. Add a required `cordonClass` parameter to the cordon API. This is wider
+   than one function: `Cordon` / `Uncordon` on both interfaces in
+   `common/upstream.go`, `Upstream.Cordon` / `Uncordon`
+   (`upstream/upstream.go`), `Tracker.Cordon` / `Uncordon`
+   (`health/tracker.go`), and both fakes in `common/upstream_fake.go`, plus
+   the existing call sites and their tests. Classes: consensus executor →
    `punishment`; EVM state poller (chain identity) and SVM state poller
-   (lag/unhealthy) → `availability`; admin API → `operator`. Move the
-   misbehavior rate limiter to `health.Tracker` keyed by upstream ID so
-   reaching a sitout is global across policies. The misbehavior exporter
-   stays per-policy.
-3. Selector reads the typed class — never the reason string. Reference
-   fallback predicate is `allUnavailable()`: true iff every member is
-   unhealthy or `availability`-cordoned — fail closed for `punishment`,
-   `operator`, and any future class.
-4. `blockNumber` extraction for eval ctx (numeric request params).
-5. Fallback eval refuse-to-fire when `anyPunished()` is true — tested.
+   (lag/unhealthy) → `availability`; admin API → `operator`.
+3. Replace `TrackedMetrics.Cordoned atomic.Bool` with a per-class bitmask on
+   the same `(upstream, method)` entry. `IsCordoned` is "any bit set";
+   `Uncordon(class)` clears one bit; `CordonedAtMs` is stamped on the
+   empty→non-empty transition and cleared on the return to empty, so
+   cordon-duration accounting is unchanged. This is the correctness step: with
+   one shared flag, a poller cordoning an already-punished upstream overwrites
+   `punishment` with `availability`, and either source's `Uncordon` clears the
+   other's cordon outright (§4.5).
+4. Move consensus sitout state to `health.Tracker`, and move the misbehavior
+   rate limiter there too (keyed by upstream ID) so reaching a sitout is
+   global across policies. The misbehavior exporter stays per-policy.
+5. Selector reads the class set — never the reason string. `health.state` is
+   `"cordoned"` whenever the set is non-empty, so a failing health check on a
+   punished upstream cannot report `"unhealthy"`. Reference fallback predicate
+   is `allUnavailable()`.
+6. `blockNumber` extraction for eval ctx (numeric request params).
 
 **Acceptance**: punished internals never select `fallback`; unauthorized
 callers never get `fallback` / `generous-dev`; operator-cordoned internals
 block `fallback`; availability-cordoned (chain-mismatch, SVM lag) internals
-allow `fallback` for authorized roles.
+allow `fallback` for authorized roles. Order-independence is tested directly:
+punish an upstream, then availability-cordon it, and `allUnavailable()` is
+still false; uncordon the availability class and the punishment cordon
+survives. `allUnavailable()` on an internal tag matching zero upstreams
+returns false and the round stays on `standard`.
 
 ---
 

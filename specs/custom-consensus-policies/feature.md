@@ -124,8 +124,11 @@ is that policy.
 // ctx.user      { roles: string[], claims: object } | null
 // ctx.upstreams [{ id, tags, health, blockAvailability: {lower, upper} | null }]
 //   health = { state: "healthy" | "unhealthy" | "cordoned",
-//              cordonClass?: "punishment" | "availability" | "operator",
+//              cordonClasses: ("punishment"|"availability"|"operator")[],
 //              cordonReason?: string }   // diagnostic only — never matched
+//   An upstream can hold several cordons at once (§4.5), so the class is a
+//   SET. Empty ⟺ not cordoned. `state == "cordoned"` iff the set is non-empty,
+//   and takes precedence over "unhealthy".
 //
 // return "name" → run policies[name]
 //                 (unknown name → fail closed to default + warn log)
@@ -143,8 +146,8 @@ Grow only when forced by observed configs:
 |---|---|
 | `upstreams.withTag(t)` | Filter by tag |
 | `upstreams.healthy()` | Keep only `state == "healthy"` — cordoned upstreams of any class are excluded (cordon = out of rotation) |
-| `upstreams.anyPunished()` | True iff any upstream that **would otherwise be eligible to participate** is cordoned with `cordonClass == "punishment"` — not "ever punished" |
-| `upstreams.allUnavailable()` | True iff every member is unhealthy or cordoned with `cordonClass == "availability"`. The fail-closed fallback predicate: `punishment`, `operator`, and any future cordon class block it |
+| `upstreams.anyPunished()` | True iff any upstream that **would otherwise be eligible to participate** holds a `punishment` cordon — not "ever punished". Kept so an eval can tell punishment apart from operator action; `allUnavailable()` is the predicate for the fallback decision itself |
+| `upstreams.allUnavailable()` | True iff the set is **non-empty** and every member is either unhealthy-but-uncordoned or holds `availability` cordons and nothing else. **False on an empty set** — a tag matching no upstream is a config error, not an outage. The fail-closed fallback predicate: `punishment`, `operator`, and any future cordon class block it |
 | `upstreams.canServeBlock(n)` | Uses existing `EvmAssertBlockAvailability` |
 | `user.hasRole(r)` | Role check |
 
@@ -204,19 +207,25 @@ Today `punishMisbehavior` sitout lives in a private executor map
 consensus")`. The selector package must not import `consensus/`, so sitout
 state moves to **`health.Tracker`**:
 
-- Executor records sitout via `tracker.Cordon(upstream, "*", "misbehaving in
-  consensus", CordonClassPunishment)` and `tracker.Uncordon(...)` on timer
-  expiry. The claim is idempotent: a second punishment for the same upstream
-  while already in sitout is a no-op (the timer is not reset).
+- Executor records sitout via `upstream.Cordon("*", "misbehaving in
+  consensus", CordonClassPunishment)` and the matching
+  `upstream.Uncordon("*", "end of consensus penalty", CordonClassPunishment)`
+  on timer expiry. The claim is idempotent: a second
+  punishment for the same upstream while already in sitout is a no-op (the
+  timer is not reset).
 - The misbehavior **rate limiter** also moves to `health.Tracker` (keyed by
   upstream ID) so that reaching a sitout is global across policies. The
   misbehavior **exporter** stays per-policy — it is a reporting sink, not a
-  correctness signal.
-- `Tracker.Cordon` gains a typed **`cordonClass`** parameter stored alongside
-  the free-text reason (§4.5). The selector reads the class — never the
-  reason string.
+  correctness signal. Because one destination can now back several policies,
+  load-time validation rejects two policies sharing an S3
+  `misbehaviorsDestination.path` unless each `filePattern` contains
+  `{timestampMs}`; without it two exporters resolve the same key and an S3
+  PUT overwrites rather than appends.
+- **`cordonClass` is a required parameter on `Cordon` / `Uncordon`, and the
+  tracker holds cordon state per class** (§4.5). The selector reads the class
+  set — never the reason string.
 - `anyPunished()` is true iff any upstream that would otherwise be eligible
-  is currently cordoned with class `punishment`.
+  holds a `punishment` cordon.
 
 This keeps the zero-import rule for `internal/consensus/policy/` and gives
 both executor and selector a shared, race-safe source of truth.
@@ -224,9 +233,9 @@ both executor and selector a shared, race-safe source of truth.
 ### 4.5 Cordon classes
 
 Not every cordon is punishment, and not every non-punishment cordon is an
-availability failure. `Tracker.Cordon` records a **typed class** alongside
-the free-text reason; the selector matches on the class, never the reason
-string (otherwise the eval would couple to the message text of every
+availability failure. `Cordon` takes a **typed class** alongside the
+free-text reason; the selector matches on the class, never the reason string
+(otherwise the eval would couple to the message text of every
 cordon-producing call site):
 
 | `cordonClass` | Set by | Meaning | Fallback |
@@ -239,10 +248,55 @@ The class is required at the call site, so there is no runtime "unknown"
 row: a cordon class added in the future blocks fallback until the selector
 explicitly maps it to `availability` — fail closed by construction.
 
+**Why `operator` fails closed.** An admin cordon is undifferentiated: the
+same call serves planned maintenance and "take this node out, I do not trust
+it". The API cannot tell them apart, so the class is read as the second one.
+An operator who wants authorized callers to keep getting `fallback` during
+maintenance changes the policy config, which is an explicit and audited act,
+rather than relying on a cordon to imply it. This reverses the recommendation
+in the Revision 4 design review, which read the admin cordon as the clearest
+availability case; the deciding argument is that an availability reading is
+unrecoverable when wrong, and a config change is available when it is right.
+
+#### Cordon state is held per class
+
+An upstream can be cordoned by several sources at once, and today they share
+one flag: `health.Tracker` stores a single `Cordoned` bool plus one
+`LastCordonedReason` per `(upstream, method)` (`health/tracker.go`), and
+`Uncordon` clears it without checking who set it. The three automatic
+sources above all use method `"*"`, as does the admin API whenever the
+operator passes no method, so a single scalar class would be last-writer-wins
+on one shared entry:
+
+- A state poller cordoning an already-punished upstream would overwrite
+  `punishment` with `availability`, and `allUnavailable()` would then permit
+  the downgrade while the sit-out is still running.
+- The SVM poller's recovery `Uncordon` (`architecture/svm/svm_state_poller.go`)
+  would clear a live consensus punishment cordon outright, and the sit-out
+  timer's `Uncordon` would likewise clear a poller's live availability cordon.
+
+So the tracker holds **one flag per class** — a bitmask over the closed class
+enum on the existing `(upstream, method)` entry, replacing the single bool.
+`IsCordoned` is "any bit set". `Uncordon(class)` clears one bit and leaves
+the others. `CordonedAtMs` is stamped on the empty→non-empty transition and
+cleared on the return to empty, so duration accounting is unchanged. This is
+order-independent by construction: `allUnavailable()` is false while any
+`punishment` bit is held, whatever arrived last.
+
+**Method scope.** Cordons are keyed by method, and `IsCordoned` matches the
+exact method or `"*"`. The three automatic sources use `"*"`; the admin API
+passes an operator-supplied method, so an upstream can hold `operator` on one
+method and `availability` on `"*"`. The eval sees the union of both scopes for
+the request's method, which is why `health.cordonClasses` is a set.
+
 The eval ctx exposes `health` as a structured value:
-`{ state, cordonClass?, cordonReason? }` (§3). `cordonReason` is diagnostic
-only. The reference fallback predicate is `allUnavailable()` (§3.1), which
-is true only when every member is unhealthy or `availability`-cordoned.
+`{ state, cordonClasses, cordonReason? }` (§3). `cordonReason` is diagnostic
+only, and `state` is `"cordoned"` whenever the class set is non-empty — a
+cordoned upstream never reports `"unhealthy"`, so a failing health check
+cannot mask a punishment cordon. The reference fallback predicate is
+`allUnavailable()` (§3.1), which is true only for a non-empty set whose every
+member is unhealthy-but-uncordoned or `availability`-cordoned and nothing
+else.
 
 ### 4.6 Sobek pool
 
@@ -330,9 +384,12 @@ Goal: recent → internal+external; historical (outside internal
 
    Load-time validation: a `requiredParticipants` entry with
    `waiveAgreementOnMissingData: true` is rejected unless at least one other
-   entry has `waiveAgreementOnMissingData: false` (or omits the flag). A
-   policy where every quota is waivable is invalid — there must always be a
-   never-waivable floor.
+   entry has `waiveAgreementOnMissingData: false` (or omits the flag) **and**
+   `minAgreement > 0`. The second condition is what makes the floor a floor:
+   `anyAgreementQuota` and `resultsSatisfyAgreementQuotas` both skip entries
+   with `minAgreement <= 0` (`consensus/quota.go`), so a never-waivable entry
+   without a quota is invisible to composition enforcement and would satisfy
+   the rule while enforcing nothing.
 3. **Empty-waiver with block proof (v1.1 — spec now, not in milestones).**
    Null-shaped pruning (`eth_getTransactionByHash` post-EIP-4444) is ambiguous
    at the source — but the winning tx/receipt/log carries its own
@@ -379,12 +436,19 @@ policy + waiver covers it with zero JS.
 - **R7** punished/sitout distinct from unhealthy in eval ctx; fallback eval
   must refuse to fire when any matching internal is punished.
 - **R8** cordons carry a typed `cordonClass` (`punishment` / `availability` /
-  `operator`) read by the selector — never the reason string; the reference
-  fallback predicate `allUnavailable()` is fail closed for every class
-  except `availability`, including any class added in the future.
+  `operator`) read by the selector — never the reason string. The tracker
+  holds one flag per class, so classes do not overwrite each other and
+  `Uncordon` clears only its own class. The reference fallback predicate
+  `allUnavailable()` is fail closed for every class except `availability`,
+  including any class added in the future, and is false on an empty set.
 - **R9** load-time validation rejects a policy where every
-  `requiredParticipants` quota is waivable; at least one quota must be
-  never-waivable.
+  `requiredParticipants` quota is waivable; at least one entry must be both
+  never-waivable **and** carry `minAgreement > 0`. An entry with
+  `minAgreement: 0` is skipped by both `anyAgreementQuota` and
+  `resultsSatisfyAgreementQuotas` (`consensus/quota.go`), so it enforces
+  nothing and cannot serve as the floor.
+- **R10** two policies must not share an S3 `misbehaviorsDestination.path`
+  unless each `filePattern` contains `{timestampMs}` (§4.4).
 
 ---
 
@@ -418,7 +482,14 @@ labels.
 - Eval failure / timeout / unknown name → default policy (never more
   permissive).
 - Fallback must not fire on punishment (R7) and fails closed on `operator`
-  or any future cordon class (R8).
+  or any future cordon class (R8). Per-class cordon state is part of that
+  guarantee: with a single shared flag, a later availability cordon or an
+  unrelated source's `Uncordon` would clear or downgrade an active punishment
+  and re-open the downgrade (§4.5).
+- `allUnavailable()` is false on an empty set, so a tag that matches no
+  upstream cannot select `fallback`. A typo'd tag is a config error, and the
+  vacuous reading of "all members are unavailable" would turn it into a
+  silent downgrade for every authorized caller.
 - Empty-waiver (v1.1) must not fire without block proof outside retention —
   closes the correlated-externals-outvote-internal hole for recent data.
 - Role gating turns the JWT into a **correctness control**, not only a rate
