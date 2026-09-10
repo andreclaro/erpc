@@ -253,10 +253,10 @@ same call serves planned maintenance and "take this node out, I do not trust
 it". The API cannot tell them apart, so the class is read as the second one.
 An operator who wants authorized callers to keep getting `fallback` during
 maintenance changes the policy config, which is an explicit and audited act,
-rather than relying on a cordon to imply it. This reverses the recommendation
-in the Revision 4 design review, which read the admin cordon as the clearest
-availability case; the deciding argument is that an availability reading is
-unrecoverable when wrong, and a config change is available when it is right.
+rather than relying on a cordon to imply it. The case for the opposite
+reading is real — an admin cordon is the most deliberate, most declared
+signal in the table — but an availability reading is unrecoverable when it is
+wrong, and a config change is available when it is right.
 
 #### Cordon state is held per class
 
