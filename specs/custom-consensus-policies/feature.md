@@ -20,7 +20,8 @@ After v1, an operator can:
 - Run strict internal+external consensus for production callers, and a
   permissive `generous-dev` policy for a dev role — without code changes.
 - Automatically fall back to external-only consensus when internal nodes are
-  down, but only for authorized roles.
+  unhealthy (out of sync, down, unreachable) and not punished for consensus
+  misbehaviour — but only for authorized roles.
 - Serve historical / pruned data only for authorized roles: known-old blocks
   via an external-only `historical` policy; unknown-block methods (tx-hash)
   via `standard-waive-missing` (same composition as `standard` + MissingData
@@ -89,7 +90,10 @@ consensus:
       agreementThreshold: 2
       requiredParticipants:
         - { tag: "type:external", minParticipants: 2, minAgreement: 2 }
-    fallback:                        # internals down; healthy pool is the externals
+    fallback:                        # internals unhealthy (not punished); healthy pool is the externals
+      # Use only when internals are out of sync / down / unreachable.
+      # If internals are absent from the round because they were punished for
+      # consensus misbehaviour, stay on standard — never select fallback.
       maxParticipants: 3
       agreementThreshold: 2
     generous-dev:
@@ -161,7 +165,7 @@ is that policy.
 //              cordonClasses: ("punishment"|"availability"|"operator")[],
 //              cordonReason?: string }   // diagnostic only — never matched
 //   An upstream can hold several cordons at once (§4.5), so the class is a
-//   SET. Empty ⟺ not cordoned. `state == "cordoned"` iff the set is non-empty,
+//   SET. Empty ⟺ not cordoned. `state == "cordoned"` if the set is non-empty,
 //   and takes precedence over "unhealthy".
 //
 // return "name" → run policies[name]
@@ -180,9 +184,9 @@ Grow only when forced by observed configs:
 |---|---|
 | `upstreams.withTag(t)` | Filter by tag |
 | `upstreams.healthy()` | Keep only `state == "healthy"` — cordoned upstreams of any class are excluded (cordon = out of rotation) |
-| `upstreams.anyPunished()` | True iff any upstream that **would otherwise be eligible to participate** holds a `punishment` cordon — not "ever punished" |
-| `upstreams.anyOperatorCordon()` | True iff any eligible upstream holds an `operator` (admin) cordon — deliberate human action, undifferentiated between maintenance and distrust |
-| `upstreams.allUnavailable()` | True iff the set is **non-empty** and every member is either unhealthy-but-uncordoned or holds `availability` cordons and nothing else. **False on an empty set** — a tag matching no upstream is a config error, not an outage. Whitelist of availability only: `punishment`, `operator`, and any future cordon class make it false |
+| `upstreams.anyPunished()` | True if any upstream that **would otherwise be eligible to participate** holds a `punishment` cordon — not "ever punished" |
+| `upstreams.anyOperatorCordon()` | True if any eligible upstream holds an `operator` (admin) cordon — deliberate human action, undifferentiated between maintenance and distrust |
+| `upstreams.allUnavailable()` | True if the set is **non-empty** and every member is either unhealthy-but-uncordoned or holds `availability` cordons and nothing else. **False on an empty set** — a tag matching no upstream is a config error, not an outage. Whitelist of availability only: `punishment`, `operator`, and any future cordon class make it false |
 | `upstreams.canServeBlock(n)` | Uses existing `EvmAssertBlockAvailability` |
 | `user.hasRole(r)` | Role check |
 
@@ -259,7 +263,7 @@ state moves to **`health.Tracker`**:
 - **`cordonClass` is a required parameter on `Cordon` / `Uncordon`, and the
   tracker holds cordon state per class** (§4.5). The selector reads the class
   set — never the reason string.
-- `anyPunished()` is true iff any upstream that would otherwise be eligible
+- `anyPunished()` is true if any upstream that would otherwise be eligible
   holds a `punishment` cordon; `anyOperatorCordon()` is the matching helper
   for the `operator` class. Both are the explicit fail-closed gates in the
   reference eval (§2 / §6).
@@ -366,9 +370,12 @@ benefit. If profiles later show eval cost matters, the design is:
 
 ## 6. Automatic fallback (role-gated)
 
-When internals are unavailable for **availability** reasons, authorized roles
-run a plain consensus over whoever is healthy — no tag quotas needed, because
-the healthy pool *is* the externals:
+When internals are **unhealthy** (out of sync, down, unreachable) or
+availability-cordoned — and **not** punished for consensus misbehaviour —
+authorized roles run a plain consensus over whoever is healthy. No tag quotas
+needed, because the healthy pool *is* the externals. If internals are missing
+from the round only because they were punished, stay on `standard` — never
+select `fallback`.
 
 ```yaml
 fallback:
@@ -431,7 +438,7 @@ Layers that make those grades work:
    instead of calling internals at all.
 2. **MissingData waiver (safety net for unknown-block methods).** New
    `requiredParticipants[].waiveAgreementOnMissingData`: in
-   `enforceWinnerComposition` a failing `minAgreement` quota is waived iff
+   `enforceWinnerComposition` a failing `minAgreement` quota is waived if
    **every** tag-matching participant returned `ErrEndpointMissingData` —
    already the normalized, terminal, non-misbehavior edge classification
    (`consensus/analysis.go`). Covers stale/misconfigured `blockAvailability`
