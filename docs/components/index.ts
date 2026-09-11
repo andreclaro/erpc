@@ -25,3 +25,7 @@ export { requestLifecycleScenario } from "./explainer/scenarios/request-lifecycl
 export { failsafeScenarios } from "./explainer/scenarios/failsafe";
 export { blockAvailabilityScenario } from "./explainer/scenarios/block-availability";
 export { consensusScenarios } from "./explainer/scenarios/consensus";
+export { tracingScenarios } from "./explainer/scenarios/request-tracing";
+export { SvmSlotLanes } from "./explainer/SvmSlotLanes";
+export { ErrorJourney } from "./explainer/ErrorJourney";
+export { MetricAnatomy } from "./explainer/MetricAnatomy";
