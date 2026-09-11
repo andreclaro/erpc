@@ -1,0 +1,251 @@
+---
+title: "EVM translation - Inside eRPC"
+description: "How eRPC rewrites JSON-RPC at the edge — block tags become concrete hex, giant eth_getLogs ranges become parallel cached chunks, and eth_chainId never leaves the proxy."
+---
+
+import { LLMsTxtLink, AISection, SourceLink, PromptExample } from "../../components";
+import { RangeSlicer } from "../../components/explainer/RangeSlicer";
+
+<LLMsTxtLink />
+
+# EVM translation — the translation layer
+
+Clients speak in moving references: `"latest"`, `"finalized"`, ranges spanning
+hundreds of thousands of blocks. A cache needs a key that means the same thing
+twice, and an upstream needs a request it can actually serve. Between the two
+sits the translation layer — a set of per-method hooks that rewrite requests
+*before* any downstream subsystem sees them.
+
+Three rewrites matter most. Resolvable block tags become concrete hex numbers,
+so two clients asking for `"latest"` in the same moment share one cache key.
+Oversized `eth_getLogs` ranges become parallel sub-requests — each one a
+first-class request with its own cache entry. And `eth_chainId` is answered
+from config, without touching an upstream at all.
+
+The animation tells the story in two passes. **Pass 1**: a 175,000-block
+`eth_getLogs` exceeds the effective upstream threshold (5,000 blocks), so eRPC
+slices it into 35 chunks *before any upstream is called* — chunks already in
+cache flip **cache HIT**, the rest fan out in parallel, and one ordered array
+comes back. **Pass 2**: a range under the threshold is sent whole, the upstream
+still refuses it (`-32012`), and eRPC bisects reactively, merging the halves
+through the same writer.
+
+<RangeSlicer caption="upstreams[].evm.getLogsAutoSplittingRangeThreshold: 5000 → 35 chunks · networks[].evm.getLogsSplitOnError: true → reactive bisect on -32012 — config reference: /reference/evm/getlogs-splitting" />
+
+## The workflow
+
+1. **Normalization runs first.** Before cache lookup or upstream selection,
+   `NormalizeHttpJsonRpc` rewrites the tags it can resolve exactly: `"latest"`
+   becomes the highest known latest block, `"finalized"` the highest known
+   finalized block — both as canonical hex. `"safe"`, `"pending"`, `"earliest"`,
+   and block hashes pass through untouched: eRPC only translates what it can
+   represent accurately.
+2. **Hard caps are checked** (pass 1 in the animation). The getLogs pre-forward
+   hook resolves both bounds — failing open to the upstream if a tag can't be
+   resolved — then enforces `getLogsMaxAllowedRange` (default 30,000 blocks).
+   Over-wide requests are rejected with HTTP 413 *before* any splitting.
+3. **The effective split threshold is computed**: the smallest positive
+   `getLogsAutoSplittingRangeThreshold` across the selected upstreams (5,000 in
+   the animation), capped by the max allowed range. 175,000 > 5,000, so the
+   range becomes **35 contiguous sub-requests**, each inheriting the original
+   address/topics filter.
+4. **Every chunk is a first-class request.** Sub-requests re-enter
+   `Network.Forward`: multiplexer, cache read (an independent HIT/MISS per
+   chunk — the chips flipping green and blue), failsafe executor, upstream.
+   In-flight concurrency is bounded by `getLogsSplitConcurrency` (default 10);
+   only the 9 fetch chunks consume upstream quota.
+5. **Ordered merge.** Responses land in an index-preserving slice, and
+   `GetLogsMultiResponseWriter` concatenates the result arrays in chunk order,
+   skipping empty chunks, then restores the parent request's id. The merged
+   response counts as `fromCache` only when all 35 chunks were hits.
+6. **Reactive bisect** (pass 2). A range under the threshold is sent whole —
+   but the upstream still refuses it (`-32012`, or any request-too-large
+   error). The post-forward hook bisects *once*: the block range first; for a
+   single-block request, the address list; for a single address, the
+   `topics[0]` OR-list. Each half runs the full pipeline again (its own cache
+   and failsafe) but carries `ParentRequestId` and is never re-split — a half
+   that still fails everywhere surfaces the original error.
+7. **`eth_chainId` never leaves the proxy.** It is answered from the configured
+   chain id at the project, network, or upstream hook — zero upstream quota,
+   zero latency beyond the edge.
+
+## In the source
+
+### Tag & hex normalization — `architecture/evm/json_rpc.go`
+
+- `NormalizeHttpJsonRpc` (<SourceLink file="architecture/evm/json_rpc.go" lines="92" />)
+  runs inside `Network.Forward` (<SourceLink file="erpc/networks.go" lines="2555" />),
+  before the cache read — so the cache key is always computed on the
+  *normalized* request. Which params to touch comes from the same per-method
+  cache config that caching uses (`getMethodConfig`,
+  <SourceLink file="architecture/evm/block_ref.go" lines="373" />): translation
+  and caching share one definition of where the block parameter lives.
+- `resolveBlockTagToHex` (<SourceLink file="architecture/evm/json_rpc.go" lines="58-83" />)
+  translates only `"latest"` and `"finalized"`, using the highest block numbers
+  eRPC knows for the network (`EvmHighestLatestBlockNumber` /
+  `EvmHighestFinalizedBlockNumber`, <SourceLink file="common/network.go" lines="63-77" />).
+  `"safe"` and `"pending"` are deliberately passed through — a guessed
+  translation would poison cache entries with the wrong data.
+- Lock discipline: a read lock snapshots the params, resolution happens
+  unlocked, and a write lock is taken only when something actually changed
+  (params are deep-copied before mutation). The resolved numbers are also
+  cached as request metadata (`EvmBlockRef` / `EvmBlockNumber`) for cache keys,
+  gRPC routing, and block-availability checks.
+
+### Proactive splitting — `architecture/evm/eth_getLogs.go`
+
+- `networkPreForward_eth_getLogs` (<SourceLink file="architecture/evm/eth_getLogs.go" lines="181-317" />)
+  runs after upstream selection (<SourceLink file="erpc/networks.go" lines="1987" />).
+  EIP-234 `blockHash` filters pass straight through — there is no range to split.
+- Caps first: `getLogsMaxAllowedRange` (default **30,000**,
+  <SourceLink file="common/defaults.go" lines="2585-2594" />),
+  `getLogsMaxAllowedAddresses`, `getLogsMaxAllowedTopics` (both 0 = unlimited).
+  Violations are HTTP 413 and never trigger reactive splitting.
+- Effective threshold: the minimum positive upstream threshold (an upstream
+  with 0 opts out), capped by the max allowed range. The default project
+  template seeds 5,000 (<SourceLink file="common/defaults.go" lines="146" />);
+  an unconfigured upstream splits nothing proactively.
+- Chunks are built contiguous (`from … from+threshold-1`), flagged
+  `logs-split-proactive` — the value you'll see in the `composite` label of
+  upstream metrics (<SourceLink file="common/request.go" lines="17-28" />).
+
+### Parallel fan-out and the merge writer — `architecture/evm/eth_getLogs.go`
+
+- `executeGetLogsSubRequests` (<SourceLink file="architecture/evm/eth_getLogs.go" lines="696-880" />):
+  a semaphore bounds concurrency to `getLogsSplitConcurrency` (default **10**).
+  Each sub-request gets cloned directives plus `ParentRequestId` and goes
+  through `Network.Forward` — inheriting caching, multiplexing, failsafe, and
+  integrity checks for free.
+- `getLogsMaxResponseBytes` (default 0 = unbounded) bounds the *merged* total,
+  not any one chunk; crossing it cancels the remaining fan-out and returns 413.
+  The budget is checked *before* cloning, so an oversized piece is never
+  duplicated on its way to being discarded.
+- `GetLogsMultiResponseWriter` (<SourceLink file="architecture/evm/eth_getLogs.go" lines="460-520" />)
+  streams `[` + each non-empty chunk's inner items + `]` in chunk order without
+  materializing one giant array; all-empty in, empty-ish out. The merged id is
+  reset to the parent's, and `SetFromCache` is true only when *every* chunk hit.
+
+### Reactive bisection — `architecture/evm/eth_getLogs.go`
+
+- `networkPostForward_eth_getLogs` (<SourceLink file="architecture/evm/eth_getLogs.go" lines="411-458" />)
+  runs after the whole forward completes (<SourceLink file="erpc/projects.go" lines="357-371" />)
+  and only when `getLogsSplitOnError` is on (default **true**). It triggers
+  exclusively on upstream-originated too-large signals:
+  `ErrCodeEndpointRequestTooLarge` or JSON-RPC `-32012`
+  (`JsonRpcErrorEvmLargeRange`, <SourceLink file="common/errors.go" lines="2341" />) —
+  eRPC's own caps deliberately do not re-enter the splitting path.
+- `splitEthGetLogsRequest` (<SourceLink file="architecture/evm/eth_getLogs.go" lines="583-672" />)
+  bisects the block range at `mid = from + range/2`; a single-block request
+  splits the address list in half; a single address splits the `topics[0]`
+  OR-list. If nothing can shrink further, the original error stands.
+- Sub-requests call `Network.Forward` directly with `ParentRequestId` set, so
+  the hooks skip them (<SourceLink file="architecture/evm/eth_getLogs.go" lines="187" />,
+  <SourceLink file="architecture/evm/eth_getLogs.go" lines="419" />): the layer
+  splits a request *once*. A half that is still refused everywhere fails the
+  parent with the original error class.
+
+### eth_chainId, and empty-is-data — `architecture/evm/eth_chainId.go`
+
+- Three short-circuit points — project, network, and upstream hooks
+  (<SourceLink file="architecture/evm/eth_chainId.go" lines="25" />) — answer
+  from the configured `evm.chainId` (the upstream hook prefers the upstream's
+  own detected chain id, then falls back to network config). A
+  `skip-cache-read` directive bypasses the short-circuit and goes upstream.
+- `upstreamPostForward_eth_getLogs` (<SourceLink file="architecture/evm/eth_getLogs.go" lines="395-408" />)
+  normalizes empty-ish results to a real `[]` (`normalizeEmptyArrayResponse`,
+  <SourceLink file="architecture/evm/common.go" lines="91" />), so "no logs"
+  caches and merges like any other chunk instead of looking like a failure.
+
+## First principles
+
+> **🔑 Normalize early, key forever.** Tags are clocks; numbers are facts.
+> Translating `"latest"` to a concrete block at the edge means the cache, the
+> multiplexer, and consensus all key on the same identity for one logical read.
+> And because a wrong translation is worse than none, unresolvable tags pass
+> through unchanged — fail-open beats fail-guessed.
+
+> **🧱 Big requests are many small requests.** Splitting is not a special bulk
+> path: every chunk re-enters `Network.Forward` and inherits caching,
+> multiplexing, failsafe, and integrity checks. The only new pieces are the
+> slicer and the merge writer — composition does the rest.
+
+> **✂️ Bound the work, not the answer.** Hard caps reject requests (30,000-block
+> range, merged-bytes budget); thresholds *split* them — and only an upstream's
+> own "too large" triggers bisection, never eRPC's caps. One client's giant
+> query can't become everyone's memory problem, and no log is ever dropped to
+> fit a limit.
+
+## Agent reference
+
+<PromptExample
+  n={1}
+  title="Tune getLogs splitting for my providers"
+  prompt="Using my eRPC config and metrics, tell me: are my eth_getLogs requests being proactively split, and which upstream's threshold wins the minimum? How much of the split traffic is served from cache versus fetched? And are reactive -32012 bisections happening often enough that I should lower a getLogsAutoSplittingRangeThreshold?"
+  defaultOpen={false}
+/>
+
+Reference URL for agents: `https://docs.erpc.cloud/inside-erpc/evm-translation.llms.txt`
+
+<AISection title="EVM translation — full agent reference" hint="Tag normalization, getLogs proactive/reactive splitting, merge semantics, metrics, and source entry points.">
+
+### How it works
+
+`NormalizeHttpJsonRpc` runs at the top of `Network.Forward` and rewrites
+`"latest"`/`"finalized"` block tags to concrete hex using the network's highest
+known block numbers; `"safe"`, `"pending"`, `"earliest"`, and hashes pass
+through. The cache key is computed after normalization, so identical logical
+reads share entries. For `eth_getLogs`: the project pre-forward hook records
+the requested range size; the network pre-forward hook (after upstream
+selection) enforces hard caps (`getLogsMaxAllowedRange` default 30,000 → HTTP
+413; address/topic caps off by default), computes the effective threshold as
+the minimum positive `getLogsAutoSplittingRangeThreshold` across selected
+upstreams capped by the max range, and proactively splits over-threshold ranges
+into contiguous chunks flagged `logs-split-proactive`. `executeGetLogsSubRequests`
+fans chunks out with a semaphore (`getLogsSplitConcurrency` default 10); each
+sub-request carries `ParentRequestId` and cloned directives through
+`Network.Forward`, so chunks are independently cached, multiplexed, and
+retried. `GetLogsMultiResponseWriter` concatenates non-empty chunk results in
+order, restores the parent id, and marks the response `fromCache` only if every
+chunk hit; `getLogsMaxResponseBytes` (default 0 = off) bounds the merged total
+and cancels the fan-out when exceeded. After a completed forward, the network
+post-forward hook bisects *once* on upstream-originated too-large errors
+(`ErrCodeEndpointRequestTooLarge` or `-32012`) when `getLogsSplitOnError`
+(default true): block range, then address list, then `topics[0]` OR-list —
+sub-requests are never re-split, and a half that still fails surfaces the
+original error. `eth_chainId` is answered from config at the project, network,
+or upstream hook unless `skip-cache-read` is set. Empty getLogs results are
+normalized to `[]` so they cache and merge as data.
+
+### Observability
+
+| Metric | Type | Labels | When it fires |
+|---|---|---|---|
+| `erpc_network_evm_get_logs_range_requested` | histogram | `project`, `network`, `category`, `user`, `finality` | Once per parent `eth_getLogs` with a resolvable numeric range; buckets 1, 10, 100, 500, 1000, 5000, 10000, 30000 |
+| `erpc_network_evm_get_logs_forced_splits_total` | counter | `project`, `network`, `dimension`, `user`, `agent_name` | Each reactive bisection, by `dimension` = `block_range` / `addresses` / `topics0` |
+| `erpc_network_evm_get_logs_split_success_total` | counter | `project`, `network`, `user`, `agent_name` | A split sub-request completed successfully |
+| `erpc_network_evm_get_logs_split_failure_total` | counter | `project`, `network`, `user`, `agent_name` | A split sub-request failed (build, forward, or JSON-RPC error) |
+| `erpc_cache_evm_get_logs_range` | histogram | `project`, `network`, `connector`, `policy`, `ttl`, `outcome` | getLogs range sizes seen at the cache layer, by connector and hit/miss outcome |
+| `erpc_upstream_request_total` | counter | `project`, `vendor`, `network`, `upstream`, `category`, `attempt`, `composite`, `finality`, `user`, `agent_name` | Sub-request traffic carries `composite` = `logs-split-proactive` / `logs-split-on-error` (same label on the duration histogram and error counter) |
+
+### Source code entry points
+
+- Tag normalization — [<SourceLink file="architecture/evm/json_rpc.go" lines="55-83" />], [<SourceLink file="architecture/evm/json_rpc.go" lines="92-321" />], call site [<SourceLink file="erpc/networks.go" lines="2555" />]
+- Method cache config driving translation — [<SourceLink file="architecture/evm/block_ref.go" lines="373" />]
+- Hook wiring — [<SourceLink file="architecture/evm/hooks.go" lines="24-129" />], [<SourceLink file="erpc/projects.go" lines="357-371" />], [<SourceLink file="erpc/networks.go" lines="1985-1997" />]
+- Proactive split & hard caps — [<SourceLink file="architecture/evm/eth_getLogs.go" lines="177-317" />]
+- Fan-out, budget, merge writer — [<SourceLink file="architecture/evm/eth_getLogs.go" lines="460-555" />], [<SourceLink file="architecture/evm/eth_getLogs.go" lines="696-887" />]
+- Reactive bisection — [<SourceLink file="architecture/evm/eth_getLogs.go" lines="410-458" />], [<SourceLink file="architecture/evm/eth_getLogs.go" lines="583-672" />]
+- eth_chainId short-circuit — [<SourceLink file="architecture/evm/eth_chainId.go" />]
+- Defaults — [<SourceLink file="common/defaults.go" lines="2585-2594" />], default-project upstream threshold 5,000 [<SourceLink file="common/defaults.go" lines="144-147" />]
+- `-32012` error code — [<SourceLink file="common/errors.go" lines="2341" />]; composite label values [<SourceLink file="common/request.go" lines="17-28" />]
+
+### Related pages
+
+- [getLogs auto-splitting](/reference/evm/getlogs-splitting) — the config reference for every knob cited here
+- [Method Handlers](/reference/evm/method-handlers) — all per-method EVM hooks, including trace_filter splitting
+- [Block tracking](/reference/evm/block-tracking) — where the "highest known" block numbers behind tag resolution come from
+- [Finality & caching](/inside-erpc/finality-and-caching) — what normalized cache keys unlock
+- [Request lifecycle](/inside-erpc/request-lifecycle) — the pipeline every chunk re-enters
+- [Inside eRPC](/inside-erpc) — the animated pipeline overview
+
+</AISection>
