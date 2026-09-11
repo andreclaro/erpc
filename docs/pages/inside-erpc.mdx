@@ -45,12 +45,16 @@ beat-for-beat, the exact functions in the source, and first principles behind th
   columns={3}
   items={[
     { title: "Request lifecycle", href: "/inside-erpc/request-lifecycle", summary: "One JSON-RPC call end to end: parse, auth, project permit, cache, failsafe nesting, upstream sweep, response headers." },
+    { title: "Request tracing", href: "/inside-erpc/request-tracing", summary: "Follow one call through every function: the OTel span map, rate-limit permits, executor branches, and four different request examples." },
     { title: "Finality & caching", href: "/inside-erpc/finality-and-caching", summary: "Cache like a blockchain, not a CDN: finality-aware keys, re-org invalidation, realtime age guard." },
     { title: "Failsafe in depth", href: "/inside-erpc/failsafe-in-depth", summary: "timeout(consensus(retry(hedge(upstream)))) — how the policies nest, trigger, and back off." },
     { title: "Block availability", href: "/inside-erpc/block-availability", summary: "Skipping what upstreams don't have: the block-availability gate, catch-up retries, and empty-result handling." },
     { title: "Consensus", href: "/inside-erpc/consensus", summary: "Agreeing on the truth: unassailable-lead short-circuit, disputes, and misbehavior punishment." },
     { title: "Health & selection", href: "/inside-erpc/health-and-selection", summary: "The scoring engine: rolling quantiles, sticky-primary hysteresis, and probe-based recovery." },
     { title: "EVM translation", href: "/inside-erpc/evm-translation", summary: "The translation layer: tag interpolation, getLogs range splitting, and the -32012 bisect pass." },
+    { title: "Architecture SVM", href: "/inside-erpc/architecture-svm", summary: "Solana through the same pipeline: slot pollers, commitment injection, majority-vs-max tips, case-sensitive cache keys." },
+    { title: "Errors", href: "/inside-erpc/errors", summary: "One taxonomy, every provider: normalization cascade, structural retryability, and how bundles become one verdict." },
+    { title: "Metrics", href: "/inside-erpc/metrics", summary: "Reading erpc_* like a pro: which metric fires at which hop, and the ten ways operators misread them." },
   ]}
 />
 
