@@ -3,7 +3,7 @@ title: "Inside eRPC"
 description: "An animated, interactive walkthrough of the eRPC request pipeline — from HTTP ingress through auth, caching, failsafe policies, and the upstream sweep — plus every feature in motion."
 ---
 
-import { LLMsTxtLink, AISection, PipelineExplorer, FeatureWidgets } from "../components";
+import { LLMsTxtLink, AISection, PipelineExplorer, FeatureWidgets, CapabilityGrid } from "../components";
 
 <LLMsTxtLink />
 
@@ -35,6 +35,24 @@ Each card replays automatically when it scrolls into view — or hit Replay. The
 under each title is the real config key that controls the behavior.
 
 <FeatureWidgets />
+
+## Go deeper
+
+Seven deep-dive pages walk one subsystem each — animated timeline players, the workflow
+beat-for-beat, the exact functions in the source, and first principles behind the design.
+
+<CapabilityGrid
+  columns={3}
+  items={[
+    { title: "Request lifecycle", href: "/inside-erpc/request-lifecycle", summary: "One JSON-RPC call end to end: parse, auth, project permit, cache, failsafe nesting, upstream sweep, response headers." },
+    { title: "Finality & caching", href: "/inside-erpc/finality-and-caching", summary: "Cache like a blockchain, not a CDN: finality-aware keys, re-org invalidation, realtime age guard." },
+    { title: "Failsafe in depth", href: "/inside-erpc/failsafe-in-depth", summary: "timeout(consensus(retry(hedge(upstream)))) — how the policies nest, trigger, and back off." },
+    { title: "Block availability", href: "/inside-erpc/block-availability", summary: "Skipping what upstreams don't have: the block-availability gate, catch-up retries, and empty-result handling." },
+    { title: "Consensus", href: "/inside-erpc/consensus", summary: "Agreeing on the truth: unassailable-lead short-circuit, disputes, and misbehavior punishment." },
+    { title: "Health & selection", href: "/inside-erpc/health-and-selection", summary: "The scoring engine: rolling quantiles, sticky-primary hysteresis, and probe-based recovery." },
+    { title: "EVM translation", href: "/inside-erpc/evm-translation", summary: "The translation layer: tag interpolation, getLogs range splitting, and the -32012 bisect pass." },
+  ]}
+/>
 
 ## Talk to eRPC
 

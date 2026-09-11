@@ -1,0 +1,321 @@
+---
+title: "Health & selection - Inside eRPC"
+description: "How eRPC decides which upstream gets your request — rolling health metrics, a JavaScript policy evaluated every 15 seconds, sticky-primary hysteresis, and probe-driven re-admission."
+---
+
+import { LLMsTxtLink, AISection, SourceLink, PromptExample } from "../../components";
+import { ScoreTicker } from "../../components/explainer/ScoreTicker";
+
+<LLMsTxtLink />
+
+# Health & selection — the scoring engine
+
+You configured three upstreams. Which one gets the next request? A static
+priority list can't answer that — providers degrade, throttle, and fall behind
+the chain tip at 3am, and the config file is asleep when it happens.
+
+eRPC answers it with a background **scoring engine**. Every upstream attempt
+feeds a rolling health tracker; every 15 seconds a small JavaScript policy
+re-ranks the pool from those live metrics and atomically publishes a new
+order. The request path never waits for any of this — it reads the last
+published order with a single atomic load.
+
+The animation below compresses 60 seconds of one network. **ups-a** (the
+incumbent primary) starts degrading; **ups-b** is steady — yet the PRIMARY
+badge refuses to flip until ups-b's advantage is *decisive*. Meanwhile
+**ups-c** spikes errors, gets excluded, and earns its way back through
+shadow-probe samples. No timers, no manual intervention.
+
+<ScoreTicker caption="stickyPrimary({ hysteresis: 0.30, minSwitchInterval: '30s' }) + probeExcluded({ sampleRate: 0.1, minSamples: 10 }) — the two stability steps of the built-in default policy." />
+
+## The workflow
+
+1. **Every attempt leaves a sample.** Successful-ish calls (responses,
+   reverts, even hedge-losers) feed a DDSketch latency quantile; errors and
+   throttles increment rolling counters. Everything lives in a 1-minute
+   window split into 10 rotating sub-buckets, per (upstream, method).
+2. **Every 15s the slot ticks.** A per-(network, method, finality) goroutine
+   snapshots the tracker, runs the JS policy with a 100ms budget, and
+   atomically swaps the cached order. If the eval throws or times out, the
+   previous order stays — a broken policy can never stall routing.
+3. **Tick 0s — baseline.** ups-a (p70 120ms) and ups-b (140ms) are both
+   healthy. `sortByScore(PREFER_FASTEST)` ranks ups-a first;
+   `stickyPrimary` seeds it as primary. The badge reads **PRIMARY ▸ ups-a**.
+4. **Tick 15s — lines cross, badge doesn't.** ups-a degrades to 160ms;
+   ups-b's score now leads by 1.10×. That's *inside* the ±30% hysteresis
+   band, so `stickyPrimary` keeps ups-a. First hold.
+5. **Tick 30s — still inside the band.** ups-a hits 210ms; ups-b leads by
+   1.28× — closer, but still under 1.30×. The 30s minimum-switch cooldown
+   has just elapsed, so hysteresis alone is doing the holding. Second hold.
+6. **Tick 45s — the band breaks.** ups-a at 300ms; ups-b leads by 1.69×,
+   clearing the 1.30× margin. The badge flips to **PRIMARY ▸ ups-b**.
+7. **Meanwhile, ups-c spikes.** Its rolling error rate reaches 0.82 — above
+   the default policy's `errorRateAbove(0.7)` gate, with enough samples
+   (`samplesAbove(10)`) to be believed. The 15s tick excludes it: real
+   traffic stops, position −1.
+8. **Probes keep ups-c measurable.** `probeExcluded` mirrors ~10% of
+   incoming requests to excluded upstreams in the background — with a
+   `minSamples: 10` floor per 60s so even quiet networks keep probing.
+   Probe results feed the *same* tracker counters as real traffic.
+9. **Re-admission is exclusion in reverse.** The rolling window washes the
+   spike out and probe successes accumulate; at the 45s tick
+   `errorRateAbove(0.7)` no longer trips, so ups-c is simply back in the
+   result set. There is no re-admission timer.
+10. **Tick 60s — the new steady state.** ups-b holds the badge; ups-a would
+    now need a 1.30× score advantage of its own to take it back.
+
+## In the source
+
+### The health tracker — `health/tracker.go`
+
+- One `TrackedMetrics` per (upstream × method × finality). Counters and the
+  latency sketch are sliding-window: `rollingBuckets = 10` sub-buckets
+  (`health/rolling.go:18`), rotated every `windowSize / 10`
+  (`health/tracker.go:535`) — every 6s at the default 1m window
+  (`ScoreMetricsWindowSize`, `erpc/projects_registry.go:51`; per-project
+  override `scoreMetricsWindowSize`, `common/config.go:643`). A degradation
+  shows up within one sub-bucket instead of a full window tumble.
+- Latency quantiles are DDSketches at 1% relative accuracy
+  (`ddsketch.NewDefaultDDSketch(0.01)`, `health/quantile.go:37`), read as
+  the fixed set p50/p70/p90/p95/p99 (`internal/policy/eval.go:113`).
+- **Success-only durations** (`RecordUpstreamDuration`,
+  `health/tracker.go:974`): the quantile is fed only when `isSuccess` —
+  responses, EVM reverts (the upstream did real work), and canceled-by-hedge
+  observations (a lower bound on completion time). Hard errors stay out, so
+  an upstream failing *fast* is never crowned "fastest in the pool".
+- `BlockHeadLag` is a state metric, not a counter: each state-poller head
+  update stores `networkHighest − upstreamHighest` (`SetLatestBlockNumber`,
+  `health/tracker.go:1488`). The same update feeds an EMA of the chain's
+  block time built from on-chain `block.timestamp` values
+  (`health/tracker.go:1424`), which the engine uses to express lag in
+  wall-clock seconds (`BlockHeadLagSeconds`, `internal/policy/eval.go:97`) —
+  0 until enough samples exist, so time-based lag gates stay quiet on a
+  fresh boot by design.
+
+### The eval loop — `internal/policy/slot.go` + `internal/policy/engine.go`
+
+- A `Slot` owns one goroutine per (network, method, finality, boundary)
+  (`internal/policy/slot.go:15`). Its ticker fires every
+  **`evalInterval`, default 15s** (`common/defaults.go:3057`); the eval gets
+  **`evalTimeout`, default 100ms** (`common/defaults.go:3060`), and config
+  validation requires timeout < interval (`common/validation.go:1664`).
+- `tickOnce` (`internal/policy/slot.go:172`): snapshot metrics for every
+  upstream (`snapshotMetrics` — the JS sees one consistent view:
+  `u.metrics` slot-local, `u.metricsAcrossMethods` wildcard aggregate,
+  `u.metricsByMethod` per-method), build cross-tick state (previous order,
+  excluded set, last switch time), run the JS on a pooled sobek runtime,
+  then **atomically swap** `cache` and `excludedCache`
+  (`internal/policy/slot.go:318`). On error or timeout the previous cache
+  is retained (`internal/policy/slot.go:256`).
+- Requests never touch this machinery. `Engine.GetOrdered`
+  (`internal/policy/engine.go:354`) is a wait-free `atomic.Pointer` load of
+  the published slice; `Network.Forward` calls it via `GetOrderedInLane`
+  (`erpc/networks.go:1843`) and falls back to registration order only until
+  the first tick lands — which happens synchronously at registration
+  (`internal/policy/engine.go:316`).
+- Failed evals are visible, not silent: `consecutiveFails` plus
+  `erpc_selection_eval_errors_total{kind}` (timeout / throw /
+  invalid_return), and the slot keeps a bounded ring of the last 64
+  decisions (`decisionsRingSize`, `internal/policy/slot.go:169`) for the
+  admin/simulator diagnostic views.
+
+### The default policy walk — `internal/policy/default_policy.js`
+
+When a network has no `selectionPolicy.eval`, this embedded chain applies
+(`common.DefaultSelectionPolicySource` is upgraded at engine-register time,
+`internal/policy/default_policy.go:25`). Step by step:
+
+1. `.removeCordoned()` — operator/automatic cordons out first.
+2. `.excludeIf(all(samplesAbove(10), errorRateAbove(0.7)))` — broken on
+   errors, but only with ≥10 samples so one failed call can't evict a fresh
+   pod.
+3. `.excludeIf(all(samplesAbove(10), throttleRateAbove(0.4)))` — same gate
+   for remote 429s.
+4. `.excludeIf(any(all(samplesAbove(20), latencyAbove(3000), latencyDeviationAbove(3, { mode: 'majority' })), latencyAbove(10_000)))` —
+   slow in absolute terms (p70 > 3s) *and* consistently slower than peers
+   (3× on the majority of methods), or catastrophically slow (>10s p70,
+   unconditional).
+5. `.excludeIf(any(blockNumberLagAbove(16), blockSecondsLagAbove(30)))` —
+   behind the chain tip by ≥16 blocks or ≥30s.
+6. `.whenEmpty(() => upstreams)` — outage safety net: if every upstream
+   failed the health gates, fall back to the raw set rather than fail
+   closed.
+7. `.preferTag('!tier:fallback', { minHealthy: 1, fallback: 'tier:fallback' })` —
+   non-fallback tier first; the fallback tier activates only when no
+   primary survives.
+8. `.sortByScore(PREFER_FASTEST)` — rank survivors. Weights
+   (`internal/policy/stdlib/stdlib.js:641`): `respLatency: 15`,
+   `errorRate: 4`, `throttledRate: 4`, `misbehaviors: 2`,
+   `blockHeadLag: 1`, `finalizationLag: 0`; latency reads the **p70**
+   quantile by default. Score = `overall / (1 + Σ metricᵢ × weightᵢ)`
+   (`stdlib.js:741`), sorted descending with upstream id as tiebreak
+   (`stdlib.js:744`) — **higher score wins**.
+9. `.stickyPrimary({ hysteresis: 0.30, minSwitchInterval: '30s' })` — the
+   badge-flip logic from the animation.
+10. `.probeExcluded({ sampleRate: 0.1, minSamples: 10, minSamplesWindow: '60s', maxConcurrent: 4, timeout: '10s' })` —
+    arms the shadow prober.
+
+### Sticky primary: the two-gate hold — `internal/policy/stdlib/stdlib.js`
+
+`stickyPrimary` (`stdlib.js:812`) holds the previous primary across ticks
+unless **both** gates pass: the challenger's score beats the incumbent's by
+the hysteresis margin (`curScore > prevScore × (1 + hysteresis)`,
+`stdlib.js:921`) **and** at least `minSwitchInterval` has elapsed since the
+last switch (`stdlib.js:907`). Both are needed — during an incident the
+score gap can be enormous, so without the cooldown a degrading primary
+would still flap every tick. The defaults if you omit them: `hysteresis:
+0.10`, `minSwitchInterval: '30s'`, `scope: 'network'` (`stdlib.js:814`);
+with the default `network` scope, scoring uses the wildcard
+`metricsAcrossMethods` aggregate so every slot in the scope converges on
+the same verdict (`stdlib.js:844`). Each active hold sets
+`__policyStickyHeld` (`stdlib.js:901`), which the Go side turns into
+`erpc_selection_sticky_hold_total` for the held upstream
+(`internal/policy/slot.go:578`).
+
+### The prober — `internal/policy/prober.go`
+
+- One lazy `Prober` per network: created when the eval first emits a
+  `__probeConfig`, torn down if it stops (`internal/policy/slot.go:325`,
+  `internal/policy/prober.go:63`). Remove `probeExcluded` from the chain
+  and shadow probing disappears entirely.
+- The request feed is a 256-slot channel; when full, publishes drop with a
+  metric — **the request path never blocks on the probe bus**
+  (`internal/policy/prober.go:101`).
+- Probes replay real requests through the excluded upstream's own
+  `Forward` (`internal/policy/prober.go:407`), so their results land in the
+  same tracker counters real traffic uses. Writes are never mirrored
+  (skip reason `write_method`), per-upstream opt-out is
+  `routing.probe: off`, and overruns count as failures so a hung upstream
+  registers as bad (`internal/policy/stdlib/stdlib.js:1079`).
+- Re-admission needs no code of its own: once fresh shadow samples stop
+  the chain's `excludeIf` predicates from tripping, the upstream is in the
+  next tick's result set (`stdlib.js:1043`). `erpc_selection_readmit_total`
+  and the `erpc_selection_readmit_age_seconds` histogram record the
+  transition; `erpc_selection_excluded_seconds` tracks how long it was out.
+
+## First principles
+
+> **📡 Routing is decided from live measurements, not from config.** The
+> config file lists upstreams; it does not rank them. The ranking is
+> re-derived every 15 seconds from what each upstream actually just did —
+> latency distribution, error mix, throttle rate, distance from the chain
+> tip. A provider that's great in the YAML and broken in production loses
+> traffic automatically, and wins it back the same way.
+
+> **🧊 Hysteresis beats reactivity.** A primary that flaps between two
+> nearly-equal providers costs more (cache locality, connection warmth,
+> tail latency) than a primary that's 10% suboptimal. So the challenger
+> must win *decisively* — 1.30× the score — and not within 30s of the last
+> switch. Stability is a feature the scoring engine buys on purpose.
+
+> **♻️ Excluded ≠ forgotten.** Exclusion with no path back turns a 30-second
+> vendor hiccup into a permanent eviction. Probes keep excluded upstreams
+> measurable, so re-admission is literally the exclusion predicate evaluated
+> in reverse — no separate timer, no operator poke, no special case.
+
+## Agent reference
+
+<PromptExample
+  n={1}
+  title="Explain why an upstream lost traffic"
+  prompt="Using my eRPC metrics, explain why one of my upstreams was excluded from rotation in the last hour: which selection-policy predicate tripped, how long it stayed out, whether probe traffic re-admitted it, and how to make the default policy more tolerant for that vendor without weakening it for everyone else."
+  defaultOpen={false}
+/>
+
+Reference URL for agents: `https://docs.erpc.cloud/inside-erpc/health-and-selection.llms.txt`
+
+<AISection title="Health & selection — full agent reference" hint="Tracker windows, the eval loop, the default policy chain, sticky hysteresis, probing, metrics, and source entry points.">
+
+### How it works
+
+Every upstream attempt reports into `health.Tracker`: latency (success-like
+outcomes only — responses, reverts, hedge-loser lower bounds) goes into a
+per-(upstream, method, finality) DDSketch (1% relative accuracy); errors,
+throttles, and misbehaviors go into rolling counters; block-head lag is
+stored as `networkHighest − upstreamHighest` on every state-poller head
+update. All rolling components share one window (default 1m,
+`scoreMetricsWindowSize`) split into 10 rotating sub-buckets (rotate every
+window/10). Separately, an EMA of the chain's block time (from
+`block.timestamp` samples) converts block-count lag to wall-clock seconds;
+it returns 0 until enough samples exist, so seconds-based lag gates don't
+fire on a fresh boot.
+
+Per (network, method, finality, boundary) a policy `Slot` ticks every
+`evalInterval` (default **15s**): snapshot tracker metrics (`u.metrics`
+slot-local / `u.metricsAcrossMethods` wildcard / `u.metricsByMethod`
+per-method) → build cross-tick state (previous order, excluded set with
+timestamps, last switch time, tick count) → run the JS eval on a pooled
+sobek runtime with `evalTimeout` (default **100ms**; must be < interval) →
+on success atomically swap the included-order cache *and* the excluded-set
+cache, on failure keep the previous order and count
+`erpc_selection_eval_errors_total`. `Network.Forward` reads the cached
+order with a single atomic load (`Engine.GetOrdered` / `GetOrderedInLane`
+for block-availability lanes); until the first tick — which runs
+synchronously at registration — requests fall back to registration order.
+
+The built-in default policy (embedded `internal/policy/default_policy.js`,
+served at `GET /admin/selection/default-policy`): removeCordoned →
+excludeIf errorRate > 0.7 (≥10 samples) → excludeIf throttleRate > 0.4
+(≥10 samples) → excludeIf (p70 > 3s AND 3× slower than peers on the
+majority of methods, ≥20 samples) OR p70 > 10s unconditional → excludeIf
+block lag ≥16 blocks OR ≥30s → whenEmpty fallback to the raw set (never
+fail closed) → preferTag non-fallback tier → sortByScore(PREFER_FASTEST:
+latency×15 on p70, error×4, throttle×4, misbehavior×2, headLag×1;
+score = overall/(1+Σweight·metric), higher wins) → stickyPrimary
+(hysteresis 0.30 + 30s min-switch, network scope scoring off the wildcard
+aggregate) → probeExcluded (10% mirror sample, minSamples 10 per 60s floor,
+4 concurrent max, 10s probe timeout; feeds the same tracker counters, so
+re-admission = the exclusion predicates no longer tripping; writes never
+mirrored; `routing.probe: off` opts an upstream out).
+
+### Observability
+
+| Metric | Type | Labels | When it fires |
+|---|---|---|---|
+| `erpc_selection_position` | gauge | `project`, `network`, `method`, `upstream` | Every tick: 0 = primary, 1+ = runner-up, **−1 = excluded this tick** |
+| `erpc_selection_score` | gauge | `project`, `network`, `method`, `upstream` | Per tick per upstream that survived `sortByScore` (higher = better; absent for probeExcluded/forceInclude additions) |
+| `erpc_selection_eligible_upstreams` | gauge | `project`, `network`, `method` | Count of upstreams in the latest tick's order |
+| `erpc_selection_eval_duration_seconds` | histogram | `project`, `network`, `method` | Per-tick JS eval latency (watch against the 100ms `evalTimeout`) |
+| `erpc_selection_eval_errors_total` | counter | `project`, `network`, `method`, `kind` | Eval failed; `kind` ∈ timeout / throw / invalid_return. Previous order retained |
+| `erpc_selection_rejection_total` | counter | `project`, `network`, `method`, `upstream`, `step` | Per tick an upstream was dropped, attributed to the first stdlib step that dropped it (`removeCordoned`, `excludeIf`, `take`, …) |
+| `erpc_selection_exclusion_total` | counter | `project`, `network`, `method`, `upstream`, `reason` | Per-leaf-predicate attribution (`error_rate_above`, `latency_p70_above`, `block_head_lag_above`, …) — one increment per tripped leaf |
+| `erpc_selection_shadow_exclusion_total` | counter | `project`, `network`, `method`, `upstream`, `reason` | A `shadowExcludeIf` predicate *would have* dropped the upstream (dry-run auditioning of new rules) |
+| `erpc_selection_excluded_seconds` | gauge | `project`, `network`, `method`, `upstream` | Continuous wall-clock seconds excluded; 0 while in rotation. Alert > 600 = stuck excluded |
+| `erpc_selection_readmit_total` | counter | `project`, `network`, `method`, `upstream` | Upstream transitioned excluded → in-rotation |
+| `erpc_selection_readmit_age_seconds` | histogram | `project`, `network`, `method` | How long upstreams were out before readmit (left tail = flapping risk) |
+| `erpc_selection_primary_switch_total` | counter | `project`, `network`, `method`, `from`, `to` | The primary badge actually flipped |
+| `erpc_selection_sticky_hold_total` | counter | `project`, `network`, `method`, `upstream` | `stickyPrimary` actively held a primary that would otherwise have flipped; ratio vs switches shows smoothing |
+| `erpc_selection_probe_requests_total` | counter | `network`, `upstream`, `method` | Shadow-mirror probe sent to an excluded upstream |
+| `erpc_selection_probe_errors_total` | counter | `network`, `upstream`, `method`, `reason` | Probe returned an error; `reason` ∈ timeout / throttled / auth / skipped / error |
+| `erpc_selection_probe_skipped_total` | counter | `network`, `reason` | Probe candidate skipped; `reason` ∈ write_method / opt_out / sampled_out / max_concurrent / no_method |
+| `erpc_selection_probe_dropped_total` | counter | `network`, `reason` | Probe publish dropped because the 256-slot feed was full (request path never blocks) |
+| `erpc_upstream_block_head_lag` | gauge | `project`, `vendor`, `network`, `upstream` | Blocks behind the most up-to-date upstream, refreshed per head poll |
+| `erpc_upstream_cordoned` | gauge | `project`, `vendor`, `network`, `upstream`, `category`, `reason` | Upstream is cordoned (strongest exclusion signal; cleared only by explicit uncordon) |
+| `erpc_upstream_request_duration_seconds` | histogram | `project`, `vendor`, `network`, `upstream`, `category`, `composite`, `finality`, `user` | Every upstream attempt's duration (the Prometheus-side mirror of the tracker quantiles) |
+| `erpc_upstream_selection_total` | counter | `project`, `network`, `upstream`, `category`, `reason`, `finality` | An attempt started on this upstream; `reason` ∈ primary / retry / hedge / consensus_slot / sweep |
+
+### Source code entry points
+
+- Health tracker (rolling windows, success-only quantiles) — [<SourceLink file="health/tracker.go" lines="974-1004" />], [<SourceLink file="health/rolling.go" lines="13-18" />], [<SourceLink file="health/quantile.go" />]
+- Block-head lag + EMA block time — [<SourceLink file="health/tracker.go" lines="1392-1522" />]
+- Slot eval loop (tick, timeout, atomic swap, metrics) — [<SourceLink file="internal/policy/slot.go" lines="172-358" />], [<SourceLink file="internal/policy/slot.go" lines="462-595" />]
+- Engine (wait-free GetOrdered, synchronous first tick) — [<SourceLink file="internal/policy/engine.go" lines="296-391" />]
+- Metrics snapshot → JS context — [<SourceLink file="internal/policy/eval.go" lines="61-113" />]
+- Built-in default policy — [<SourceLink file="internal/policy/default_policy.js" />]
+- stdlib: presets & sortByScore — [<SourceLink file="internal/policy/stdlib/stdlib.js" lines="640-746" />]
+- stdlib: stickyPrimary — [<SourceLink file="internal/policy/stdlib/stdlib.js" lines="787-926" />]
+- stdlib: probeExcluded — [<SourceLink file="internal/policy/stdlib/stdlib.js" lines="1037-1098" />]
+- Prober (shadow-mirror dispatch) — [<SourceLink file="internal/policy/prober.go" lines="57-103" />], [<SourceLink file="internal/policy/prober.go" lines="378-410" />]
+- Request-path read + cold-start fallback — [<SourceLink file="erpc/networks.go" lines="1843-1871" />]
+- Defaults (`evalInterval: 15s`, `evalTimeout: 100ms`) — [<SourceLink file="common/defaults.go" lines="3042-3061" />]
+- Metric definitions — [<SourceLink file="telemetry/metrics.go" lines="206-327" />]
+
+### Related pages
+
+- [Selection & scoring](/config/projects/selection-policies) — the config reference: `evalInterval`, `evalTimeout`, `evalScope`, writing your own `eval` function, `scoreMultipliers`
+- [Inside eRPC](/inside-erpc) — the animated pipeline overview
+- [Failsafe, in depth](/inside-erpc/failsafe-in-depth) — what the executor does with the ordered list (retry/hedge/consensus)
+- [Block availability](/inside-erpc/block-availability) — the per-boundary lanes `GetOrderedInLane` scopes to
+- [Request lifecycle](/inside-erpc/request-lifecycle) — what happens before selection: multiplexing and cache reads
+
+</AISection>

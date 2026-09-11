@@ -1,0 +1,92 @@
+/* ChainReorg widget (page: /inside-erpc/finality-and-caching).
+ * Scoped to .cv-dd-root.dd-chainreorg; palette vars come from deep-dive.css.
+ * Parent agent: import this file from docs/pages/_app.tsx next to deep-dive.css.
+ */
+
+.cv-dd-root.dd-chainreorg .dd-wtitle {
+  color: var(--text);
+  font: 600 13.5px/1.3 Inter, system-ui, sans-serif;
+}
+.cv-dd-root.dd-chainreorg .dd-head .dd-cap { margin-top: 3px; }
+
+.cv-dd-root.dd-chainreorg [data-pop] { transform-box: fill-box; transform-origin: center; }
+
+/* finality zones + horizon */
+.cv-dd-root.dd-chainreorg .cr-zone-g { fill: rgba(52,211,153,0.055); }
+.cv-dd-root.dd-chainreorg .cr-zone-a { fill: rgba(251,191,36,0.055); }
+.cv-dd-root.dd-chainreorg .cr-zone-label-g {
+  fill: rgba(52,211,153,0.85);
+  font: 600 10.5px/1 Inter, system-ui, sans-serif; letter-spacing: 0.06em;
+}
+.cv-dd-root.dd-chainreorg .cr-zone-label-a {
+  fill: rgba(251,191,36,0.85);
+  font: 600 10.5px/1 Inter, system-ui, sans-serif; letter-spacing: 0.06em;
+}
+.cv-dd-root.dd-chainreorg .cr-horizon {
+  stroke: rgba(52,211,153,0.7); stroke-width: 1.5; stroke-dasharray: 5 5;
+}
+.cv-dd-root.dd-chainreorg .cr-horizon-label {
+  fill: rgba(52,211,153,0.8);
+  font: 500 10px/1 "JetBrains Mono", ui-monospace, SF Mono, Menlo, monospace;
+}
+
+/* chain blocks + connectors */
+.cv-dd-root.dd-chainreorg .cr-block { stroke-width: 1.2; }
+.cv-dd-root.dd-chainreorg .cr-block.fin  { fill: rgba(52,211,153,0.14); stroke: rgba(52,211,153,0.55); }
+.cv-dd-root.dd-chainreorg .cr-block.unf  { fill: rgba(251,191,36,0.13); stroke: rgba(251,191,36,0.50); }
+.cv-dd-root.dd-chainreorg .cr-block.repl { fill: rgba(96,165,250,0.16); stroke: rgba(96,165,250,0.65); }
+.cv-dd-root.dd-chainreorg .cr-block-label {
+  fill: rgba(255,255,255,0.85);
+  font: 500 10.5px/1 "JetBrains Mono", ui-monospace, SF Mono, Menlo, monospace;
+}
+.cv-dd-root.dd-chainreorg .cr-conn { stroke: rgba(148,163,184,0.45); stroke-width: 2; }
+.cv-dd-root.dd-chainreorg .cr-conn.repl { stroke: rgba(96,165,250,0.6); }
+
+/* fork marker */
+.cv-dd-root.dd-chainreorg .cr-fork-glyph { fill: var(--crimson); font: 700 16px/1 Inter, system-ui, sans-serif; }
+.cv-dd-root.dd-chainreorg .cr-fork-label {
+  fill: #fca5a5;
+  font: 600 10px/1 Inter, system-ui, sans-serif; letter-spacing: 0.10em;
+}
+
+/* cache-entry chips */
+.cv-dd-root.dd-chainreorg .cr-chip { stroke-width: 1.1; }
+.cv-dd-root.dd-chainreorg .cr-chip.fin { fill: rgba(52,211,153,0.10); stroke: rgba(52,211,153,0.55); }
+.cv-dd-root.dd-chainreorg .cr-chip.unf { fill: rgba(251,191,36,0.09); stroke: rgba(251,191,36,0.50); }
+.cv-dd-root.dd-chainreorg .cr-chip.rt  { fill: rgba(96,165,250,0.10); stroke: rgba(96,165,250,0.55); }
+.cv-dd-root.dd-chainreorg .cr-chip-link { stroke: rgba(148,163,184,0.30); stroke-width: 1; stroke-dasharray: 2 3; }
+.cv-dd-root.dd-chainreorg .cr-chip-l1 {
+  fill: rgba(255,255,255,0.88);
+  font: 500 10px/1 "JetBrains Mono", ui-monospace, SF Mono, Menlo, monospace;
+}
+.cv-dd-root.dd-chainreorg .cr-chip-l2 {
+  fill: var(--text-mono);
+  font: 500 9.5px/1 "JetBrains Mono", ui-monospace, SF Mono, Menlo, monospace;
+}
+.cv-dd-root.dd-chainreorg .cr-chip-l2.ok   { fill: #8fe6c3; }
+.cv-dd-root.dd-chainreorg .cr-chip-l2.warn { fill: #fcd34d; }
+.cv-dd-root.dd-chainreorg .cr-chip-l2.err  { fill: #fca5a5; }
+
+/* cache-key evolution strip */
+.cv-dd-root.dd-chainreorg .cr-strip-title {
+  fill: var(--text-dim);
+  font: 500 11px/1 Inter, system-ui, sans-serif;
+}
+.cv-dd-root.dd-chainreorg .cr-strip-chip { fill: rgba(96,165,250,0.09); stroke: rgba(96,165,250,0.45); stroke-width: 1; }
+.cv-dd-root.dd-chainreorg .cr-strip-step {
+  fill: var(--text-mono);
+  font: 600 9px/1 Inter, system-ui, sans-serif; letter-spacing: 0.05em;
+}
+.cv-dd-root.dd-chainreorg .cr-strip-mono {
+  fill: rgba(255,255,255,0.85);
+  font: 500 9.5px/1 "JetBrains Mono", ui-monospace, SF Mono, Menlo, monospace;
+}
+.cv-dd-root.dd-chainreorg .cr-strip-dim {
+  fill: var(--text-mono);
+  font: 500 9.5px/1 "JetBrains Mono", ui-monospace, SF Mono, Menlo, monospace;
+}
+.cv-dd-root.dd-chainreorg .cr-strip-arrow { fill: var(--text-dim); font: 500 15px/1 Inter, system-ui, sans-serif; }
+.cv-dd-root.dd-chainreorg .cr-strip-sub {
+  fill: var(--text-mono);
+  font: 500 9.5px/1 Inter, system-ui, sans-serif;
+}
