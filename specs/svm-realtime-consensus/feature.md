@@ -56,7 +56,7 @@ slot* — each upstream answers at its current bank and reports that bank as
 `context.slot`. Methods whose result *can* carry that envelope:
 `contextSlotMethods` in
 [`hooks.go`](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672)
-(full list in §5).
+(see also §5).
 
 **Request** — names a pubkey (and optional commitment), **not** a historical
 slot:
@@ -296,48 +296,16 @@ Prefer §3 first (canary binary/network). §4 optional with/after §3.
 
 ## 5. In scope / out of scope
 
-### Envelope inventory
-
-Known Solana `RpcResponse<T>` set in `contextSlotMethods`
-([`hooks.go` L654–L672](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672)):
-
-`getAccountInfo`, `getBalance`, `getBlockProduction`, `getFeeForMessage`,
-`getLargestAccounts`, `getLatestBlockhash`, `getMultipleAccounts`,
-`getProgramAccounts` (envelope only with `withContext:true`),
-`getSignatureStatuses`, `getStakeMinimumDelegation`, `getSupply`,
-`getTokenAccountBalance`, `getTokenAccountsByDelegate`,
-`getTokenAccountsByOwner`, `getTokenLargestAccounts`, `getTokenSupply`,
-`isBlockhashValid`, `simulateTransaction`.
-
-Same methods use enveloped `ignoreFields` defaults; end state in
-[plan.md](./plan.md) Phase 1.
-
-### Enable under slot-grouped consensus (failsafe)
-
-Operators choose `matchMethod` coverage; soak the financial moving-head set
-first.
-
-**Priority soak:** `getAccountInfo`, `getBalance`, `getTokenAccountBalance`,
+**In scope:** enveloped moving-head methods (`contextSlotMethods` in
+[`hooks.go`](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672)).
+Operators choose `matchMethod` coverage. **Priority soak:**
+`getAccountInfo`, `getBalance`, `getTokenAccountBalance`,
 `getMultipleAccounts`.
 
-**Also suitable** (same moving-head class): token/program account reads
-(`getTokenAccountsByOwner` / `ByDelegate`, `getTokenLargestAccounts`,
-`getProgramAccounts` with context), `getSupply` / `getTokenSupply`,
-`getStakeMinimumDelegation`, `isBlockhashValid`, etc. — enable via
-`matchMethod` once soak looks healthy.
-
-**Usually keep off this rule:** `getLatestBlockhash` (fastest-wins),
-`getFeeForMessage`, `getSignatureStatuses`, `getBlockProduction` /
-`getLargestAccounts` (volatile), `simulateTransaction`.
-
-### Out of scope (non-envelope / already special-cased)
-
-- Bare / non-envelope: `getBlocks`, `getSignaturesForAddress`, `getHealth`,
-  bare integers (`getSlot`, `getBlockHeight`, …).
-- Already handled elsewhere: `getSlot` / `getBlockHeight` (freshest-wins),
-  `getLatestBlockhash` (fastest-wins — even though enveloped, tip policy
-  stays), `sendTransaction` (broadcast), slot-pinned strict (`getBlock`,
-  `getTransaction`, `getBlockTime`, …).
+**Out of scope:** bare / non-envelope methods; tip policies already elsewhere
+(`getSlot` / `getBlockHeight` freshest-wins, `getLatestBlockhash`
+fastest-wins, `sendTransaction` broadcast); slot-pinned strict (`getBlock`,
+`getTransaction`, …); items in [svm-consensus-gaps.md](./svm-consensus-gaps.md).
 
 ---
 
