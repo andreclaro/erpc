@@ -375,21 +375,20 @@ Then:
 
 ### Example — `getAccountInfo` cache promotion
 
-`getBalance` is the consensus poster child; use a cacheable envelope for the
-cache story.
+`getAccountInfo` is cacheable under a realtime policy today (unlike
+`getBalance`, which is hard-skipped by `neverCacheMethods`), so it is the
+Phase 2 example.
 
-Caller asks with `commitment: finalized`. Consensus returns value `V` with
-`context.slot: 1000`. Poller’s finalized tip is `1005`.
+Caller asks `getAccountInfo` with `commitment: finalized`. Consensus returns
+account data `V` with `context.slot: 1000`. Poller’s finalized tip is `1005`.
 
 - `1000 ≤ 1005` and commitment is finalized → treat as finalized; cache under
   `(getAccountInfo, params, 1000)`.
-- A later identical request can hit that entry until eviction policy says
-  otherwise.
+- A later identical `getAccountInfo` can hit that entry until eviction policy
+  says otherwise.
 
-`getBalance` is the right **consensus** example (§2–§3) but a poor **cache**
-example: it stays in `neverCacheMethods` today, so Phase 2 does not store it
-unless that hard-skip is revisited. Prefer `getAccountInfo` /
-`getMultipleAccounts` / etc. for Phase 2 soak.
+Same promotion applies to other cacheable envelopes (e.g.
+`getMultipleAccounts`) once soak expands.
 
 ### Must not
 
