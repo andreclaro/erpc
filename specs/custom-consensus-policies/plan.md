@@ -42,15 +42,16 @@ Short index into the feature contract (full text lives there):
 ## Phase 1 — Standalone selector engine
 
 Package: `internal/consensus/policy/` — no imports from `consensus/` executor.
-Implements feature §3–§4.6 (stdlib, sandbox, pool, fail-closed borrow).
+Implements feature §3–§4.6 (stdlib, sandbox, pool with low-water refill).
 
-- Compile-once Sobek pool (8 VMs), `evalTimeout`, non-blocking borrow → bypass
+- Compile-once Sobek pool: pre-warm 8, **low-water** async refill at ≤2 free,
+  sync create if empty — **never** `pool_exhausted` bypass (feature §4.6)
 - `EvalContext` + stdlib helpers from feature §3.1
 - Fallthrough tests first (nil user, timeout, throw, empty set)
 - Micro-benchmark; if p99 ≪ 1ms, leave decision cache unbuilt (feature §5)
 
 **Acceptance**: `go test ./internal/consensus/policy/...` green; zero executor
-imports; benchmark posted.
+imports; benchmark posted; no fail-closed path for empty pool.
 
 ---
 
@@ -100,7 +101,7 @@ Implements feature §4.3–§4.5, §6 gates, R7–R8.
 Implements feature §4.1, §8, §3 `"default"` resolve.
 
 - Pre-round resolve → run existing executor under selected config
-- Fail closed on error / timeout / unknown name / pool exhaust
+- Fail closed on error / timeout / unknown name (not on pool capacity — §4.6)
 - `return "default"` ≡ null (not `unknown_name`)
 - Output-only `X-ERPC-Consensus-Policy` + policy metrics (§8)
 - Load benchmark: selector on vs off; p99 delta ≪ 1ms

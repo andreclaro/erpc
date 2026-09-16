@@ -175,14 +175,15 @@ working. This design **reimplements** the `X-ERPC-Consensus-Policy` header and
 
 **Default policy must be the strictest.** The **inline `consensus:` block itself**
 is the default policy — the round falls back to it whenever the eval returns
-null/unknown, throws, times out, or the VM pool is exhausted. Operators must
-configure it as the most restrictive policy. The reserved label `"default"`
+null/unknown, throws, or times out. Operators must configure it as the most
+restrictive policy. The reserved label `"default"`
 (`common.ConsensusDefaultPolicyName`) is what the metric/header report for that
 fall-closed round, so `policies["default"]` is **rejected at load** (no second
 config entry under that name). Eval may still **`return "default"`** as an
-intentional select of the inline policy (§3 / §12). A named policy may **not**
-itself define `customPolicy` / `policies` (selection is top-level only) — also
-a load-time error.
+intentional select of the inline policy (§3 / §12). Lack of a free Sobek VM is
+**not** a fail-closed trigger — the pool refills / grows so eval still runs
+(§4.6). A named policy may **not** itself define `customPolicy` / `policies`
+(selection is top-level only) — also a load-time error.
 
 **v1 config cost.** Without `extends`, every named policy is a full
 `ConsensusPolicyConfig` filled independently via `SetDefaults()`. Sparse
@@ -388,20 +389,30 @@ else.
 
 The selector runs operator `evalFunction` JS in **Sobek** (Go JS runtime, same
 family as selection policy). To keep per-request cost negligible vs upstream RTT
-and avoid blocking under burst, the engine owns a **bounded pool of pre-warmed
-VMs**: compile once at load, borrow per eval, fail closed if none are free.
+and avoid skipping eval under burst, the engine owns a **pool of pre-warmed
+VMs** that **refills in advance** and **grows on demand** — never fail-closed
+for lack of a free VM (`pool_exhausted` is not a contract outcome).
 
-- Pool size: **8 pre-warmed VMs** (bounded; matches selection-policy order of
-  magnitude).
-- Pool exhaustion under burst: **fail closed to default policy** and count a
-  bypass (`erpc_consensus_policy_eval_bypassed_total{reason="pool_exhausted"}`).
-  Do not block the request path on a VM borrow. (`pool_exhausted` is a
-  **bypassed** reason — separate from `eval_failed_total` — because the
-  operator function never ran.)
-- Memory per VM: small (empty Sobek runtime + stdlib); bounded by pool size.
+- **Pre-warm:** start with **8** VMs at load (same order of magnitude as
+  selection policy). Compile the operator program once; each VM is sandboxed
+  (below).
+- **Low-water refill (in advance):** when idle/free VMs drop to **≤ 2**,
+  asynchronously build more until idle is back near the pre-warm target (8),
+  so the next requests still borrow a warm VM instead of paying cold-start on
+  the hot path. Refill is best-effort background work — not a request blocker.
+- **Grow on demand:** if the pool is nevertheless empty at acquire time
+  (stampede faster than refill), **synchronously create one VM**, run the eval,
+  and release it into the pool. Do **not** return `pool_exhausted`, do **not**
+  bypass to default for capacity, do **not** skip `evalFunction`. Optional hard
+  `maxSize` may cap total VMs for memory; if set and hit, **wait briefly for a
+  free VM** rather than bypassing eval — integrity of the selected named policy
+  beats silent default under load.
+- Memory per VM: small (empty Sobek runtime + stdlib); steady-state bounded by
+  pre-warm + refill target; peak tracks concurrent evals up to any configured
+  max.
 - `evalTimeout` caps wall-clock per eval; a runaway eval poisons only the
-  borrowed VM, which is discarded (rebuilt async). A plain throw leaves the VM
-  clean and it returns to the pool.
+  borrowed VM, which is discarded (rebuilt async, same as selection-policy
+  heal). A plain throw leaves the VM clean and it returns to the pool.
 - **Sandboxed runtime.** Each VM is a bare `sobek.New()` exposing only the
   `EvalContext` + stdlib — **no `env` / `process.env` / `console`**, unlike the
   shared `common.NewRuntime()`. `evalFunction` is operator-writable config, so
@@ -622,9 +633,11 @@ Metric names are `erpc_`-prefixed; all carry `project` + `network` labels.
 | `erpc_consensus_composition_waiver_unproven_total{reason}` | Empty-waiver held for missing proof (`no_winner_block` / `no_avail_bound` / `no_head`); mid-round deferral is **debug-only**, not counted |
 | `erpc_consensus_policy_eval_duration_seconds` | Eval latency histogram |
 | `erpc_consensus_policy_eval_failed_total{reason}` | Eval **ran** and failed (`timeout`, `throw`, `unknown_name`) — not for intentional `"default"` |
-| `erpc_consensus_policy_eval_bypassed_total{reason}` | Eval **never ran** (`pool_exhausted`) — separate from `eval_failed_total` |
 | Warn log on unknown policy name | Config typo signal |
 | Warn log on eval failure/timeout | Fail-closed fallback |
+
+No `pool_exhausted` / eval-bypass metric: the Sobek pool must refill or grow so
+every request with a configured selector still runs `evalFunction` (§4.6).
 
 **Alerting:** page on sustained non-default policy selection (e.g. `fallback`
 > 5 min) or a step change in `consensus_composition_waived_total`. These are
