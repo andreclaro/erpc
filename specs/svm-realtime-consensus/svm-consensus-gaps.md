@@ -15,7 +15,7 @@ Source gaps this feature is meant to close (or explicitly defer to Phase 2).
 
 | Gap | Kind | Notes |
 |---|---|---|
-| Naive hash consensus ignores `context.slot`, collapsing adjacent tips; count-winner prefers stale majorities | **Source** | Fix: `(slot, value)` hash + highest qualifying slot ([feature.md](./feature.md) §3) |
+| Naive hash consensus ignores `context.slot`, collapsing adjacent tips; count-winner prefers stale majorities | **Source** | Fix: end-state `ignoreFields` (slot in digest) + highest qualifying slot ([feature.md](./feature.md) §3) |
 | Default `ignoreFields` still strips `context.slot` for enveloped methods | **Source** | End state: ignore only `context.apiVersion` (`common/defaults.go`; feature.md §3.0) |
 | No finalized cache key by `context.slot` for rooted enveloped reads | **Source** | Phase 2 only ([feature.md](./feature.md) §4) |
 

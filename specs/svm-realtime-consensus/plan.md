@@ -17,8 +17,8 @@ evidence forces a reopen.
 | Decision | Choice |
 |----------|--------|
 | Pin location | Response `context.slot` (not request rewrite) |
-| Agreement identity | `(context.slot, value)` hash — remove `context.slot` from default `ignoreFields`; keep ignoring `context.apiVersion` |
-| Winner among groups | Highest `context.slot` among groups that meet `agreementThreshold` (not largest count) |
+| Agreement / hashing | Full result minus per-method `ignoreFields` (unchanged mechanism). End-state SVM envelope defaults: ignore only `context.apiVersion` (drop `context.slot` from the default list) |
+| Winner among groups | When responses carry `context.slot`, highest slot among groups that meet `agreementThreshold` (not largest count) |
 | Wait default | Wait up to `maxWaitOnResult` for a higher qualifying slot; then best agreed (`0` = no time cap / full collection) |
 | Cross-slot lag | Not misbehavior |
 | Same-slot value split | Real dispute / misbehavior (existing majority rules within cohort) |
@@ -42,19 +42,21 @@ Write and land the behavior contract before code.
 
 ---
 
-## Phase 1 — `(slot, value)` consensus in `consensus/` + defaults
+## Phase 1 — Moving-head consensus defaults + winner policy
 
-Ship `(slot, value)` agreement identity and highest-qualifying-slot winner;
-keep EVM and non-envelope paths untouched.
+Narrow enveloped SVM `ignoreFields` defaults and prefer highest
+`context.slot` among qualifying hash groups; keep EVM and non-envelope paths
+untouched.
 
 1. **Defaults**: in `common/defaults.go`, change enveloped-method
    `ignoreFields` from `["context.slot","context.apiVersion"]` to
    `["context.apiVersion"]` only (see feature.md §3.0). Update
-   `defaults_test.go` and consensus docs.
-2. **Winner selection**: among hash groups with `count ≥ agreementThreshold`,
-   pick the group with the **highest `context.slot`** (not largest count).
-   Implementation may partition-by-slot then hash value — isomorphic when
-   `apiVersion` is ignored.
+   `defaults_test.go` and consensus docs. Hashing stays
+   `CanonicalHashWithIgnoredFields` (full result minus that method’s
+   `ignoreFields`); do not add a parallel hash path.
+2. **Winner selection**: among hash groups with `count ≥ agreementThreshold`
+   that expose `context.slot`, pick the group with the **highest slot**
+   (not largest count).
 3. **Misbehavior**: only compare dissenters inside the winning slot cohort;
    cross-slot participants are not misbehaving.
 4. **Composition**: `minAgreement` counts tags only among agreeing members of
@@ -63,8 +65,9 @@ keep EVM and non-envelope paths untouched.
    bounded waits tune p99. Do not short-circuit a lone tip-slot vote while a
    higher slot can still qualify.
 6. **Tests** (fallthrough first):
-   - No `context.slot` → legacy hash path unchanged.
-   - Same value, different slots → separate buckets; highest agreed wins after wait.
+   - No `context.slot` → legacy hash / count-winner path unchanged.
+   - Same value, different slots → separate buckets under end-state defaults;
+     highest agreed wins after wait.
    - Same slot, different values → dispute under `returnError`.
    - Lone tip + agreed older → wait; second tip vote → freshest agreed.
    - Mix quota: internal+external only count in winning slot cohort.

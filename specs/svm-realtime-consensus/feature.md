@@ -32,9 +32,11 @@ cache):
 
 - Response-side pinning via `context.slot` (Solana has no request-side slot
   rewrite analogous to EVM tag→block-number).
-- Agreement identity is **`(context.slot, value)`**: stop ignoring
-  `context.slot` in consensus `ignoreFields` defaults (keep ignoring only
-  `context.apiVersion`). Hash buckets are then per tip bank + payload.
+- Consensus still hashes the **full response** minus that method’s
+  `ignoreFields` (per-method, operator-overridable). End-state **defaults**
+  for enveloped SVM methods drop `context.slot` from the ignore list (keep
+  only `context.apiVersion`), so adjacent tips no longer collapse into one
+  bucket.
 - Among groups that meet `agreementThreshold`, prefer the **highest
   `context.slot`** (freshest *agreed* tip) — count-largest alone is wrong.
 - Prefer waiting long enough for a second provider to catch a tip slot
@@ -137,11 +139,13 @@ disputes** when tip churn briefly splits values, or a **stale majority** when
 an older slot outvotes a fresher tip, under `returnError` /
 `agreementThreshold ≥ 2`.
 
-**End state:** keep `context.slot` **in** the hash so agreement identity is
-`(slot, value)`. Still ignore only `context.apiVersion`. That alone is not
-enough — winner selection must prefer the **highest slot** among groups that
-meet threshold (not largest count), wait for a tip to gather a second vote,
-and treat cross-slot lag as non-misbehavior.
+**End state:** stop ignoring `context.slot` in the enveloped-method defaults
+(keep ignoring only `context.apiVersion`). Grouping stays the ordinary
+canonical hash of the whole result after that method’s `ignoreFields` — there
+is no separate hasher. For default `getBalance`, slot stays in the digest.
+That alone is not enough — winner selection must prefer the **highest slot**
+among groups that meet threshold (not largest count), wait for a tip to
+gather a second vote, and treat cross-slot lag as non-misbehavior.
 
 Cross-slot lag is expected SVM behavior, not misbehavior. Same-slot
 **`value`** split (two balances at slot 1000) is a real dispute.
@@ -156,22 +160,30 @@ EVM can rewrite a block tag on the request; Solana moving-head reads cannot.
 | `minContextSlot` | N/A | Floor only, **not** a pin |
 | Self-pin | Block number in request | **`result.context.slot` in the response** |
 
-Response-side fix: hash `(context.slot, value)` (drop `context.slot` from
-default `ignoreFields`), then among groups ≥ `agreementThreshold` pick the
-**highest slot**.
+Response-side fix: drop `context.slot` from default `ignoreFields` (hash =
+full result minus per-method ignores), then among groups ≥
+`agreementThreshold` pick the **highest `context.slot`**.
 
 ---
 
-## 3. Solution — `(slot, value)` consensus
+## 3. Solution — moving-head consensus
 
-Agreement buckets are `(context.slot, value)`. Prefer the highest slot that
-meets threshold; do not punish cross-slot lag.
+Consensus grouping is unchanged at the mechanism layer: hash each successful
+response with that method’s `ignoreFields`, then apply threshold / dispute /
+prefer rules. This feature changes the **defaults** for enveloped SVM methods
+and the **winner policy** when those responses carry `context.slot`.
 
 `getBalance` responses already self-pin via `result.context.slot` (see §2).
-`value @ rooted-slot-N` is immutable for that N. Compare answers only when
-they answer the **same** question (same `context.slot` **and** same `value`).
+`value @ rooted-slot-N` is immutable for that N. Under end-state defaults,
+identical lamports at different slots are **different** hashes; agreement
+requires the same tip bank and the same payload (modulo ignored fields).
 
-### 3.0 Defaults change (`ignoreFields`)
+### 3.0 Hashing and `ignoreFields`
+
+Consensus digests the **entire JSON-RPC result** after removing paths listed
+in `ignoreFields[method]` (`CanonicalHashWithIgnoredFields`). That map is
+**per-method** and operator-overridable (set replacement, not merge). Only
+the ignore list changes what enters the digest.
 
 **Today** (`common/defaults.go`): enveloped methods default to
 
@@ -185,26 +197,26 @@ ignoreFields[method] = ["context.slot", "context.apiVersion"]
 ignoreFields[method] = ["context.apiVersion"]
 ```
 
-So the canonical hash for `getBalance` (and peers) includes `context.slot`
-and the balance `value`, but not `apiVersion`. Operators who already set a
-custom `ignoreFields` map replace defaults wholesale — document the new
-default in the consensus failsafe docs when this ships.
+For default `getBalance`, the digest therefore includes `context.slot` and
+`value`, but not `apiVersion`. Other methods keep whatever ignore list they
+are configured with (EVM timestamp ignores, custom operator maps, etc.).
 
-This change alone is insufficient (see §3.1–3.6): count-based winner
+This defaults change alone is insufficient (see §3.1–3.6): count-based winner
 selection would still prefer a large stale slot over a smaller fresher one.
 
 ### 3.1 Algorithm
 
 How one consensus round decides a winner for an enveloped read such as
-`getBalance`:
+`getBalance` under end-state defaults:
 
 1. Fan out to `maxParticipants` upstreams (existing executor).
-2. Hash each successful enveloped response with defaults that **keep**
-   `context.slot` and **ignore** only `context.apiVersion` → buckets are
-   `(slot, value)` (for `getBalance`: lamports @ slot).
+2. Hash each successful response with that method’s `ignoreFields` (end-state
+   default for enveloped SVM: ignore only `context.apiVersion`).
 3. A hash group **qualifies** when `count ≥ agreementThreshold`.
-4. Among qualifying groups, pick the one with the **highest `context.slot`**;
-   that group is the consensus winner (freshest *agreed* tip).
+4. Among qualifying groups that expose a parseable `context.slot`, pick the
+   one with the **highest `context.slot`**; that group is the consensus
+   winner (freshest *agreed* tip). Groups without a slot keep today’s
+   count-based behavior.
 5. Same slot + different values at/above threshold with no unique winner →
    real dispute → `disputeBehavior` (production: `returnError`).
 6. Different slots alone are **not** a dispute; keep collecting until
@@ -212,11 +224,6 @@ How one consensus round decides a winner for an enveloped read such as
 7. If no group qualifies by round end (`maxWaitOnResult` / collection done) →
    `returnError` under production policy (or low-participants if
    `validParticipants < agreementThreshold`).
-
-(Implementation may partition by slot then hash `value` within a partition —
-that is isomorphic to `(slot, value)` hashing when `apiVersion` is ignored.
-Either shape is fine; the **observable** contract is `(slot, value)` identity
-+ highest qualifying slot.)
 
 Example round for one `getBalance` (lamports @ slot):
 
@@ -423,7 +430,8 @@ reads the body; this table documents the known Solana `RpcResponse<T>` set in
 Same methods appear in consensus `ignoreFields` defaults today with
 `context.slot` **and** `context.apiVersion` stripped. **This feature’s end
 state** removes `context.slot` from that default (keep only
-`context.apiVersion`) so the hash is `(slot, value)`. See §3.0.
+`context.apiVersion`). Hashing remains “full result minus per-method
+`ignoreFields`.” See §3.0.
 
 ### Enable under slot-grouped consensus (failsafe)
 
@@ -446,9 +454,8 @@ agreement fit): `getLatestBlockhash` (fastest-wins), `getFeeForMessage`,
 
 ### Out of scope (non-envelope / already special-cased)
 
-Bare results and already-special-cased methods stay on today’s paths (they
-are not the moving-head false-dispute problem, even if some appear elsewhere
-in failsafe config).
+Bare results and already-special-cased methods stay on today’s paths — they
+are not the moving-head false-dispute problem.
 
 - Bare / non-envelope: `getBlocks`, `getSignaturesForAddress`, `getHealth`,
   bare integers (`getSlot`, `getBlockHeight`, …).
