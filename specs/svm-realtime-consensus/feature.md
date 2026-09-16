@@ -321,16 +321,19 @@ qualify within the wait budget.
 
 ---
 
-## 4. Phase 2 — paired finality / cache (separate ship)
+## 4. Phase 2 — paired finality / cache
 
-Optional follow-on after §3: use the winner’s `context.slot` to classify
+Optional cache follow-on that uses the winner’s `context.slot` for
 cacheability, analogous to EVM tag→number rewrite but response-side.
 
-**Not required for consensus.** Slot-grouped voting (§3) is correct without
-any of this. Phase 2 is an optional follow-on: once a winner already carries
-a trusted `context.slot`, use that slot for **cache classification**, the way
-EVM rewrites a block tag to a number — except the pin comes from the
-*response*, not the request.
+**Not required for consensus correctness.** §3 stands alone. Phase 2 can
+ship in a **later** release after soak, **or in the same first release** as
+§3 if capacity allows — it is sequenced for risk isolation, not because the
+protocol forbids combining them.
+
+Once a winner already carries a trusted `context.slot`, use that slot for
+**cache classification**, the way EVM rewrites a block tag to a number —
+except the pin comes from the *response*, not the request.
 
 ### Why bother
 
@@ -399,11 +402,10 @@ is not enough to claim immutability.
 
 ### Ship order
 
-Fix false disputes first; add cache promotion only after soak proves §3.
-
-Land §3, soak false-dispute / misbehavior metrics, **then** Phase 2. Mixing
-cache promotion into the first consensus change hides regressions and is not
-forced by the false-dispute bug.
+Prefer landing §3 first so false-dispute / misbehavior metrics are
+attributable. Phase 2 **may** ride in the same release when the team is
+willing to soak both together; splitting is the lower-risk default, not a
+hard gate.
 
 ---
 

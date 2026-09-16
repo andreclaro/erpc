@@ -81,8 +81,9 @@ non-envelope SVM broadcast paths unchanged.
 
 ## Phase 2 — Paired finality / cache
 
-After §3 soaks clean, optionally promote rooted enveloped winners to
-slot-keyed finalized cache (see feature.md §4).
+Promote rooted enveloped winners to slot-keyed finalized cache (see
+feature.md §4). May ship **after** Phase 1 soak **or in the same first
+release** as Phase 1 if capacity allows.
 
 1. After a slot-grouped winner is chosen, if
    `context.slot ≤` network finalized tip **and**

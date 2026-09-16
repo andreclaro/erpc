@@ -49,32 +49,3 @@ Nearby consensus rough edges that must not block slot-grouped voting.
 | Bare `0` treated as emptyish | `util/bytes.go` | Envelope results are not bare `0`; tip integers are a separate edge |
 
 Track separately if a future ticket needs them; do not block this feature.
-
----
-
-## 4. Already shipped (not gaps)
-
-Capabilities that already exist and this feature must not regress.
-
-| Capability | Location |
-|---|---|
-| Slot-pinned strict consensus + finality | `finality.go` `slotPinnedMethods` |
-| Tx broadcast first-success (`sendTransaction` / `sendRawTransaction`) | `consensus/rules.go` `isTxBroadcastMethod` |
-| `requestAirdrop` single-dispatch (never consensus fan-out) | `erpc/network_executor.go` + `svm.IsSingleDispatchWriteMethod` |
-| Default `ignoreFields` for envelope `context.apiVersion` (and today also `context.slot` — to be narrowed per §3.0) | `common/defaults.go` |
-| Finalized-commitment slot-lag prefilter under consensus | `architecture/svm/slot_lag.go`, `erpc/networks.go` |
-| Commitment injection for cross-upstream lockstep | `architecture/svm/hooks.go` |
-
----
-
-## 5. Review checklist (razor)
-
-Apply the design razor before accepting any extra commitment in the
-implementation.
-
-For each proposed fix ask: *what unseen-but-plausible input does this silently
-mishandle, and what in today's data forces that commitment?*
-
-- Slot-grouped voting is forced by observed false disputes on adjacent roots.
-- A knob to “disable slot grouping but keep returnError on envelopes” is a
-  knob for never-right behavior — reject.
