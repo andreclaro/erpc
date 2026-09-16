@@ -44,9 +44,9 @@ cache):
   short-circuit — not “return on first response”).
 - Misbehavior only for **same-slot value dissent** — cross-slot lag is not
   misbehavior.
-- Optional Phase 2: when `context.slot ≤ poller.finalizedSlot` (and the
-  request’s effective commitment permits), classify the response `finalized`
-  and cache under `(method, params, slot)`.
+- Optional follow-ons (see §4): **paired finality** (classify rooted
+  enveloped answers as `finalized`) and, separately, **slot-aware cache**
+  keys that can use that classification — not one combined feature.
 
 ### Non-goals
 
@@ -321,91 +321,88 @@ qualify within the wait budget.
 
 ---
 
-## 4. Phase 2 — paired finality / cache
+## 4. Follow-ons — paired finality vs cache
 
-Optional cache follow-on that uses the winner’s `context.slot` for
-cacheability, analogous to EVM tag→number rewrite but response-side.
+These are **two separate layers**. §3 consensus is correct without either.
+Either may ship with the first release or later; splitting them is for clear
+ownership, not because the protocol forbids combining them.
 
-**Not required for consensus correctness.** §3 stands alone. Phase 2 can
-ship in a **later** release after soak, **or in the same first release** as
-§3 if capacity allows — it is sequenced for risk isolation, not because the
-protocol forbids combining them.
+| Layer | Decides | Consumers |
+|---|---|---|
+| **§4.1 Paired finality** | Is this response immutable at `context.slot`? → `DataFinalityState` | `matchFinality`, metrics, anything keyed on finality |
+| **§4.2 Slot-aware cache** | Given finality + policies, how to **store/lookup** | `SvmJsonRpcCache` Get/Set only |
 
-Once a winner already carries a trusted `context.slot`, use that slot for
-**cache classification**, the way EVM rewrites a block tag to a number —
-except the pin comes from the *response*, not the request.
+Caching is an *effect* of finality + policy (+ optional key shape). Do not
+define pairing as “make it cacheable.”
 
-### Why bother
+### 4.1 Paired finality
 
-Today moving-head enveloped reads stay `realtime` for cache; after §3 we
-sometimes know an immutable “value at slot N.”
+Response-side analogue of EVM tag→block-number rewrite: once a success
+carries `context.slot`, we may know a stronger fact than “moving tip.”
 
-Today every moving-head enveloped read is `realtime` for cache purposes
-(`GetFinality` fallthrough / never-cache). That is correct for “balance at
-whatever tip is now,” but after §3 we know a stronger fact for a consensus
-winner:
+**Today:** every moving-head enveloped read is `realtime` for
+`GetFinality` (including `commitment: finalized`), because the request names
+no slot.
 
-> “This is the balance (or account) **at slot N**,” and if N is already ≤ the
-> network finalized root under `commitment: finalized`, that answer cannot
-> change for that N.
+**After §4.1:** when **all** of the following hold, classify the response
+**`finalized`** (immutable **at that slot**):
 
-Without Phase 2 we keep short-TTL / never-cache forever. With Phase 2 we can
-store immutable entries keyed by slot — fewer upstream hits for repeated
-reads of the same rooted state.
-
-### Rule
-
-Promotion runs only after a slot-grouped winner exists, and only when slot
-under the root **and** finalized commitment both hold.
-
-Promote to **`finalized`** cacheability **only when all** of:
-
-1. Consensus (or a single success on this path) produced a parseable
+1. A successful response (consensus winner or single success) has parseable
    `result.context.slot` = `N`.
-2. `N ≤` the network’s finalized tip (`SvmStatePoller.FinalizedSlot` — exact
-   network vs upstream view is TBD in [plan.md](./plan.md)).
-3. The request’s **effective commitment** is `finalized` (same predicate as
-   injection / `IsFinalizedCommitment`).
+2. `N ≤` the network’s served finalized tip — prefer
+   `Network.SvmHighestFinalizedSlot` (`PickServedTip` / majority-style over
+   upstream pollers), not a single upstream’s poller alone (exact wiring in
+   [plan.md](./plan.md)).
+3. The request’s **effective commitment** is `finalized`
+   (`IsFinalizedCommitment` / same predicate as injection).
 
-Then:
+**Must not:** promote `commitment: confirmed` / `processed` solely because
+`context.slot ≤` tip. Weaker commitment is not rooted-bank evaluation.
 
-- Classify the response finality as **`finalized`** (immutable at slot `N`).
-- Cache key includes the slot: `(method, params, N)` — not a blanket realtime
-  TTL.
+**Example (`getAccountInfo` or `getBalance` — finality only):**
 
-### Example — `getAccountInfo` cache promotion
+Caller asks with `commitment: finalized`. Answer has `context.slot: 1000`.
+Network served finalized tip is `1005`.
 
-`getAccountInfo` is cacheable under a realtime policy today (unlike
-`getBalance`, which is hard-skipped by `neverCacheMethods`), so it is the
-Phase 2 example.
+- → response finality = **`finalized`** (at slot 1000).
+- Failsafe / metrics see `finality=finalized`.
+- This does **not** by itself write the cache (see §4.2 and `neverCacheMethods`).
 
-Caller asks `getAccountInfo` with `commitment: finalized`. Consensus returns
-account data `V` with `context.slot: 1000`. Poller’s finalized tip is `1005`.
+### 4.2 Slot-aware cache (separate)
 
-- `1000 ≤ 1005` and commitment is finalized → treat as finalized; cache under
-  `(getAccountInfo, params, 1000)`.
-- A later identical `getAccountInfo` can hit that entry until eviction policy
-  says otherwise.
+**Today** (`getAccountInfo`, not `getBalance`):
 
-Same promotion applies to other cacheable envelopes (e.g.
-`getMultipleAccounts`) once soak expands. Whether this asymmetry with
-`getBalance` should stand is an [open topic](#8-open-topics).
+- Finality `realtime` → matches `finality: realtime` policies.
+- Partition key `networkId:*` (or `minContextSlot` if present) — **no**
+  poller tip, **no** `PickServedTip`, **no** response `context.slot`.
+- Staleness = policy **TTL** only (no block-timestamp age guard).
+- `getBalance` / `getTokenAccountBalance` are hard-skipped by
+  `neverCacheMethods` even under a realtime policy.
 
-### Must not
+**§4.2 (optional):** once §4.1 can mark an answer `finalized`, cache
+policies with `finality: finalized` can match. To avoid serving “account at
+old tip” under `"*"`, Get/Set should key the slot dimension from the
+**network served finalized tip** (same tip §4.1 compared against) and/or the
+response `context.slot` on Set — **not** from client params (clients usually
+send none). Example flow:
 
-Weaker commitment must not inherit permanent cache from a lucky slot number.
+```text
+Request 1 (tip still 1000): Get(…, slot=1000) MISS → upstream → §4.1
+  finalized → Set(…, slot=1000)
+Request 2 (identical curl, tip still 1000): Get(…, slot=1000) HIT
+Request 3 (tip now 1001): Get(…, slot=1001) MISS → refetch → Set(…, 1001)
+```
 
-Do **not** promote solely because `context.slot ≤ finalized root` when the
-caller used `commitment: confirmed` or `processed`. Weaker commitment means
-the node may have evaluated a non-rooted bank; a numeric slot under the root
-is not enough to claim immutability.
+Entry at 1000 must not answer tip 1001.
+
+`neverCacheMethods` still wins on Get/Set unless that list is revisited
+([open topic](#8-open-topics)). §4.1 can still classify `getBalance` as
+finalized for non-cache consumers.
 
 ### Ship order
 
-Prefer landing §3 first so false-dispute / misbehavior metrics are
-attributable. Phase 2 **may** ride in the same release when the team is
-willing to soak both together; splitting is the lower-risk default, not a
-hard gate.
+Prefer §3 first. §4.1 before or with §4.2 (cache without paired finality
+cannot safely treat moving-head as immutable). §4.2 may lag §4.1.
 
 ---
 
@@ -498,30 +495,30 @@ moving-head methods):
 4. Mix `minAgreement` enforced on winning **slot** cohort.
 5. Slot-pinned strict path for `getBlock` / `getTransaction` unchanged
    (request-pinned; not slot-grouped moving-head).
-6. Phase 2 (if shipped): a `getAccountInfo` with `commitment: confirmed` is
-   not cached as finalized solely because `context.slot ≤` finalized root;
-   a finalized-commitment winner with `context.slot ≤` root may be.
+6. §4.1 (if shipped): `commitment: confirmed` enveloped success is **not**
+   classified `finalized` solely because `context.slot ≤` tip; finalized
+   commitment + slot ≤ tip may be.
+7. §4.2 (if shipped): cache Get for unpinned `getAccountInfo` uses served
+   finalized tip as slot key (not `"*"` alone); tip advance → miss; confirmed
+   path does not gain permanent finalized cache via §4.1.
 
 ---
 
 ## 8. Open topics
 
 Decisions not forced by the false-dispute bug; settle before or during
-implementation / Phase 2.
+§4.1 / §4.2.
 
-1. **`getBalance` vs `getAccountInfo` cacheability.** Today both are
-   moving-head / `realtime` for finality, but `getBalance` (and
-   `getTokenAccountBalance`) are in `neverCacheMethods` (hard Get/Set skip
-   for financial callers), while `getAccountInfo` is not and can match a
-   realtime TTL — so Phase 2 examples use `getAccountInfo`. Open:
-   - Should `getAccountInfo` stay cacheable (status quo)?
-   - Or should direct account reads join the never-cache list for the same
-     “must not serve stale state” reason as balances?
-   - Or, under Phase 2 slot-keyed finalized cache, should `getBalance` be
-     allowed to leave `neverCacheMethods` when `commitment: finalized` and
-     `context.slot ≤` root?
-   Not blocking §3 consensus; blocks a coherent Phase 2 story if left
-   implicit.
+1. **`getBalance` vs `getAccountInfo` cacheability (§4.2 only).** Today both
+   are moving-head / `realtime` for finality, but `getBalance` (and
+   `getTokenAccountBalance`) are in `neverCacheMethods` (hard Get/Set skip),
+   while `getAccountInfo` is not. §4.1 can still mark either `finalized`.
+   Open for **cache**:
+   - Keep status quo (`getAccountInfo` TTL-/finalized-cacheable; balances
+     never stored)?
+   - Put account reads on never-cache too?
+   - Allow balances out of never-cache under slot-keyed finalized Get/Set?
+   Not blocking §3 or §4.1; blocks a coherent §4.2 story if left implicit.
 
 ---
 

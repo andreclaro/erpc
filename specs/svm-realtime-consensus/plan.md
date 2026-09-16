@@ -23,7 +23,8 @@ evidence forces a reopen.
 | Cross-slot lag | Not misbehavior |
 | Same-slot value split | Real dispute / misbehavior (existing majority rules within cohort) |
 | Activation | Auto when ≥1 success has parseable `context.slot` under active consensus |
-| Finality/cache promotion | Phase 2 only; require effective commitment `finalized` |
+| Paired finality (§4.1) | Optional; `context.slot ≤` served finalized tip + effective commitment `finalized` → `DataFinalityStateFinalized` |
+| Slot-aware cache (§4.2) | Optional, separate; key slot from served tip / response slot; respects `neverCacheMethods` |
 | Nested preferHighestValueFor / SVM leader / bare-0 emptyish | Out of scope (gaps doc) |
 | Operator failsafe / helm wiring | Out of scope — this plan is source behavior once consensus already matches |
 
@@ -79,33 +80,51 @@ non-envelope SVM broadcast paths unchanged.
 
 ---
 
-## Phase 2 — Paired finality / cache
+## Phase 2 — Paired finality (§4.1)
 
-Promote rooted enveloped winners to slot-keyed finalized cache (see
-feature.md §4). May ship **after** Phase 1 soak **or in the same first
-release** as Phase 1 if capacity allows.
+Classify rooted enveloped successes as `finalized` (see feature.md §4.1).
+May ship after Phase 1 soak **or in the same first release**.
 
-1. After a slot-grouped winner is chosen, if
-   `context.slot ≤` network finalized tip **and**
+1. After a successful enveloped response, if
+   `context.slot ≤` `SvmHighestFinalizedSlot` (PickServedTip) **and**
    `effectiveCommitment == finalized`, set response finality to `finalized`.
-2. SVM JSON-RPC cache: key includes slot for those responses; do not permanently
-   cache confirmed/processed answers via this path.
-3. Tests: finalized commitment + slot ≤ root → cache hit by slot; confirmed
-   commitment → remains realtime / short TTL.
+2. Do not promote confirmed/processed via this path.
+3. Tests: finalized commitment + slot ≤ tip → `GetFinality` finalized;
+   confirmed → remains realtime.
 
-**Acceptance**: No permanent-cache bug for moving-head at confirmed; soak
-metrics show finalized cache hits for rooted enveloped reads.
+**Acceptance**: Finality/metrics correct; no implication that never-cache
+methods are stored.
 
 ---
 
-## Phase 3 — Docs (ride along with Phase 1 or 2)
+## Phase 3 — Slot-aware cache (§4.2)
 
-Document shipped behavior in the public consensus failsafe page.
+Separate from Phase 2. Wire cache keys to served finalized tip / response
+slot so finalized policies can hit without `"*"` tip-agnostic entries (see
+feature.md §4.2).
 
-1. Update `docs/pages/config/failsafe/consensus.mdx` — SVM slot-grouped
-   behavior, wait-cap note, misbehavior caveat.
+1. Get: for finalized-commitment moving-head reads, partition `slotRef` from
+   network served finalized tip (not only `minContextSlot` / `*`).
+2. Set: store under response `context.slot` when §4.1 classified finalized.
+3. Tip advance → miss; never serve slot N for tip N+1.
+4. `neverCacheMethods` unchanged unless open topic settles otherwise.
+5. Tests: hit while tip stable; miss after tip advance; confirmed not
+   permanently cached via this path.
 
-**Acceptance**: Agent/docs panel matches shipped behavior.
+**Acceptance**: Soak shows tip-keyed hits; no cross-tip stale serves.
+
+---
+
+## Phase 4 — Docs (ride along with Phase 1–3)
+
+Document shipped behavior in the public consensus failsafe / SVM cache pages.
+
+1. Update `docs/pages/config/failsafe/consensus.mdx` — moving-head consensus,
+   wait-cap note, misbehavior caveat.
+2. Update `docs/pages/config/database/svm-json-rpc-cache.mdx` when §4.1/§4.2
+   land — paired finality vs cache keying.
+
+**Acceptance**: Agent/docs panels match shipped behavior.
 
 ---
 
