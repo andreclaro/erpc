@@ -2,7 +2,7 @@
 
 **Last revised**: 2026-09-16
 
-Companions: [plan.md](./plan.md) · [svm-consensus-gaps.md](./svm-consensus-gaps.md)
+Companions: [plan.md](./plan.md) · [svm-consensus-gaps.md](./svm-consensus-gaps.md) · [svm-cache-gaps.md](./svm-cache-gaps.md)
 
 ---
 
@@ -26,8 +26,8 @@ After this feature:
 
 - Response-side pinning via `context.slot` (no request-side slot rewrite).
 - End-state enveloped defaults + count-first / wait / misbehavior rules (§3).
-- Optional **§4.1 paired finality** with/after §3; **§4.2 slot-aware cache**
-  deferred until soak + neverCache open topic (§8) settled.
+- Optional **§4 paired finality** with/after §3. Slot-aware cache is tracked
+  separately in [svm-cache-gaps.md](./svm-cache-gaps.md).
 - Docs recommend raising `agreementThreshold` above 2 for financial methods
   when the upstream set is large enough (§3.3) — no product-default change.
 
@@ -131,33 +131,14 @@ winner (§3) — dropping `context.slot` from ignores alone is not enough.
 
 Consensus grouping is unchanged at the mechanism layer: hash each successful
 response with that method’s `ignoreFields`, then apply threshold / dispute /
-prefer rules. This feature changes the **defaults** for enveloped SVM methods
-and the **winner policy** when those responses carry `context.slot`.
+prefer rules. This feature changes the **winner policy** when responses carry
+`context.slot`. End-state enveloped `ignoreFields` defaults (drop
+`context.slot`; keep only `context.apiVersion`) are in
+[plan.md](./plan.md) Phase 1.
 
 `getBalance` responses already self-pin via `result.context.slot`.
 `value @ rooted-slot-N` is immutable for that N. Under end-state defaults,
 identical lamports at different slots are **different** hashes.
-
-### 3.0 Hashing and `ignoreFields`
-
-Consensus digests the **entire JSON-RPC result** after removing paths listed
-in `ignoreFields[method]` (`CanonicalHashWithIgnoredFields`). That map is
-**per-method** and operator-overridable (set replacement, not merge).
-
-**Today** (`common/defaults.go`):
-
-```text
-ignoreFields[method] = ["context.slot", "context.apiVersion"]
-```
-
-**End state:** remove `context.slot` from that default list:
-
-```text
-ignoreFields[method] = ["context.apiVersion"]
-```
-
-For default `getBalance`, the digest therefore includes `context.slot` and
-`value`, but not `apiVersion`. This alone is insufficient without §3.1–3.6.
 
 ### 3.1 Algorithm
 
@@ -166,7 +147,7 @@ How one consensus round decides a winner for an enveloped read such as
 
 1. Fan out to `maxParticipants` upstreams (existing executor).
 2. Hash each successful response with that method’s `ignoreFields` (end-state
-   default for enveloped SVM: ignore only `context.apiVersion`).
+   default for enveloped SVM: ignore only `context.apiVersion` — see plan).
 3. A hash group **qualifies** when `count ≥ agreementThreshold`.
 4. **Winner (count-first, slot-tiebreak):**
    - Let `C` = maximum `count` among qualifying groups.
@@ -284,27 +265,16 @@ inter-provider lag.
 
 ---
 
-## 4. Follow-ons — paired finality vs cache
+## 4. Paired finality (optional follow-on)
 
-These are **two separate layers**. §3 consensus is correct without either.
-
-| Layer | Decides | Consumers |
-|---|---|---|
-| **§4.1 Paired finality** | Is this response immutable at `context.slot`? → `DataFinalityState` | `matchFinality`, metrics, anything keyed on finality |
-| **§4.2 Slot-aware cache** | Given finality + policies, how to **store/lookup** | `SvmJsonRpcCache` Get/Set only |
-
-Caching is an *effect* of finality + policy (+ optional key shape). Do not
-define pairing as “make it cacheable.”
-
-**Gating:** §4.1 may ship with or after §3. **§4.2 is deferred** until §3
-soak looks healthy and the neverCache open topic (§8) is settled.
-
-### 4.1 Paired finality
+§3 consensus is correct without this. Slot-aware cache and neverCache open
+topics live in [svm-cache-gaps.md](./svm-cache-gaps.md) — do not define
+pairing as “make it cacheable.”
 
 **Today:** every moving-head enveloped read is `realtime` for `GetFinality`
 (including `commitment: finalized`), because the request names no slot.
 
-**After §4.1:** classify the response **`finalized`** (immutable **at that
+**After §4:** classify the response **`finalized`** (immutable **at that
 slot**) when **all** hold:
 
 1. A successful response (consensus winner or single success) has parseable
@@ -322,39 +292,9 @@ slot**) when **all** hold:
 **Example:** caller asks with `commitment: finalized`; answer has
 `context.slot: 1000`; network served finalized tip is `1005` → response
 finality = **`finalized`** (at slot 1000). This does **not** by itself write
-the cache (see §4.2 and `neverCacheMethods`).
+the cache ([svm-cache-gaps.md](./svm-cache-gaps.md) / `neverCacheMethods`).
 
-### 4.2 Slot-aware cache (separate)
-
-**Today** (`getAccountInfo`, not `getBalance`):
-
-- Finality `realtime` → matches `finality: realtime` policies.
-- Partition key `networkId:*` (or `minContextSlot` if present) — **no**
-  poller tip, **no** `PickServedTip`, **no** response `context.slot`.
-- Staleness = policy **TTL** only.
-- `getBalance` / `getTokenAccountBalance` are hard-skipped by
-  `neverCacheMethods` even under a realtime policy.
-
-**§4.2 (optional):** once §4.1 can mark an answer `finalized`, cache
-policies with `finality: finalized` can match. Get/Set should key the slot
-dimension from the **network served finalized tip** and/or the response
-`context.slot` on Set — **not** from client params. Example:
-
-```text
-Request 1 (tip still 1000): Get(…, slot=1000) MISS → upstream → §4.1
-  finalized → Set(…, slot=1000)
-Request 2 (identical curl, tip still 1000): Get(…, slot=1000) HIT
-Request 3 (tip now 1001): Get(…, slot=1001) MISS → refetch → Set(…, 1001)
-```
-
-Entry at 1000 must not answer tip 1001. `neverCacheMethods` still wins unless
-revisited ([§8](#8-open-topics)). §4.1 can still classify `getBalance` as
-finalized for non-cache consumers.
-
-### Ship order
-
-Prefer §3 first (canary binary/network). §4.1 optional with/after §3. §4.2
-only after soak + §8 neverCache decision. Prefer §4.1 before §4.2.
+Prefer §3 first (canary binary/network). §4 optional with/after §3.
 
 ---
 
@@ -373,7 +313,8 @@ Known Solana `RpcResponse<T>` set in `contextSlotMethods`
 `getTokenAccountsByOwner`, `getTokenLargestAccounts`, `getTokenSupply`,
 `isBlockhashValid`, `simulateTransaction`.
 
-Same methods use enveloped `ignoreFields` defaults; end state is §3.0.
+Same methods use enveloped `ignoreFields` defaults; end state in
+[plan.md](./plan.md) Phase 1.
 
 ### Enable under slot-grouped consensus (failsafe)
 
@@ -432,34 +373,18 @@ Framed on `getBalance` (same rules for other enveloped moving-head methods):
    slotted only if no slotted group qualifies.
 6. Mix `minAgreement` enforced on winning **slot** cohort.
 7. Slot-pinned strict path for `getBlock` / `getTransaction` unchanged.
-8. §4.1 (if shipped): `commitment: confirmed` is **not** classified
+8. §4 (if shipped): `commitment: confirmed` is **not** classified
    `finalized` solely because `context.slot ≤` tip; finalized commitment +
    slot ≤ `SvmHighestFinalizedSlot` may be.
-9. §4.2 (when un-deferred): unpinned `getAccountInfo` Get uses served
-   finalized tip as slot key; tip advance → miss.
 
 ---
 
-## 8. Open topics
+## 8. Related
 
-1. **`getBalance` vs `getAccountInfo` cacheability (§4.2 only).** Today both
-   are moving-head / `realtime` for finality, but `getBalance` (and
-   `getTokenAccountBalance`) are in `neverCacheMethods` (hard Get/Set skip),
-   while `getAccountInfo` is not. §4.1 can still mark either `finalized`.
-   Open for **cache**:
-   - Keep status quo (`getAccountInfo` TTL-/finalized-cacheable; balances
-     never stored)?
-   - Put account reads on never-cache too?
-   - Allow balances out of never-cache under slot-keyed finalized Get/Set?
-   Not blocking §3 or §4.1; **blocks un-deferring §4.2**.
-
----
-
-## 9. Related
-
-- Gaps inventory: [svm-consensus-gaps.md](./svm-consensus-gaps.md)
+- Consensus gaps: [svm-consensus-gaps.md](./svm-consensus-gaps.md)
+- Cache gaps: [svm-cache-gaps.md](./svm-cache-gaps.md)
 - Implementation plan: [plan.md](./plan.md)
 - Envelope inventory: [`architecture/svm/hooks.go#L654-L672`](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672)
 - SVM finality: `architecture/svm/finality.go`
 - Consensus executor: `consensus/executor.go`, `consensus/analysis.go`
-- Envelope ignore defaults: `common/defaults.go` (§3.0)
+- Envelope ignore defaults: `common/defaults.go` ([plan.md](./plan.md) Phase 1)

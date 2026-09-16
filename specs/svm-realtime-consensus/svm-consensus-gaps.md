@@ -15,9 +15,9 @@ Operator / helm failsafe wiring is out of scope. Behavior contract:
 | Gap | Kind | Notes |
 |---|---|---|
 | Naive hash consensus ignores `context.slot` | **Source** | End-state `ignoreFields` + count-first ([feature.md](./feature.md) §3) |
-| Default `ignoreFields` still strips `context.slot` | **Source** | End state: ignore only `context.apiVersion` (§3.0) |
-| Moving-head reads always `realtime` even when slot ≤ tip under finalized commitment | **Source** | §4.1 paired finality |
-| Cache keys use `minContextSlot` or `*` — no served-tip slot dimension | **Source** | §4.2 **deferred** |
+| Default `ignoreFields` still strips `context.slot` | **Source** | End state: ignore only `context.apiVersion` ([plan.md](./plan.md) Phase 1) |
+| Moving-head reads always `realtime` even when slot ≤ tip under finalized commitment | **Source** | §4 paired finality |
+| Cache keys / neverCache policy | **Source** | Tracked in [svm-cache-gaps.md](./svm-cache-gaps.md) — out of consensus feature |
 
 ---
 
