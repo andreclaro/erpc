@@ -186,24 +186,11 @@ t=+Δ: Helius → 12350@1002
 
 ### 3.2 Wait semantics
 
-When a top-count group already qualifies, a higher slot may still reach the
-**same** count with remaining participants — wait (within the cap) before
-locking the lower slot among equal counts.
-
-Default: **wait** up to `maxWaitOnResult` while remaining participants could
-still form another qualifying group with `count == C` (current max qualifying
-count) at a **higher** `context.slot`. When the wait cap fires (or all
-participants have answered), apply §3.1 on what is collected.
-
-Rationale: among equal counts, prefer the fresher tip when the wait budget
-allows; waiting bounds p99 (~inter-provider root lag; often ~1–2 slots ≈
-0.3–0.6s at today’s ~300ms slot time — tune from soak). Do **not** wait to
-let a *smaller* group at a higher slot overturn a larger older majority.
-
-`maxWaitOnResult: 0` / `maxWaitOnEmpty: 0` means **no time cap** (collect
-until all participants answer or short-circuit). That is valid — often more
-patient than a short cap. It is **not** “return on first response.” Prefer a
-bounded non-zero wait when p99 must be capped.
+While a qualifying group at count `C` exists, **wait** (subject to existing
+`maxWaitOnResult` / collection rules) only while remaining participants could
+still form another group with `count == C` at a **higher** `context.slot`.
+Do **not** wait for a *smaller* higher-slot group to overturn a larger
+majority. When the wait ends, apply §3.1.
 
 ### 3.3 Activation
 
