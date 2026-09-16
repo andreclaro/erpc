@@ -19,9 +19,9 @@ independently; slot-grouped voting is the headline correctness piece.
 | Cross-slot lag | Not misbehavior |
 | Same-slot value split | Real dispute / misbehavior (existing majority rules within cohort) |
 | Activation | Auto when ≥1 success has parseable `context.slot` under active consensus |
-| Deployment | New `matchFinality: [realtime]` rule — never widen the strict slot-pinned rule |
 | Finality/cache promotion | Phase 2 only; require effective commitment `finalized` |
 | Nested preferHighestValueFor / SVM leader / bare-0 emptyish | Out of scope (gaps doc) |
+| Operator failsafe / helm wiring | Out of scope — this plan is source behavior once consensus already matches |
 
 ---
 
@@ -84,22 +84,7 @@ metrics show finalized cache hits for rooted enveloped reads.
 
 ---
 
-## Phase 3 — Deployment failsafe enablement
-
-1. Remove moving-head method names from the strict slot-pinned rule's
-   `matchMethod`.
-2. Add a dedicated realtime rule per feature.md §5 (non-zero wait; mix quotas
-   when internal+external tags are in use).
-3. Set `maxParticipants` ≥4 (ideally 6) before mix quotas; prefer 3+ upstreams.
-4. Soak on `getAccountInfo` / `getBalance` / `getTokenAccountBalance` first;
-   expand method list after dispute/p99 look healthy.
-
-**Acceptance**: soak dispute rate on priority methods ≪ naive-hash baseline;
-composition disputes explained by real quorum gaps, not slot skew.
-
----
-
-## Phase 4 — Docs (ride along with Phase 1 or 3)
+## Phase 3 — Docs (ride along with Phase 1 or 2)
 
 1. Update `docs/pages/config/failsafe/consensus.mdx` — SVM slot-grouped
    behavior, wait-cap note, misbehavior caveat.
@@ -110,6 +95,7 @@ composition disputes explained by real quorum gaps, not slot skew.
 
 ## Non-goals in this plan
 
+- Operator / helm failsafe enablement (separate from this source change)
 - SVM `*BlockHeadLeader` leader selection
 - Nested field paths for `preferHighestValueFor`
 - Architecture-aware emptyish for bare `0`
