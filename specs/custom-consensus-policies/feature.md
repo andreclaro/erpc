@@ -386,6 +386,11 @@ else.
 
 ### 4.6 Sobek pool
 
+The selector runs operator `evalFunction` JS in **Sobek** (Go JS runtime, same
+family as selection policy). To keep per-request cost negligible vs upstream RTT
+and avoid blocking under burst, the engine owns a **bounded pool of pre-warmed
+VMs**: compile once at load, borrow per eval, fail closed if none are free.
+
 - Pool size: **8 pre-warmed VMs** (bounded; matches selection-policy order of
   magnitude).
 - Pool exhaustion under burst: **fail closed to default policy** and count a
