@@ -1,11 +1,23 @@
 # Custom Consensus Policies Engine — Specification
 
-**Status**: Accepted direction, pre-implementation
+**Status**: Implemented — v1 MVP + v1.1 empty-outside-retention waiver shipped
 **Issue**: [#1088](https://github.com/erpc/erpc/issues/1088)
 **Direction**: [@aramalipoor](https://github.com/erpc/erpc/issues/1088#issuecomment-5492667906)
-**Last revised**: 2026-09-10
+**Last revised**: 2026-09-16
+**Synced to**: `crcl-main/erpc` PR
+[#136](https://github.com/crcl-main/erpc/pull/136) as of `70e16699`
 
-Companion: [plan.md](./plan.md)
+Companion: [plan.md](./plan.md) (phased delivery) ·
+[feature-details.md](./feature-details.md) (implementation edge cases, proof
+order, wait-cap seal, hedge vote, metric names, failure modes). Operator-facing
+docs shipped at `docs/pages/config/failsafe/consensus-policies.mdx`.
+
+> This document is the promise-level design contract. It now describes what was
+> **built** (not just proposed); wire-level and executor-level mechanics live in
+> [feature-details.md](./feature-details.md). The one behavior most changed from
+> the original proposal: waivers release a quota on **≥ `minAgreement`** distinct
+> tag-matching abstentions, not on a unanimous "every matching participant
+> abstained" (see §7 / details §1).
 
 ---
 
@@ -58,11 +70,14 @@ availability) resolves into one bounded interface — a named
 - No separate claim→policy allowlist outside JS. Role→policy lives in
   `customPolicy.evalFunction` via `ctx.user`.
 - No inline policy object return in v1 — eval returns a **name** only.
-- No decision cache in v1 — added only if measured eval cost forces it.
+- No decision cache in v1 — added only if measured eval cost forces it (still
+  future; not built).
 - #1069-style bounded-deviation value logic stays executor-side (separate
   change).
-- Empty-response waiver with block proof is **spec'd for v1.1**, not in v1
-  milestones (build when dispute traces force it).
+- ~~Empty-response waiver with block proof is **spec'd for v1.1**, not in v1
+  milestones~~ → **SHIPPED as v1.1** (`waiveAgreementOnEmptyOutsideRetention`,
+  `retentionBlocks`, `blockEvidenceFields`), with block proof by availability
+  lower bound then chain-head depth. See §7 and details §2.
 
 ---
 
@@ -137,20 +152,27 @@ Three integrity grades for data serving (plus `fallback` / `generous-dev`):
 |---|---|---|
 | `policies` | `map[string]ConsensusPolicyConfig` | Named policies. Each value is a complete consensus config (same fields as today's inline block). |
 | `customPolicy.evalFunction` | `string` | JS function. Signature `(ctx) => string \| null`. If omitted, the default/inline policy applies to every request. |
-| `customPolicy.evalTimeout` | `Duration` | Hard wall-clock cap on each eval. Fail closed to default on timeout. |
+| `customPolicy.evalTimeout` | `Duration` | Hard wall-clock cap on each eval; default `50ms` (`common/defaults.go`). Fail closed to default on timeout (VM discarded). |
 | `requiredParticipants[].waiveAgreementOnMissingData` | `bool` | Opt-in, default `false`. Put on `standard-waive-missing`, not on the fail-closed `standard`. See §7. |
+| `requiredParticipants[].waiveAgreementOnEmptyOutsideRetention` | `bool` | v1.1 opt-in, default `false`. Waives the quota when ≥ `minAgreement` matching participants returned **empty** and the winner's block is proven outside retention. Requires `retentionBlocks > 0` and `blockEvidenceFields`. See §7 / details §2. |
+| `requiredParticipants[].retentionBlocks` | `int64` | Default `0`. Retained depth behind chain head for the chain-head fallback proof (`head − winnerBlock > retentionBlocks`). Must be `> 0` when the empty-waiver is set. |
+| `blockEvidenceFields` | `map[string][]string` | Per-method field paths carrying the winner's own block number (same shape as `preferHighestValueFor`). The block proof the empty-waiver reads; required when any entry opts into that waiver. |
 
 **Backward compatibility:** an inline `consensus:` block with no `policies` map
 is one anonymous default policy — zero operator migration. All existing fields
 (`agreementThreshold`, `requiredParticipants`, `punishMisbehavior`, …) keep
-working. This design **reimplements** the `X-eRPC-Consensus-Policy` header and
+working. This design **reimplements** the `X-ERPC-Consensus-Policy` header and
 `consensus_policy` metric (not dependent on #1041). Ordered YAML
 `acceptancePolicies` is superseded.
 
-**Default policy must be the strictest.** The anonymous default (or the policy
-returned when eval fails/returns null) is the fail-closed target. Operators
-must configure it as the most restrictive policy; the spec assumes `standard`
-is that policy.
+**Default policy must be the strictest.** The **inline `consensus:` block itself**
+is the default policy — the round falls back to it whenever the eval returns
+null/unknown, throws, times out, or the VM pool is exhausted. Operators must
+configure it as the most restrictive policy; the spec assumes `standard` is that
+policy. The reserved label `"default"` (`common.ConsensusDefaultPolicyName`) is
+what the metric/header report for that fall-closed round, so `policies["default"]`
+is rejected at load. A named policy may **not** itself define `customPolicy` /
+`policies` (selection is top-level only) — also a load-time error.
 
 ---
 
@@ -184,8 +206,8 @@ Grow only when forced by observed configs:
 |---|---|
 | `upstreams.withTag(t)` | Filter by tag |
 | `upstreams.healthy()` | Keep only `state == "healthy"` — cordoned upstreams of any class are excluded (cordon = out of rotation) |
-| `upstreams.anyPunished()` | True if any upstream that **would otherwise be eligible to participate** holds a `punishment` cordon — not "ever punished" |
-| `upstreams.anyOperatorCordon()` | True if any eligible upstream holds an `operator` (admin) cordon — deliberate human action, undifferentiated between maintenance and distrust |
+| `upstreams.anyPunished()` | True if any **network** upstream holds a `punishment` cordon — **including nodes selection already dropped** (`removeCordoned`), which is why the shipped ctx carries a separate `PunishedOrOperator` scan list. Not "ever punished" |
+| `upstreams.anyOperatorCordon()` | True if any network upstream holds an `operator` (admin) cordon (same dropped-node scan) — deliberate human action, undifferentiated between maintenance and distrust |
 | `upstreams.allUnavailable()` | True if the set is **non-empty** and every member is either unhealthy-but-uncordoned or holds `availability` cordons and nothing else. **False on an empty set** — a tag matching no upstream is a config error, not an outage. Whitelist of availability only: `punishment`, `operator`, and any future cordon class make it false |
 | `upstreams.canServeBlock(n)` | Uses existing `EvmAssertBlockAvailability` |
 | `user.hasRole(r)` | Role check |
@@ -208,7 +230,7 @@ auth/ , health/              ← supply ctx.user and upstream health/availabilit
 3. `selector.Evaluate(ctx)` bounded by `evalTimeout` → policy name.
 4. Resolve name → `ConsensusPolicyConfig` (unknown/empty → default).
 5. Existing executor runs under that config — untouched code path.
-6. Emit `X-eRPC-Consensus-Policy: <name>` header + `consensus_policy` metric
+6. Emit `X-ERPC-Consensus-Policy: <name>` header + `consensus_policy` metric
    label.
 
 Eval failure, timeout, or unknown name fails **closed** to the default policy
@@ -348,7 +370,15 @@ else.
   Do not block the request path on a VM borrow.
 - Memory per VM: small (empty Sobek runtime + stdlib); bounded by pool size.
 - `evalTimeout` caps wall-clock per eval; a runaway eval poisons only the
-  borrowed VM, which is discarded.
+  borrowed VM, which is discarded (rebuilt async). A plain throw leaves the VM
+  clean and it returns to the pool.
+- **Sandboxed runtime.** Each VM is a bare `sobek.New()` (`newSandboxRuntime`)
+  exposing only the `EvalContext` + stdlib — **no `env` / `process.env` /
+  `console`**, unlike the shared `common.NewRuntime()`. `evalFunction` is
+  operator-writable config, so it never gets host-process env access. The
+  one-time evaluation of the operator function expression at pool build is
+  itself bounded by `evalTimeout`, so a runaway expression fails config load
+  loudly instead of hanging startup. Details §6.
 
 ---
 
@@ -408,7 +438,7 @@ downgraded.
 |---|---|
 | Availability vs punishment / admin | Cordons carry a typed class (§4.5). The reference eval checks `anyPunished()` and `anyOperatorCordon()` over **all** upstreams first: either pins the request to `standard`. Fallback then requires `allUnavailable()` on internals (whitelist of availability only). An attacker who gets any node punished, or an admin who cordons a node they distrust, must not force a downgrade. |
 | In-flight failure | No mid-round switch. That round disputes under `standard`; the tracker records it; the *next* request's eval picks `fallback`. |
-| Recovery | Internals healthy again → eval returns `standard`. Automatic both ways. Header `X-eRPC-Consensus-Policy: fallback` makes the degraded grade explicit. |
+| Recovery | Internals healthy again → eval returns `standard`. Automatic both ways. Header `X-ERPC-Consensus-Policy: fallback` makes the degraded grade explicit. |
 
 ---
 
@@ -426,7 +456,7 @@ Three named grades (§2 table):
 | Policy | Role | Pre-round | Post-round |
 |---|---|---|---|
 | `standard` | everyone (default) | Mixed internal+external | No waiver — MissingData on internals → composition dispute |
-| `standard-waive-missing` | `brp:historical` + `blockNumber == null` | Same mixed composition | Waiver releases internal quota when **all** matching participants returned `ErrEndpointMissingData` |
+| `standard-waive-missing` | `brp:historical` + `blockNumber == null` | Same mixed composition | Waiver releases internal quota when **≥ `minAgreement`** distinct matching participants returned `ErrEndpointMissingData` and none returned data |
 | `historical` | `brp:historical` + known-old (`canServeBlock` empty) | External-only — internals never called | External `minAgreement: 2` |
 
 Layers that make those grades work:
@@ -436,39 +466,58 @@ Layers that make those grades work:
    out-of-range requests with `ErrEndpointMissingData` before any provider call
    (`common/config.go`). Eval uses `canServeBlock(n)` to pick `historical`
    instead of calling internals at all.
-2. **MissingData waiver (safety net for unknown-block methods).** New
+2. **MissingData waiver (safety net for unknown-block methods).**
    `requiredParticipants[].waiveAgreementOnMissingData`: in
-   `enforceWinnerComposition` a failing `minAgreement` quota is waived if
-   **every** tag-matching participant returned `ErrEndpointMissingData` —
-   already the normalized, terminal, non-misbehavior edge classification
-   (`consensus/analysis.go`). Covers stale/misconfigured `blockAvailability`
-   and error-shaped pruning on tx-hash / block-hash methods where
-   `blockNumber` is null. A single value-voting match holds the quota.
+   `enforceWinnerComposition` (`missingDataWaivedQuotas`) a failing
+   `minAgreement` quota is waived when **at least `minAgreement`** distinct
+   tag-matching participants returned `ErrEndpointMissingData` — the
+   normalized, terminal, non-misbehavior edge classification
+   (`consensus/analysis.go`) — **and no matching participant returned data**.
+   Sibling **transport / infra errors do not block** the count; a matching
+   value vote holds the quota (that is disagreement, not abstention). Covers
+   stale/misconfigured `blockAvailability` and error-shaped pruning on tx-hash /
+   block-hash methods where `blockNumber` is null.
 
-   The waiver is **round-complete**: it only evaluates after all participants
-   have responded or the round has otherwise terminated (wait cap, short-
-   circuit, or timeout). It does not alter the wait-cap arming gate at
-   `consensus/executor.go:490` — that gate still holds arming until every
-   quota tag is covered by distinct upstreams, so a round cannot time out
-   early while a required participant is still in flight.
+   The waiver is **round-complete**: it reports no waivers while
+   `analysis.hasRemaining()` — a slower tagged upstream could still turn an
+   abstention into a data vote. Because composition disputes deliberately do
+   **not** short-circuit while responses can still arrive, a round with an
+   unanswered required slot would otherwise defer the waiver forever. The
+   wait-cap closes that: when `maxWaitOnResult` / `maxWaitOnEmpty` fires and
+   cancels the stragglers, the analyzer **seals** the collection
+   (`sealCollection`) and re-runs `determineWinner`, so `hasRemaining()` is
+   false and the waiver evaluates even at `maxParticipants: 4` with only three
+   answers. `fireAndForget` does not cancel/seal (its slots keep running), so
+   it stays fail-closed. See details §3.
 
-   Load-time validation: a `requiredParticipants` entry with
-   `waiveAgreementOnMissingData: true` is rejected unless at least one other
-   entry has `waiveAgreementOnMissingData: false` (or omits the flag) **and**
-   `minAgreement > 0`. The second condition is what makes the floor a floor:
-   `anyAgreementQuota` and `resultsSatisfyAgreementQuotas` both skip entries
-   with `minAgreement <= 0` (`consensus/quota.go`), so a never-waivable entry
-   without a quota is invisible to composition enforcement and would satisfy
-   the rule while enforcing nothing.
-3. **Empty-waiver with block proof (v1.1 — spec now, not in milestones).**
+   Load-time validation: a policy using any waiver is rejected unless at least
+   one entry is never-waivable **and** carries `minAgreement > 0`. The quota
+   condition is what makes the floor a floor: `anyAgreementQuota` and
+   `resultsSatisfyAgreementQuotas` both skip entries with `minAgreement <= 0`
+   (`consensus/quota.go`), so a never-waivable entry without a quota is
+   invisible to composition enforcement and would satisfy the rule while
+   enforcing nothing.
+3. **Empty-waiver with block proof (v1.1 — SHIPPED).**
    Null-shaped pruning (`eth_getTransactionByHash` post-EIP-4444) is ambiguous
    at the source — but the winning tx/receipt/log carries its own
    `blockNumber` (wire-stable). `waiveAgreementOnEmptyOutsideRetention` fires
-   only when all matching participants returned empty **and** the winner's
-   block is outside the abstainer's configured range. Field extraction is
-   config-driven (`blockEvidenceFields`, same pattern as
-   `preferHighestValueFor`); unlisted method → no waiver → dispute. Fabricated
-   recent tx + internal null → proof fails → quota holds → dispute.
+   only when **≥ `minAgreement`** distinct matching participants returned empty,
+   **no** matching participant returned non-empty data, **and** the winner's
+   block is proven outside retention. Proof prefers each abstainer's finite
+   `blockAvailability` lower bound (`winnerBlock < lower`); else chain-head
+   depth (`head − winnerBlock > retentionBlocks`), where `head` is trusted from
+   the network served tip **only** under majority served-tip mode
+   (`evm.servedTip.enabledFor: latest`), otherwise the min of ≥ 2 corroborated
+   participant poller latests. Field extraction is config-driven
+   (`blockEvidenceFields`, same pattern as `preferHighestValueFor`); unlisted
+   method → no proof → dispute. Fabricated recent tx + internal null → proof
+   fails → quota holds → dispute. Full order and trust model: details §2.
+
+   The synthesized default mixed-node tie (a lone non-empty archive group tying
+   an equally-sized empty internal group at `agreementThreshold`) produces an
+   `ErrConsensusDispute` with no backing group, which the waiver path above
+   would never see. `promoteAbstentionWinner` rescues exactly that case under
+   the same guards — see details §2.1.
 
 Role-gating is the default recommendation when archive cost or blast radius
 matters: never put the waiver on fail-closed `standard`. If historical is
@@ -482,9 +531,9 @@ extra JS.
 | Old block, `blockAvailability` correct | Guard short-circuit → MissingData. **`historical`**: external-only serve. **`standard-waive-missing`**: waiver → external 2-agreement. **`standard`**: composition dispute |
 | Old block, `blockAvailability` stale/wrong | Provider error normalized to MissingData → same split by selected policy |
 | Pruned tx, node returns MissingData error | Tx-hash → `standard-waive-missing` (role) → waiver; unauthorized on `standard` → dispute |
-| Pruned tx, node returns `null` | v1: dispute. v1.1: empty-waiver with block proof serves |
+| Pruned tx, node returns `null` | **v1.1 (shipped):** empty-waiver serves when ≥ `minAgreement` matching nulls + winner block proven outside retention; recent null (inside retention/bounds) → dispute |
 | Data never existed (all null / all MissingData) | `null` served (empty ≥ threshold) / agreed MissingData error — correct |
-| Internal + external both return MissingData, one external returns the value | **Composition dispute** — MissingData is a `ResponseTypeConsensusError`, so the generic threshold rule can make it the winner, but `enforceWinnerComposition` does **not** exempt consensus-error groups. The external `minAgreement: 2` quota fails (only one external voted) and the round disputes. The waiver only fires when **all** tag-matching participants returned MissingData; here one external returned a value, so the waiver does not fire. |
+| Internal + external both return MissingData, one external returns the value | **Composition dispute** — MissingData is a `ResponseTypeConsensusError`, so the generic threshold rule can make it the winner, but `enforceWinnerComposition` does **not** exempt consensus-error groups. The external `minAgreement: 2` quota fails (only one external voted) and the round disputes. A matching participant that returned data holds the quota — the waiver only fires when ≥ `minAgreement` matching participants abstained **and none returned data**; here one external returned a value, so the waiver does not fire. |
 | Just-mined tx not yet on internal (internal null) | Dispute → retry succeeds. Serving it needs minAgreement-0 + preferNonEmpty = externals outvote internal — rejected |
 | Internal wrong value (misbehavior) | Quota holds → composition dispute + `punishMisbehavior` |
 | Internal outage (infra error ≠ MissingData) | Quota holds → dispute for unauthorized; authorized roles get `fallback` on the next request (§6) |
@@ -495,15 +544,22 @@ extra JS.
 
 ### 7.3 Requirements
 
-- **R1** waiver fields on `requiredParticipants[]` (opt-in, default off) +
-  executor change localized to `enforceWinnerComposition`; wait-cap arming
-  gate at `executor.go:490` unchanged.
+- **R1** waiver fields on `requiredParticipants[]` (opt-in, default off) —
+  `waiveAgreementOnMissingData` (v1) and `waiveAgreementOnEmptyOutsideRetention`
+  + `retentionBlocks` + policy-level `blockEvidenceFields` (v1.1) — with the
+  executor change localized to `enforceWinnerComposition` /
+  `promoteAbstentionWinner`. Waivers are round-complete: composition disputes do
+  not short-circuit while `hasRemaining`, and the wait-cap **seals** the
+  collection so waivers evaluate when slots stay unanswered (`fireAndForget` does
+  not seal). Details §3.
 - **R2** `blockAvailability` on every internal upstream;
   `canServeBlock(n)` uses existing `EvmAssertBlockAvailability`.
 - **R3** archive externals tagged, `minAgreement: 2`, never waivable.
 - **R4** blockNumber extraction for eval ctx.
-- **R5** observability: `consensus_composition_waived_total{tag,reason}` +
-  log on every waiver fire; policy name header/metric as above.
+- **R5** observability: `erpc_consensus_composition_waived_total{project,network,tag,reason}`
+  (`reason`: `missing_data` / `empty_outside_retention`) + log on every waiver
+  fire; `erpc_consensus_composition_waiver_unproven_total{project,network,reason}`
+  for fail-closed empty-waiver holds; policy name header/metric as §8.
 - **R6** tests: one per matrix row; fallthrough cases (nil user, unknown
   policy name, unlisted method) first.
 - **R7** punished/sitout and operator cordons distinct from unhealthy /
@@ -529,15 +585,20 @@ extra JS.
 
 ## 8. Observability
 
+Metric names are `erpc_`-prefixed; all carry `project` + `network` labels. See
+details §10 for the full table.
+
 | Signal | Meaning |
 |---|---|
-| `X-eRPC-Consensus-Policy` response header | Chosen policy name on every served round |
-| `consensus_policy` metric label | Same, on consensus metrics |
-| `consensus_composition_waived_total{tag,reason}` | Waiver fires (`missing_data` / later `empty_outside_retention`) |
-| `consensus_policy_eval_duration_seconds` | Eval latency histogram |
-| `consensus_policy_eval_failed_total{reason}` | Fail-closed selections split by reason (`timeout`, `throw`, `unknown_name`, `pool_exhausted`) |
+| `X-ERPC-Consensus-Policy` response header | Chosen policy name; **output-only** (never read from the request), emitted only when a selector is configured |
+| `erpc_consensus_policy_selected_total{consensus_policy}` | Named policy chosen per served round (`default` = fell closed / null) |
+| `erpc_consensus_composition_waived_total{tag,reason}` | Waiver fires (`missing_data` / `empty_outside_retention`) |
+| `erpc_consensus_composition_waiver_unproven_total{reason}` | Empty-waiver held for missing proof (`no_winner_block` / `no_avail_bound` / `no_head`); mid-round deferral is **debug-only**, not counted |
+| `erpc_consensus_policy_eval_duration_seconds` | Eval latency histogram |
+| `erpc_consensus_policy_eval_failed_total{reason}` | Eval **ran** and failed (`timeout`, `throw`, `unknown_name`) |
+| `erpc_consensus_policy_eval_bypassed_total{reason}` | Eval **never ran** (`pool_exhausted`) — note this is separate from `eval_failed_total` |
 | Warn log on unknown policy name | Config typo signal |
-| Error log on eval failure/timeout | Fail-closed fallback |
+| Warn log on eval failure/timeout | Fail-closed fallback |
 
 **Alerting:** page on sustained non-default policy selection (e.g. `fallback`
 > 5 min) or a step change in `consensus_composition_waived_total`. These are
@@ -572,7 +633,7 @@ labels.
   closes the correlated-externals-outvote-internal hole for recent data.
 - Role gating turns the JWT into a **correctness control**, not only a rate
   limit. A leaked token can select a weaker consensus grade; the
-  `X-eRPC-Consensus-Policy` header lets callers detect a degraded grade.
+  `X-ERPC-Consensus-Policy` header lets callers detect a degraded grade.
 
 ---
 
@@ -612,6 +673,14 @@ labels.
 3. **If the MissingData waiver shipped alone, how much of #1088 is solved?**
    Historical serving (UC3) is solved. Role-gated fallback (UC2) and custom
    operator policies (UC5) still need the selector.
-4. **Measured eval cost?** Not yet measured; a benchmark is required in
-   Phase 1. The design assumes tens–low hundreds of µs; if measurement shows
-   otherwise, the decision-cache phase is re-evaluated.
+4. **Measured eval cost?** The design assumes tens–low hundreds of µs on a
+   pre-warmed VM, negligible against upstream RTT; the observed benchmark path
+   (`internal/consensus/policy/bench_test.go`) confirmed this order of
+   magnitude, so the decision cache stayed **unbuilt** (§5). Re-open only if a
+   later profile shows eval cost matters.
+
+**Implementation status note.** The role-gating machinery (`common.User.Roles`,
+JWT `rolesClaimName`, `hasRole`) shipped and the selector reads it, but the
+staging trial exercised selectors **ungated** — health / block-range / cordon
+predicates — not live role-gated grades. The role path is code-complete, not yet
+battle-tested end-to-end. Decision cache remains future work.
