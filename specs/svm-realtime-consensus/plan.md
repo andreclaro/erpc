@@ -9,13 +9,17 @@ independently; slot-grouped voting is the headline correctness piece.
 
 ---
 
-## Locked decisions
+## Decisions
+
+Settled choices carried from the feature spec — implement these unless new
+evidence forces a reopen.
 
 | Decision | Choice |
 |----------|--------|
 | Pin location | Response `context.slot` (not request rewrite) |
-| Winner among slots | Highest slot that meets `agreementThreshold` on value |
-| Wait default | Wait up to `maxWaitOnResult` for a higher qualifying slot; then best agreed |
+| Agreement identity | `(context.slot, value)` hash — remove `context.slot` from default `ignoreFields`; keep ignoring `context.apiVersion` |
+| Winner among groups | Highest `context.slot` among groups that meet `agreementThreshold` (not largest count) |
+| Wait default | Wait up to `maxWaitOnResult` for a higher qualifying slot; then best agreed (`0` = no time cap / full collection) |
 | Cross-slot lag | Not misbehavior |
 | Same-slot value split | Real dispute / misbehavior (existing majority rules within cohort) |
 | Activation | Auto when ≥1 success has parseable `context.slot` under active consensus |
@@ -27,6 +31,8 @@ independently; slot-grouped voting is the headline correctness piece.
 
 ## Phase 0 — Spec (this PR)
 
+Write and land the behavior contract before code.
+
 - [x] Write `specs/svm-realtime-consensus/feature.md`
 - [x] Write this plan
 - [x] Write `svm-consensus-gaps.md`
@@ -36,40 +42,44 @@ independently; slot-grouped voting is the headline correctness piece.
 
 ---
 
-## Phase 1 — Slot-grouped voting in `consensus/`
+## Phase 1 — `(slot, value)` consensus in `consensus/` + defaults
 
-1. **Extract slot** from successful responses (`PeekStringByPath` /
-   `context.slot`) during analysis — discover from the body. The known
-   envelope inventory is `contextSlotMethods`
-   ([`hooks.go` L654–L672](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672));
-   do not require re-listing those names in the consensus hot path.
-2. **Partition** then hash: group by slot first; within each partition use
-   existing value hashing (`ignoreFields` still strips `context.*` from the
-   hash). Slot is the partition key only.
-3. **Winner selection**: among partitions with a value-group ≥
-   `agreementThreshold`, pick highest slot; feed that group into existing
-   dispute / prefer / composition pipeline where applicable.
-4. **Misbehavior**: only compare dissenters inside the winning slot cohort;
+Ship `(slot, value)` agreement identity and highest-qualifying-slot winner;
+keep EVM and non-envelope paths untouched.
+
+1. **Defaults**: in `common/defaults.go`, change enveloped-method
+   `ignoreFields` from `["context.slot","context.apiVersion"]` to
+   `["context.apiVersion"]` only (see feature.md §3.0). Update
+   `defaults_test.go` and consensus docs.
+2. **Winner selection**: among hash groups with `count ≥ agreementThreshold`,
+   pick the group with the **highest `context.slot`** (not largest count).
+   Implementation may partition-by-slot then hash value — isomorphic when
+   `apiVersion` is ignored.
+3. **Misbehavior**: only compare dissenters inside the winning slot cohort;
    cross-slot participants are not misbehaving.
-5. **Composition**: `minAgreement` counts tags only among agreeing members of
+4. **Composition**: `minAgreement` counts tags only among agreeing members of
    the winning slot cohort.
-6. **Wait caps**: document that this path needs non-zero `maxWaitOnResult`;
-   no special executor fork beyond not short-circuiting a lone tip-slot vote
-   while a higher slot can still qualify.
-7. **Tests** (fallthrough first):
+5. **Wait caps**: `maxWaitOnResult: 0` = no time cap (full collection);
+   bounded waits tune p99. Do not short-circuit a lone tip-slot vote while a
+   higher slot can still qualify.
+6. **Tests** (fallthrough first):
    - No `context.slot` → legacy hash path unchanged.
-   - Same value, different slots → no dispute; highest agreed wins after wait.
+   - Same value, different slots → separate buckets; highest agreed wins after wait.
    - Same slot, different values → dispute under `returnError`.
    - Lone tip + agreed older → wait; second tip vote → freshest agreed.
    - Mix quota: internal+external only count in winning slot cohort.
    - Misbehavior metric: cross-slot does not increment misbehavior.
+   - Default `ignoreFields` for `getBalance` (etc.) is `["context.apiVersion"]` only.
 
-**Acceptance**: `go test ./consensus/...` green; EVM / non-envelope SVM
-broadcast paths unchanged.
+**Acceptance**: `go test ./consensus/...` + `./common/...` green; EVM /
+non-envelope SVM broadcast paths unchanged.
 
 ---
 
 ## Phase 2 — Paired finality / cache
+
+After §3 soaks clean, optionally promote rooted enveloped winners to
+slot-keyed finalized cache (see feature.md §4).
 
 1. After a slot-grouped winner is chosen, if
    `context.slot ≤` network finalized tip **and**
@@ -86,6 +96,8 @@ metrics show finalized cache hits for rooted enveloped reads.
 
 ## Phase 3 — Docs (ride along with Phase 1 or 2)
 
+Document shipped behavior in the public consensus failsafe page.
+
 1. Update `docs/pages/config/failsafe/consensus.mdx` — SVM slot-grouped
    behavior, wait-cap note, misbehavior caveat.
 
@@ -94,6 +106,8 @@ metrics show finalized cache hits for rooted enveloped reads.
 ---
 
 ## Non-goals in this plan
+
+Work that must not block or inflate this implementation track:
 
 - Operator / helm failsafe enablement (separate from this source change)
 - SVM `*BlockHeadLeader` leader selection

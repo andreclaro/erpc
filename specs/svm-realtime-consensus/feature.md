@@ -8,6 +8,9 @@ Companions: [plan.md](./plan.md) · [svm-consensus-gaps.md](./svm-consensus-gaps
 
 ## 1. Purpose
 
+This feature makes multi-provider consensus safe for Solana moving-head reads
+without treating healthy tip lag as disagreement.
+
 Enable **multi-provider consensus** on Solana moving-head reads
 (`getBalance`, `getAccountInfo`, `getTokenAccountBalance`, …) without the
 false disputes that naive hash agreement produces when healthy upstreams
@@ -24,13 +27,19 @@ After this feature:
 
 ### Goals
 
+What we intend to ship in the consensus executor (and optionally later in
+cache):
+
 - Response-side pinning via `context.slot` (Solana has no request-side slot
   rewrite analogous to EVM tag→block-number).
-- Slot-grouped voting in the consensus executor; value hashed with
-  `context.slot` / `context.apiVersion` ignored (slot is the *group key*,
-  not part of the value hash).
-- Non-zero wait so a second provider can catch up to a tip slot
-  (`maxWaitOnResult` must not be `0` on this path).
+- Agreement identity is **`(context.slot, value)`**: stop ignoring
+  `context.slot` in consensus `ignoreFields` defaults (keep ignoring only
+  `context.apiVersion`). Hash buckets are then per tip bank + payload.
+- Among groups that meet `agreementThreshold`, prefer the **highest
+  `context.slot`** (freshest *agreed* tip) — count-largest alone is wrong.
+- Prefer waiting long enough for a second provider to catch a tip slot
+  (bounded `maxWaitOnResult`, or `0` = wait until all participants /
+  short-circuit — not “return on first response”).
 - Misbehavior only for **same-slot value dissent** — cross-slot lag is not
   misbehavior.
 - Optional Phase 2: when `context.slot ≤ poller.finalizedSlot` (and the
@@ -38,6 +47,8 @@ After this feature:
   and cache under `(method, params, slot)`.
 
 ### Non-goals
+
+Deliberately out of this change so the design stays weak and reviewable:
 
 - Do **not** use `preferHighestValueFor` / `agreementThreshold: 1` on
   moving-head reads (that is tip routing, not consensus).
@@ -55,11 +66,17 @@ After this feature:
 
 ## 2. Background (why today fails)
 
-### Moving-head reads (`contextSlotMethods`)
+Before the algorithm: why flat hash consensus cannot work for enveloped
+moving-head reads, using `getBalance` as the running example.
 
-Canonical example — `getBalance` (same shape as other enveloped methods in
-`contextSlotMethods`
-[`hooks.go`](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672)):
+### Moving-head reads
+
+A moving-head read names *what* to look up (e.g. a pubkey) but not *which
+slot* — each upstream answers at its current bank and reports that bank as
+`context.slot`. The methods whose result *can* carry that envelope are listed
+as `contextSlotMethods` in
+[`hooks.go`](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672);
+`getBalance` is the running example below.
 
 **Request** — names a pubkey (and optional commitment), **not** a historical
 slot:
@@ -92,9 +109,16 @@ balance in `value`:
 
 This is a **moving-head** read: each upstream answers “balance at *my*
 current bank” and stamps that bank. Under `commitment: finalized` that bank
-is still the latest **rooted** tip — it advances ~every 400ms — so two
-healthy nodes routinely return the **same `value` at adjacent slots**
+is still the latest **rooted** tip — it advances roughly once per slot — so
+two healthy nodes routinely return the **same `value` at adjacent slots**
 (e.g. `12345@1000` and `12345@1001`).
+
+**Slot duration note:** mainnet slot time is **~300ms today** (staged
+reduction from the historical **400ms**; target **200ms**). See
+[Reduced Slot Times](https://solana.com/upgrades/reduced-slot-times)
+(SIMD-0525). Do not hard-code 400ms into wait budgets — derive from observed
+inter-provider root lag / adaptive caps. Wall-clock “one slot” shrinks as
+gates activate; adjacent-slot false disputes only get *more* common, not less.
 
 `GetFinality` correctly classifies `getBalance` **realtime** at every
 commitment (`architecture/svm/finality.go` — also in `neverCacheMethods`).
@@ -104,18 +128,27 @@ names the slot or signature, so strict hash consensus compares one question.
 
 ### Why naive consensus fails on them
 
-Default envelope `ignoreFields` strip `context.slot` / `context.apiVersion`
-from the **value** hash (`common/defaults.go`) so the slot is not part of
-the payload digest. Flat agreement still mixes **different questions** —
-e.g. `getBalance` results at slot 1000 and 1001 land in one bucket. Adjacent
-rooted tips then yield **false disputes** (transient balance splits during
-tip advance) or a **stale majority** (older slot outvotes a fresher tip)
-under `returnError` / `agreementThreshold ≥ 2`.
+Today’s defaults ignore **both** `context.slot` and `context.apiVersion` in
+the value hash (`common/defaults.go`). Ignoring `apiVersion` is right
+(mixed validators). Ignoring **`context.slot`** collapses adjacent tips into
+one bucket: flat agreement mixes **different questions** — e.g. `getBalance`
+at slot 1000 and 1001 hash alike when lamports match. That yields **false
+disputes** when tip churn briefly splits values, or a **stale majority** when
+an older slot outvotes a fresher tip, under `returnError` /
+`agreementThreshold ≥ 2`.
+
+**End state:** keep `context.slot` **in** the hash so agreement identity is
+`(slot, value)`. Still ignore only `context.apiVersion`. That alone is not
+enough — winner selection must prefer the **highest slot** among groups that
+meet threshold (not largest count), wait for a tip to gather a second vote,
+and treat cross-slot lag as non-misbehavior.
 
 Cross-slot lag is expected SVM behavior, not misbehavior. Same-slot
 **`value`** split (two balances at slot 1000) is a real dispute.
 
 ### Why EVM’s approach does not transfer
+
+EVM can rewrite a block tag on the request; Solana moving-head reads cannot.
 
 | | EVM | SVM `getBalance` (and other `contextSlotMethods`) |
 |---|---|---|
@@ -123,38 +156,67 @@ Cross-slot lag is expected SVM behavior, not misbehavior. Same-slot
 | `minContextSlot` | N/A | Floor only, **not** a pin |
 | Self-pin | Block number in request | **`result.context.slot` in the response** |
 
-Response-side slot grouping is the weakest correct fix: partition
-`getBalance` answers by `context.slot`, hash `value` within a slot, pick the
-highest slot that meets `agreementThreshold`.
+Response-side fix: hash `(context.slot, value)` (drop `context.slot` from
+default `ignoreFields`), then among groups ≥ `agreementThreshold` pick the
+**highest slot**.
 
 ---
 
-## 3. Solution — slot-grouped consensus
+## 3. Solution — `(slot, value)` consensus
+
+Agreement buckets are `(context.slot, value)`. Prefer the highest slot that
+meets threshold; do not punish cross-slot lag.
 
 `getBalance` responses already self-pin via `result.context.slot` (see §2).
 `value @ rooted-slot-N` is immutable for that N. Compare answers only when
-they answer the **same** question (same `context.slot`).
+they answer the **same** question (same `context.slot` **and** same `value`).
+
+### 3.0 Defaults change (`ignoreFields`)
+
+**Today** (`common/defaults.go`): enveloped methods default to
+
+```text
+ignoreFields[method] = ["context.slot", "context.apiVersion"]
+```
+
+**End state:** remove `context.slot` from that default list:
+
+```text
+ignoreFields[method] = ["context.apiVersion"]
+```
+
+So the canonical hash for `getBalance` (and peers) includes `context.slot`
+and the balance `value`, but not `apiVersion`. Operators who already set a
+custom `ignoreFields` map replace defaults wholesale — document the new
+default in the consensus failsafe docs when this ships.
+
+This change alone is insufficient (see §3.1–3.6): count-based winner
+selection would still prefer a large stale slot over a smaller fresher one.
 
 ### 3.1 Algorithm
 
+How one consensus round decides a winner for an enveloped read such as
+`getBalance`:
+
 1. Fan out to `maxParticipants` upstreams (existing executor).
-2. For each successful enveloped response, read `result.context.slot`
-   (e.g. `1000` from the `getBalance` example above).
-3. **Partition** non-infrastructure responses by `context.slot`.
-4. Within each slot partition, group by **value** hash
-   (`ignoreFields` / defaults strip `context.*` from the hash — slot is only
-   the partition key; for `getBalance` the digest is over `value` / lamports).
-5. A slot partition **qualifies** when some value-group in it has
-   `count ≥ agreementThreshold`.
-6. Among qualifying slots, pick the **highest slot**; that partition’s
-   winning value-group is the consensus winner.
-7. Same slot + different values at/above threshold with no unique winner →
+2. Hash each successful enveloped response with defaults that **keep**
+   `context.slot` and **ignore** only `context.apiVersion` → buckets are
+   `(slot, value)` (for `getBalance`: lamports @ slot).
+3. A hash group **qualifies** when `count ≥ agreementThreshold`.
+4. Among qualifying groups, pick the one with the **highest `context.slot`**;
+   that group is the consensus winner (freshest *agreed* tip).
+5. Same slot + different values at/above threshold with no unique winner →
    real dispute → `disputeBehavior` (production: `returnError`).
-8. Different slots alone are **not** a dispute; keep collecting until
+6. Different slots alone are **not** a dispute; keep collecting until
    wait-caps fire or all participants answer.
-9. If no slot qualifies by round end (`maxWaitOnResult` / collection done) →
+7. If no group qualifies by round end (`maxWaitOnResult` / collection done) →
    `returnError` under production policy (or low-participants if
    `validParticipants < agreementThreshold`).
+
+(Implementation may partition by slot then hash `value` within a partition —
+that is isomorphic to `(slot, value)` hashing when `apiVersion` is ignored.
+Either shape is fine; the **observable** contract is `(slot, value)` identity
++ highest qualifying slot.)
 
 Example round for one `getBalance` (lamports @ slot):
 
@@ -165,7 +227,10 @@ t=+Δ: Helius → 12350@1002
       → agreed 12350@1002 (2) → return freshest agreed tip
 ```
 
-### 3.2 Wait semantics (locked)
+### 3.2 Wait semantics
+
+A lower agreed slot may already qualify while a fresher tip still has only
+one vote — wait (within the cap) before locking in the older answer.
 
 Default: **wait** up to `maxWaitOnResult` for a *higher* qualifying slot before
 returning a lower agreed slot. Only when the wait cap fires (or all
@@ -173,12 +238,19 @@ participants have answered) return the highest *already-qualified* slot.
 
 Rationale: returning the older agreed slot immediately maximizes false
 “freshness” regressions for financial callers; waiting bounds p99 to the
-configured cap (~inter-provider root lag, typically 0.4–0.8s).
+configured cap (~inter-provider root lag; often ~1–2 slots ≈ 0.3–0.6s at
+today’s ~300ms slot time — tune from soak, not a hardcoded 400ms constant).
 
-`maxWaitOnResult: 0` / `maxWaitOnEmpty: 0` is **invalid** for this path
-(deployment must not copy the slot-pinned rule’s zero wait).
+`maxWaitOnResult: 0` / `maxWaitOnEmpty: 0` means **no time cap** (collect
+until all participants answer or short-circuit). That is valid — often more
+patient than a short cap. It is **not** “return on first response.” Prefer a
+bounded non-zero wait when p99 must be capped; do not confuse `0` with
+disabled waiting for agreement.
 
-### 3.3 Activation (locked)
+### 3.3 Activation
+
+Slot-grouping turns on from the response shape under an active consensus
+policy — not from a hard-coded method switch in the hot path.
 
 Enter slot-grouped mode when **all** of:
 
@@ -200,7 +272,10 @@ enveloped responses under `returnError`.
 **Key rule under `agreementThreshold ≥ 2`:** a tip slot with one vote does not
 qualify; “most updated” alone is still single-provider trust.
 
-### 3.4 Misbehavior (locked)
+### 3.4 Misbehavior
+
+Only same-slot value dissenters are misbehaving; lagging or leading another
+slot is expected.
 
 | Situation | Misbehavior? |
 |---|---|
@@ -212,7 +287,10 @@ qualify; “most updated” alone is still single-provider trust.
 the winning group has a clear majority (`count > validParticipants/2` within
 the **winning slot cohort**, not the whole round).
 
-### 3.5 Composition quotas (`requiredParticipants` / `minAgreement`)
+### 3.5 Composition quotas
+
+Mix quotas (`requiredParticipants` / `minAgreement`) still apply, but only
+among upstreams that agreed on the winning value **at the winning slot**.
 
 Unchanged contract, applied to the **winning slot cohort’s** agreeing
 participants: if mix consensus requires ≥1 `type:internal` and ≥1
@@ -225,6 +303,9 @@ path).
 
 ### 3.6 Short-circuit
 
+Early exit must not crown a lone tip or skip a higher slot that can still
+qualify within the wait budget.
+
 - Do **not** short-circuit to a lone tip-slot response.
 - Unassailable lead / error-threshold short-circuits apply **within** a slot
   partition only when no higher slot can still qualify given remaining
@@ -235,33 +316,101 @@ path).
 
 ## 4. Phase 2 — paired finality / cache (separate ship)
 
-For a `getBalance` (or other enveloped) winner: if
-`context.slot ≤ SvmStatePoller.FinalizedSlot` (network / upstream view TBD
-in plan) **and** the request’s effective commitment is `finalized` (or the
-method has no weaker commitment dimension that would make the slot
-unrooted-relative):
+Optional follow-on after §3: use the winner’s `context.slot` to classify
+cacheability, analogous to EVM tag→number rewrite but response-side.
 
-- Classify response finality as **`finalized`** (immutable at that slot).
-- Cache key includes `context.slot`: `(method, params, slot)` — not blanket
-  realtime TTL. (`getBalance` remains hard-skipped by `neverCacheMethods`
-  today; Phase 2 applies to enveloped methods that *are* cacheable, or if
-  that hard-skip is revisited.)
+**Not required for consensus.** Slot-grouped voting (§3) is correct without
+any of this. Phase 2 is an optional follow-on: once a winner already carries
+a trusted `context.slot`, use that slot for **cache classification**, the way
+EVM rewrites a block tag to a number — except the pin comes from the
+*response*, not the request.
 
-**Must not** promote a `getBalance` with `commitment: confirmed` /
-`processed` to immutable finalized cache solely because
-`context.slot ≤ finalized root`.
+### Why bother
 
-This is the SVM analogue of EVM tag→number rewrite, done on the response.
-Ship after slot-grouped voting is correct and soaked.
+Today moving-head enveloped reads stay `realtime` for cache; after §3 we
+sometimes know an immutable “value at slot N.”
+
+Today every moving-head enveloped read is `realtime` for cache purposes
+(`GetFinality` fallthrough / never-cache). That is correct for “balance at
+whatever tip is now,” but after §3 we know a stronger fact for a consensus
+winner:
+
+> “This is the balance (or account) **at slot N**,” and if N is already ≤ the
+> network finalized root under `commitment: finalized`, that answer cannot
+> change for that N.
+
+Without Phase 2 we keep short-TTL / never-cache forever. With Phase 2 we can
+store immutable entries keyed by slot — fewer upstream hits for repeated
+reads of the same rooted state.
+
+### Rule
+
+Promotion runs only after a slot-grouped winner exists, and only when slot
+under the root **and** finalized commitment both hold.
+
+Promote to **`finalized`** cacheability **only when all** of:
+
+1. Consensus (or a single success on this path) produced a parseable
+   `result.context.slot` = `N`.
+2. `N ≤` the network’s finalized tip (`SvmStatePoller.FinalizedSlot` — exact
+   network vs upstream view is TBD in [plan.md](./plan.md)).
+3. The request’s **effective commitment** is `finalized` (same predicate as
+   injection / `IsFinalizedCommitment`).
+
+Then:
+
+- Classify the response finality as **`finalized`** (immutable at slot `N`).
+- Cache key includes the slot: `(method, params, N)` — not a blanket realtime
+  TTL.
+
+### Example — `getAccountInfo` cache promotion
+
+`getBalance` is the consensus poster child; use a cacheable envelope for the
+cache story.
+
+Caller asks with `commitment: finalized`. Consensus returns value `V` with
+`context.slot: 1000`. Poller’s finalized tip is `1005`.
+
+- `1000 ≤ 1005` and commitment is finalized → treat as finalized; cache under
+  `(getAccountInfo, params, 1000)`.
+- A later identical request can hit that entry until eviction policy says
+  otherwise.
+
+`getBalance` is the right **consensus** example (§2–§3) but a poor **cache**
+example: it stays in `neverCacheMethods` today, so Phase 2 does not store it
+unless that hard-skip is revisited. Prefer `getAccountInfo` /
+`getMultipleAccounts` / etc. for Phase 2 soak.
+
+### Must not
+
+Weaker commitment must not inherit permanent cache from a lucky slot number.
+
+Do **not** promote solely because `context.slot ≤ finalized root` when the
+caller used `commitment: confirmed` or `processed`. Weaker commitment means
+the node may have evaluated a non-rooted bank; a numeric slot under the root
+is not enough to claim immutability.
+
+### Ship order
+
+Fix false disputes first; add cache promotion only after soak proves §3.
+
+Land §3, soak false-dispute / misbehavior metrics, **then** Phase 2. Mixing
+cache promotion into the first consensus change hides regressions and is not
+forced by the false-dispute bug.
 
 ---
 
 ## 5. In scope / out of scope
 
-### Envelope inventory (`contextSlotMethods`)
+Which methods can carry `context.slot`, which to soak first under consensus,
+and what this feature explicitly does not own.
 
-Canonical list of methods whose result shape *can* carry `context.slot`
-([`hooks.go` L654–L672](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672)):
+### Envelope inventory
+
+Full list of result shapes that *can* carry a context slot (discovery still
+reads the body; this table documents the known Solana `RpcResponse<T>` set in
+`contextSlotMethods` —
+[`hooks.go` L654–L672](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672)):
 
 `getAccountInfo`, `getBalance`, `getBlockProduction`, `getFeeForMessage`,
 `getLargestAccounts`, `getLatestBlockhash`, `getMultipleAccounts`,
@@ -271,12 +420,15 @@ Canonical list of methods whose result shape *can* carry `context.slot`
 `getTokenAccountsByOwner`, `getTokenLargestAccounts`, `getTokenSupply`,
 `isBlockhashValid`, `simulateTransaction`.
 
-Same set is mirrored in consensus `ignoreFields` defaults
-(`common/defaults.go`: strip `context.slot` / `context.apiVersion` from the
-value hash). Slot-grouping uses the slot as a **partition key** only; the
-hash remains value-only.
+Same methods appear in consensus `ignoreFields` defaults today with
+`context.slot` **and** `context.apiVersion` stripped. **This feature’s end
+state** removes `context.slot` from that default (keep only
+`context.apiVersion`) so the hash is `(slot, value)`. See §3.0.
 
 ### Enable under slot-grouped consensus (failsafe)
+
+Operators choose `matchMethod` coverage; soak the financial moving-head set
+first.
 
 **Priority soak:** `getAccountInfo`, `getBalance`, `getTokenAccountBalance`,
 `getMultipleAccounts`.
@@ -292,7 +444,11 @@ agreement fit): `getLatestBlockhash` (fastest-wins), `getFeeForMessage`,
 `getSignatureStatuses`, `getBlockProduction` / `getLargestAccounts`
 (volatile), `simulateTransaction`.
 
-### Out of scope (not in `contextSlotMethods`)
+### Out of scope (non-envelope / already special-cased)
+
+Bare results and already-special-cased methods stay on today’s paths (they
+are not the moving-head false-dispute problem, even if some appear elsewhere
+in failsafe config).
 
 - Bare / non-envelope: `getBlocks`, `getSignaturesForAddress`, `getHealth`,
   bare integers (`getSlot`, `getBlockHeight`, …).
@@ -306,6 +462,9 @@ agreement fit): `getLatestBlockhash` (fastest-wins), `getFeeForMessage`,
 
 ## 6. Observability
 
+What to watch so soak can prove slot-grouping fixed false disputes without
+punishing lag.
+
 | Signal | Purpose |
 |---|---|
 | Existing `erpc_consensus_*` with `finality=realtime` | Baseline volume / dispute / low_participants |
@@ -317,7 +476,8 @@ agreement fit): `getLatestBlockhash` (fastest-wins), `getFeeForMessage`,
 
 ## 7. Acceptance criteria
 
-Framed on `getBalance` (same rules for other enveloped moving-head methods):
+Concrete checks, framed on `getBalance` (same rules for other enveloped
+moving-head methods):
 
 1. Two upstreams, same lamports `value`, different `context.slot` → **no**
    dispute; wait / return highest agreed slot per §3.2 — never punish for lag.
@@ -329,12 +489,16 @@ Framed on `getBalance` (same rules for other enveloped moving-head methods):
 4. Mix `minAgreement` enforced on winning **slot** cohort.
 5. Slot-pinned strict path for `getBlock` / `getTransaction` unchanged
    (request-pinned; not slot-grouped moving-head).
-6. Phase 2 (if shipped): a `getBalance` with `commitment: confirmed` is not
-   cached as finalized solely because `context.slot ≤` finalized root.
+6. Phase 2 (if shipped): a `getAccountInfo` with `commitment: confirmed` is
+   not cached as finalized solely because `context.slot ≤` finalized root;
+   a finalized-commitment winner with `context.slot ≤` root may be.
 
 ---
 
 ## 8. Related
+
+Pointers into gaps, plan, and the code that already defines envelopes,
+finality, and consensus.
 
 - Gaps inventory: [svm-consensus-gaps.md](./svm-consensus-gaps.md)
 - Implementation plan: [plan.md](./plan.md)
@@ -342,5 +506,5 @@ Framed on `getBalance` (same rules for other enveloped moving-head methods):
   [`architecture/svm/hooks.go#L654-L672`](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672)
 - Existing SVM finality: `architecture/svm/finality.go`
 - Consensus executor: `consensus/executor.go`, `consensus/analysis.go`
-- Envelope ignore defaults: `common/defaults.go` (`context.slot`,
-  `context.apiVersion`)
+- Envelope ignore defaults: `common/defaults.go` — today strips `context.slot`
+  + `context.apiVersion`; end state strips **only** `context.apiVersion` (§3.0)
