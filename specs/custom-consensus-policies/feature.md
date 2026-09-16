@@ -67,13 +67,15 @@ availability) resolves into one bounded interface — a named
 - No decision cache in v1 — add only if measured eval cost forces it.
 - No silent auto-inherit of unset fields from the inline default onto named
   policies (that would wrongly pull `requiredParticipants` onto `fallback` /
-  `historical`). Explicit `extends` is a post-MVP enhancement (§12).
+  `historical`). Explicit `extends` is a nice-to-have (§12), not part of the
+  core contract.
 - #1069-style bounded-deviation value logic stays executor-side (separate
   change).
 - Empty-response waiver with block proof
   (`waiveAgreementOnEmptyOutsideRetention` + `retentionBlocks` +
-  `blockEvidenceFields`) is **v1.1**, not a v1 MVP milestone — required for
-  null-shaped pruning (e.g. `eth_getTransactionByHash`). See §7.1 / plan Phase 8.
+  `blockEvidenceFields`) is **v1.1**, not in the initial v1 delivery — required
+  for null-shaped pruning (e.g. `eth_getTransactionByHash`). See §7.1 / plan
+  Phase 8.
 
 ---
 
@@ -663,7 +665,7 @@ labels.
   previous program and log the error.
 - **Dry-run / validation:** `erpc config validate` (or a dedicated CLI) smoke-
   compiles `evalFunction` and runs it against synthetic contexts before
-  deploy. Post-MVP: dump resolved policies after `extends` (§12).
+  deploy. Optional later: dump resolved policies after `extends` (§12).
 
 ---
 
@@ -688,14 +690,15 @@ labels.
 
 ---
 
-## 12. Enhancements (post-MVP)
+## 12. Nice-to-haves / follow-ons
 
-Not required to ship the core contract. Strongest DX follow-ons from operating
+Not part of the core contract. Useful DX improvements from operating
 multi-grade maps:
 
-### 12.1 One-level `extends` (high value)
+### 12.1 One-level `extends` (nice-to-have)
 
-Named policies today are complete configs — operators copy `ignoreFields`,
+**Policy inheritance is nice-to-have**, not required for correctness. Without
+it, named policies are complete configs — operators copy `ignoreFields`,
 `disputeBehavior`, `punishMisbehavior`, wait caps, `prefer*` across grades.
 Sparse `fallback` also silently diverges onto **stock** `SetDefaults()` hygiene.
 
@@ -733,12 +736,12 @@ consensus:
 Out of scope for this enhancement: multi-hop mixin graphs, YAML anchors as the
 product answer, deep merge of nested maps beyond shallow overlay.
 
-### 12.2 Eval `return "default"` (high value, small)
+### 12.2 Eval `return "default"` (small resolve rule)
 
 Treat string `"default"` like `null` — intentional inline select; metric/header
 `default`; **not** `unknown_name`. Keeps eval vocabulary uniform
 (`"default"` | `"fallback"` | `"historical"` | …). Spec §3 already requires this;
-call it out as a deliberate resolve-policy rule so it is not deferred.
+keep it explicit in resolve-policy so it is not dropped.
 
 ### 12.3 Resolved-policy dump (medium)
 
@@ -751,7 +754,7 @@ punish. Without this, sparse overlays stay opaque.
 Dry-run “this synthetic request → which policy name” for CI / config review,
 without running a consensus round.
 
-### 12.5 Explicitly not enhancements
+### 12.5 Explicitly out of scope here
 
 - Multi-hop / mixin `extends` graphs
 - Silent inherit from inline without `extends`

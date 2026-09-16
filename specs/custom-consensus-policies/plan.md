@@ -35,7 +35,7 @@ PreferNonEmpty count gate, config repetition → § enhancements).
 | Sitout state | Moved to `health.Tracker` (per-class cordon flags + rate limiter) so selector reads it without importing `consensus/`; exporter stays per-policy |
 | Header + metric | Reimplemented here (`X-ERPC-Consensus-Policy`, `consensus_policy` label); not dependent on #1041 |
 | Default policy | Must be the strictest; fail-closed target = inline `consensus:` block |
-| Policy inheritance | **Not in MVP** — post-MVP one-level `extends` (feature.md §12) |
+| Policy inheritance | **Nice-to-have** — optional one-level `extends` (feature.md §12); not required for correctness |
 
 ---
 
@@ -196,19 +196,21 @@ seal; hedge keep; PreferNonEmpty ties.
 
 ---
 
-## Phase 9 — Enhancements (post-MVP DX)
+## Phase 9 — Nice-to-haves (optional DX)
 
-See feature.md §12. Optional after the core contract lands:
+See feature.md §12. Optional after the core contract lands — **not** required
+for correctness. Policy inheritance (`extends`) is explicitly a nice-to-have.
 
-1. **One-level `extends`** — `extends: default` (inline) or `extends: <named>`;
-   shallow overlay; `requiredParticipants: []` clears quotas; then
-   `SetDefaults`; no silent inherit without `extends`.
+1. **One-level `extends`** (nice-to-have) — `extends: default` (inline) or
+   `extends: <named>`; shallow overlay; `requiredParticipants: []` clears
+   quotas; then `SetDefaults`; no silent inherit without `extends`.
 2. Confirm **`return "default"`** resolve rule if not already in Phase 5.
 3. **Resolved-policy dump** on `erpc config validate`.
 4. Optional: selector simulate (synthetic request → policy name).
 
-**Acceptance**: multi-grade map shares hygiene via `extends: default`; sparse
-`fallback` keeps ignoreFields/punish from base; dump shows resolved config.
+**Acceptance** (if built): multi-grade map shares hygiene via `extends: default`;
+sparse `fallback` keeps ignoreFields/punish from base; dump shows resolved
+config.
 
 ---
 
