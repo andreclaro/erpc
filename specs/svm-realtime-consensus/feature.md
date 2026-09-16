@@ -267,10 +267,6 @@ inter-provider lag.
 
 ## 4. Paired finality (optional follow-on)
 
-§3 consensus is correct without this. Slot-aware cache and neverCache open
-topics live in [svm-cache-gaps.md](./svm-cache-gaps.md) — do not define
-pairing as “make it cacheable.”
-
 **Today:** every moving-head enveloped read is `realtime` for `GetFinality`
 (including `commitment: finalized`), because the request names no slot.
 
