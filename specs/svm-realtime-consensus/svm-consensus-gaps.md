@@ -15,10 +15,10 @@ Source gaps this feature is meant to close (or defer to §4.1 / §4.2).
 
 | Gap | Kind | Notes |
 |---|---|---|
-| Naive hash consensus ignores `context.slot`, collapsing adjacent tips; count-winner prefers stale majorities | **Source** | Fix: end-state `ignoreFields` (slot in digest) + highest qualifying slot ([feature.md](./feature.md) §3) |
+| Naive hash consensus ignores `context.slot`, collapsing adjacent tips; stale vs fresh majorities mishandled | **Source** | Fix: end-state `ignoreFields` + **count-first / slot-tiebreak** ([feature.md](./feature.md) §3) |
 | Default `ignoreFields` still strips `context.slot` for enveloped methods | **Source** | End state: ignore only `context.apiVersion` (`common/defaults.go`; feature.md §3.0) |
 | Moving-head enveloped reads always `realtime` even when `context.slot ≤` served tip under finalized commitment | **Source** | §4.1 paired finality ([feature.md](./feature.md) §4.1) |
-| Cache keys use `minContextSlot` or `*` — no served-tip slot dimension | **Source** | §4.2 slot-aware cache ([feature.md](./feature.md) §4.2), separate from §4.1 |
+| Cache keys use `minContextSlot` or `*` — no served-tip slot dimension | **Source** | §4.2 **deferred** ([feature.md](./feature.md) §4.2) |
 
 ---
 

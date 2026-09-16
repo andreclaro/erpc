@@ -17,16 +17,19 @@ evidence forces a reopen.
 | Decision | Choice |
 |----------|--------|
 | Pin location | Response `context.slot` (not request rewrite) |
-| Agreement / hashing | Full result minus per-method `ignoreFields` (unchanged mechanism). End-state SVM envelope defaults: ignore only `context.apiVersion` (drop `context.slot` from the default list) |
-| Winner among groups | When responses carry `context.slot`, highest slot among groups that meet `agreementThreshold` (not largest count) |
-| Wait default | Wait up to `maxWaitOnResult` for a higher qualifying slot; then best agreed (`0` = no time cap / full collection) |
+| Agreement / hashing | Full result minus per-method `ignoreFields`. End-state SVM envelope defaults: ignore only `context.apiVersion` |
+| Winner among groups | **Count-first:** max count among groups ≥ `agreementThreshold`; among that set, highest `context.slot` if present. Slot never outranks a larger group |
+| Mixed slotted / non-slotted | Prefer slotted qualifying groups; non-slotted only if none slotted qualifies |
+| Wait / short-circuit | Wait/short-circuit only while remaining participants can still form equal top count at a higher slot (count remaining only) |
 | Cross-slot lag | Not misbehavior |
-| Same-slot value split | Real dispute / misbehavior (existing majority rules within cohort) |
+| Same-slot value split | Real dispute / misbehavior (winning slot cohort) |
 | Activation | Auto when ≥1 success has parseable `context.slot` under active consensus |
-| Paired finality (§4.1) | Optional; `context.slot ≤` served finalized tip + effective commitment `finalized` → `DataFinalityStateFinalized` |
-| Slot-aware cache (§4.2) | Optional, separate; key slot from served tip / response slot; respects `neverCacheMethods` |
+| Rollout | Binary/network canary; no flag to restore ignoring `context.slot`; rollback = redeploy |
+| Paired finality (§4.1) | Optional with/after §3; tip = `SvmHighestFinalizedSlot` (`PickServedTip`) |
+| Slot-aware cache (§4.2) | **Deferred** until §3 soak + neverCache open topic |
+| Financial threshold | No code default change; docs may recommend raising `agreementThreshold` |
 | Nested preferHighestValueFor / SVM leader / bare-0 emptyish | Out of scope (gaps doc) |
-| Operator failsafe / helm wiring | Out of scope — this plan is source behavior once consensus already matches |
+| Operator failsafe / helm wiring | Out of scope |
 
 ---
 
@@ -43,37 +46,38 @@ Write and land the behavior contract before code.
 
 ---
 
-## Phase 1 — Moving-head consensus defaults + winner policy
+## Phase 1 — Moving-head consensus defaults + count-first winner
 
-Narrow enveloped SVM `ignoreFields` defaults and prefer highest
-`context.slot` among qualifying hash groups; keep EVM and non-envelope paths
-untouched.
+Narrow enveloped SVM `ignoreFields` defaults and apply **count-first /
+slot-tiebreak** winner selection; keep EVM and non-envelope paths untouched.
 
 1. **Defaults**: in `common/defaults.go`, change enveloped-method
    `ignoreFields` from `["context.slot","context.apiVersion"]` to
    `["context.apiVersion"]` only (see feature.md §3.0). Update
    `defaults_test.go` and consensus docs. Hashing stays
-   `CanonicalHashWithIgnoredFields` (full result minus that method’s
-   `ignoreFields`); do not add a parallel hash path.
-2. **Winner selection**: among hash groups with `count ≥ agreementThreshold`
-   that expose `context.slot`, pick the group with the **highest slot**
-   (not largest count).
-3. **Misbehavior**: only compare dissenters inside the winning slot cohort;
-   cross-slot participants are not misbehaving.
-4. **Composition**: `minAgreement` counts tags only among agreeing members of
-   the winning slot cohort.
-5. **Wait caps**: `maxWaitOnResult: 0` = no time cap (full collection);
-   bounded waits tune p99. Do not short-circuit a lone tip-slot vote while a
-   higher slot can still qualify.
-6. **Tests** (fallthrough first):
-   - No `context.slot` → legacy hash / count-winner path unchanged.
-   - Same value, different slots → separate buckets under end-state defaults;
-     highest agreed wins after wait.
+   `CanonicalHashWithIgnoredFields`; do not add a parallel hash path.
+2. **Winner selection** (feature.md §3.1): among groups ≥
+   `agreementThreshold`, take max count; among that set, highest
+   `context.slot` if present. Prefer slotted groups over non-slotted when
+   both qualify.
+3. **Misbehavior**: only same-slot dissenters vs winning cohort; cross-slot
+   is not misbehavior.
+4. **Composition**: `minAgreement` only among agreeing members of the
+   winning slot cohort.
+5. **Wait / short-circuit**: only while remaining participants can still
+   form equal top count at a higher slot (count remaining only; injectable
+   clock in tests).
+6. **Rollout**: canary binary/network; no restore-old-ignore flag; rollback =
+   redeploy.
+7. **Tests**:
+   - No `context.slot` on any success → legacy path.
+   - Equal counts, different slots → highest slot wins.
+   - **3× V@1000 vs 2× V'@1050** → V@1000 wins (count-first security).
    - Same slot, different values → dispute under `returnError`.
-   - Lone tip + agreed older → wait; second tip vote → freshest agreed.
-   - Mix quota: internal+external only count in winning slot cohort.
-   - Misbehavior metric: cross-slot does not increment misbehavior.
-   - Default `ignoreFields` for `getBalance` (etc.) is `["context.apiVersion"]` only.
+   - Mixed slotted + non-slotted qualifying → slotted wins.
+   - Wait/short-circuit with fake clock.
+   - Mix quota on winning slot cohort; cross-slot ≠ misbehavior.
+   - Default `ignoreFields` for `getBalance` is `["context.apiVersion"]` only.
 
 **Acceptance**: `go test ./consensus/...` + `./common/...` green; EVM /
 non-envelope SVM broadcast paths unchanged.
@@ -83,7 +87,7 @@ non-envelope SVM broadcast paths unchanged.
 ## Phase 2 — Paired finality (§4.1)
 
 Classify rooted enveloped successes as `finalized` (see feature.md §4.1).
-May ship after Phase 1 soak **or in the same first release**.
+Optional with/after Phase 1.
 
 1. After a successful enveloped response, if
    `context.slot ≤` `SvmHighestFinalizedSlot` (PickServedTip) **and**
@@ -97,11 +101,11 @@ methods are stored.
 
 ---
 
-## Phase 3 — Slot-aware cache (§4.2)
+## Phase 3 — Slot-aware cache (§4.2) — deferred
 
-Separate from Phase 2. Wire cache keys to served finalized tip / response
-slot so finalized policies can hit without `"*"` tip-agnostic entries (see
-feature.md §4.2).
+**Do not start** until Phase 1 soak is healthy and feature.md §8 neverCache
+topic is settled. Then wire cache keys to served finalized tip / response
+slot (see feature.md §4.2).
 
 1. Get: for finalized-commitment moving-head reads, partition `slotRef` from
    network served finalized tip (not only `minContextSlot` / `*`).
@@ -115,14 +119,13 @@ feature.md §4.2).
 
 ---
 
-## Phase 4 — Docs (ride along with Phase 1–3)
+## Phase 4 — Docs (ride along with Phase 1–2; Phase 3 when un-deferred)
 
-Document shipped behavior in the public consensus failsafe / SVM cache pages.
-
-1. Update `docs/pages/config/failsafe/consensus.mdx` — moving-head consensus,
-   wait-cap note, misbehavior caveat.
+1. Update `docs/pages/config/failsafe/consensus.mdx` — count-first winner,
+   wait/short-circuit, misbehavior, canary rollout note, optional recommended
+   threshold for financial methods.
 2. Update `docs/pages/config/database/svm-json-rpc-cache.mdx` when §4.1/§4.2
-   land — paired finality vs cache keying.
+   land.
 
 **Acceptance**: Agent/docs panels match shipped behavior.
 

@@ -20,9 +20,11 @@ After this feature:
 
 - Financially critical enveloped reads no longer trust a single upstream.
 - Two providers must agree on the **same value at the same `context.slot`**
-  before a result is served under `returnError`
-- Among slots that meet `agreementThreshold`, the **highest agreed slot**
-  (freshest *agreed* tip) wins
+  before a result is served under `returnError` (under end-state defaults,
+  slot is part of the hash digest).
+- Among qualifying groups, **count is primary**; when multiple groups share
+  the top count, the **highest `context.slot`** wins (freshest among equals).
+  A smaller group at a higher slot never beats a larger group at a lower slot.
 - Slot-pinned strict consensus (`getBlock`, `getTransaction`, …) is unchanged.
 
 ### Goals
@@ -37,16 +39,17 @@ cache):
   for enveloped SVM methods drop `context.slot` from the ignore list (keep
   only `context.apiVersion`), so adjacent tips no longer collapse into one
   bucket.
-- Among groups that meet `agreementThreshold`, prefer the **highest
-  `context.slot`** (freshest *agreed* tip) — count-largest alone is wrong.
+- **Count-first winner selection:** among groups with `count ≥
+  agreementThreshold`, take those with the **maximum count**; among that
+  set, if they expose `context.slot`, pick the **highest slot**. Slot never
+  outranks a larger agreeing group (blocks “2 fake tip beats 3 honest”).
 - Prefer waiting long enough for a second provider to catch a tip slot
   (bounded `maxWaitOnResult`, or `0` = wait until all participants /
   short-circuit — not “return on first response”).
 - Misbehavior only for **same-slot value dissent** — cross-slot lag is not
   misbehavior.
-- Optional follow-ons (see §4): **paired finality** (classify rooted
-  enveloped answers as `finalized`) and, separately, **slot-aware cache**
-  keys that can use that classification — not one combined feature.
+- Optional **§4.1 paired finality** with/after §3; **§4.2 slot-aware cache**
+  deferred until soak + neverCache open topic settled.
 
 ### Non-goals
 
@@ -143,9 +146,9 @@ an older slot outvotes a fresher tip, under `returnError` /
 (keep ignoring only `context.apiVersion`). Grouping stays the ordinary
 canonical hash of the whole result after that method’s `ignoreFields` — there
 is no separate hasher. For default `getBalance`, slot stays in the digest.
-That alone is not enough — winner selection must prefer the **highest slot**
-among groups that meet threshold (not largest count), wait for a tip to
-gather a second vote, and treat cross-slot lag as non-misbehavior.
+That alone is not enough — winner selection must be **count-first** (highest
+slot only among equal top counts), wait when a higher equal-count tip can
+still form, and treat cross-slot lag as non-misbehavior.
 
 Cross-slot lag is expected SVM behavior, not misbehavior. Same-slot
 **`value`** split (two balances at slot 1000) is a real dispute.
@@ -161,8 +164,8 @@ EVM can rewrite a block tag on the request; Solana moving-head reads cannot.
 | Self-pin | Block number in request | **`result.context.slot` in the response** |
 
 Response-side fix: drop `context.slot` from default `ignoreFields` (hash =
-full result minus per-method ignores), then among groups ≥
-`agreementThreshold` pick the **highest `context.slot`**.
+full result minus per-method ignores), then **count-first** among groups ≥
+`agreementThreshold`, with highest `context.slot` only among equal top counts.
 
 ---
 
@@ -201,8 +204,9 @@ For default `getBalance`, the digest therefore includes `context.slot` and
 `value`, but not `apiVersion`. Other methods keep whatever ignore list they
 are configured with (EVM timestamp ignores, custom operator maps, etc.).
 
-This defaults change alone is insufficient (see §3.1–3.6): count-based winner
-selection would still prefer a large stale slot over a smaller fresher one.
+This defaults change alone is insufficient (see §3.1–3.6): without a
+count-first + slot-tiebreak rule, a stale majority and a fresher minority
+(or a fabricated high slot) are mishandled.
 
 ### 3.1 Algorithm
 
@@ -213,10 +217,19 @@ How one consensus round decides a winner for an enveloped read such as
 2. Hash each successful response with that method’s `ignoreFields` (end-state
    default for enveloped SVM: ignore only `context.apiVersion`).
 3. A hash group **qualifies** when `count ≥ agreementThreshold`.
-4. Among qualifying groups that expose a parseable `context.slot`, pick the
-   one with the **highest `context.slot`**; that group is the consensus
-   winner (freshest *agreed* tip). Groups without a slot keep today’s
-   count-based behavior.
+4. **Winner (count-first, slot-tiebreak):**
+   - Let `C` = maximum `count` among qualifying groups.
+   - Let `S` = qualifying groups with `count == C` that expose a parseable
+     `context.slot`.
+   - If `S` is non-empty → winner = member of `S` with the **highest**
+     `context.slot` (freshest among equal top counts).
+   - Else → today’s count-based winner among all qualifying groups (no slot
+     ranking).
+   - **Mixed slotted / non-slotted:** if any qualifying group has a
+     parseable slot, only slotted groups compete for the slot-tiebreak path
+     above; a non-slotted group never wins while a slotted group also
+     qualifies (even with equal count). Non-slotted winners only when **no**
+     slotted group qualifies.
 5. Same slot + different values at/above threshold with no unique winner →
    real dispute → `disputeBehavior` (production: `returnError`).
 6. Different slots alone are **not** a dispute; keep collecting until
@@ -225,28 +238,35 @@ How one consensus round decides a winner for an enveloped read such as
    `returnError` under production policy (or low-participants if
    `validParticipants < agreementThreshold`).
 
-Example round for one `getBalance` (lamports @ slot):
+**Security note:** a minority at a fabricated high slot **cannot** beat a
+larger honest group at a lower slot. Example: 3× `V@1000` and 2× `V'@1050`
+(both ≥ threshold) → winner is `V@1000` (count 3 > 2). Slot only breaks ties
+when counts are equal (e.g. 2× `V@1000` vs 2× `V@1002` → `V@1002`).
+
+Example round for one `getBalance` (lamports @ slot), equal counts:
 
 ```
 t=0:  QN=12345@1000, Alchemy=12350@1002, Helius=12345@1000
-      → agreed 12345@1000 (2); pending 12350@1002 (1)
+      → 12345@1000 (2) qualifies; 12350@1002 (1) does not
 t=+Δ: Helius → 12350@1002
-      → agreed 12350@1002 (2) → return freshest agreed tip
+      → both groups count=2 → pick highest slot → 12350@1002
 ```
 
 ### 3.2 Wait semantics
 
-A lower agreed slot may already qualify while a fresher tip still has only
-one vote — wait (within the cap) before locking in the older answer.
+When a top-count group already qualifies, a higher slot may still reach the
+**same** count with remaining participants — wait (within the cap) before
+locking the lower slot among equal counts.
 
-Default: **wait** up to `maxWaitOnResult` for a *higher* qualifying slot before
-returning a lower agreed slot. Only when the wait cap fires (or all
-participants have answered) return the highest *already-qualified* slot.
+Default: **wait** up to `maxWaitOnResult` while remaining participants could
+still form another qualifying group with `count == C` (current max qualifying
+count) at a **higher** `context.slot`. When the wait cap fires (or all
+participants have answered), apply §3.1 on what is collected.
 
-Rationale: returning the older agreed slot immediately maximizes false
-“freshness” regressions for financial callers; waiting bounds p99 to the
-configured cap (~inter-provider root lag; often ~1–2 slots ≈ 0.3–0.6s at
-today’s ~300ms slot time — tune from soak, not a hardcoded 400ms constant).
+Rationale: among equal counts, prefer the fresher tip when the wait budget
+allows; waiting bounds p99 (~inter-provider root lag; often ~1–2 slots ≈
+0.3–0.6s at today’s ~300ms slot time — tune from soak). Do **not** wait to
+let a *smaller* group at a higher slot overturn a larger older majority.
 
 `maxWaitOnResult: 0` / `maxWaitOnEmpty: 0` means **no time cap** (collect
 until all participants answer or short-circuit). That is valid — often more
@@ -274,10 +294,13 @@ carry that envelope is `contextSlotMethods` in
 outside the table never produce a slot and stay on today’s path.
 
 No config knob whose “off” setting re-enables never-right naive hashing for
-enveloped responses under `returnError`.
+enveloped responses under `returnError`. Roll out with a **binary / network
+canary**; rollback is redeploy of the previous binary (not a “restore ignore
+`context.slot`” flag).
 
 **Key rule under `agreementThreshold ≥ 2`:** a tip slot with one vote does not
-qualify; “most updated” alone is still single-provider trust.
+qualify; “most updated” alone is still single-provider trust. Operators may
+raise the threshold further for financial methods — see §8.
 
 ### 3.4 Misbehavior
 
@@ -310,22 +333,25 @@ path).
 
 ### 3.6 Short-circuit
 
-Early exit must not crown a lone tip or skip a higher slot that can still
-qualify within the wait budget.
+Early exit must not crown a lone tip or skip a higher **equal-count** tip
+that remaining participants can still form.
 
-- Do **not** short-circuit to a lone tip-slot response.
-- Unassailable lead / error-threshold short-circuits apply **within** a slot
-  partition only when no higher slot can still qualify given remaining
-  participants and wait budget (conservative: prefer waiting while
-  `maxWaitOnResult` can still arm a higher slot).
+Concrete rule: do **not** short-circuit while `R` remaining participant
+responses could still raise some hash group’s count to the current top
+qualifying count `C` at a **higher** `context.slot` than the provisional
+winner (or could create a new top count). Only participant **count** enters
+the predicate — not observed inter-provider lag.
+
+- Do **not** short-circuit to a lone tip-slot response (`count < agreementThreshold`).
+- Existing unassailable-lead / error-threshold short-circuits otherwise apply
+  when the rule above says no higher equal-count tip can still form.
 
 ---
 
 ## 4. Follow-ons — paired finality vs cache
 
 These are **two separate layers**. §3 consensus is correct without either.
-Either may ship with the first release or later; splitting them is for clear
-ownership, not because the protocol forbids combining them.
+Splitting them is for clear ownership.
 
 | Layer | Decides | Consumers |
 |---|---|---|
@@ -334,6 +360,9 @@ ownership, not because the protocol forbids combining them.
 
 Caching is an *effect* of finality + policy (+ optional key shape). Do not
 define pairing as “make it cacheable.”
+
+**Gating:** §4.1 may ship with or after §3. **§4.2 is deferred** until §3
+soak looks healthy and the neverCache open topic (§8) is settled.
 
 ### 4.1 Paired finality
 
@@ -401,8 +430,9 @@ finalized for non-cache consumers.
 
 ### Ship order
 
-Prefer §3 first. §4.1 before or with §4.2 (cache without paired finality
-cannot safely treat moving-head as immutable). §4.2 may lag §4.1.
+Prefer §3 first (canary binary/network). §4.1 optional with/after §3. §4.2
+only after soak + §8 neverCache decision. Prefer §4.1 before §4.2 (cache
+without paired finality cannot safely treat moving-head as immutable).
 
 ---
 
@@ -485,22 +515,26 @@ punishing lag.
 Concrete checks, framed on `getBalance` (same rules for other enveloped
 moving-head methods):
 
-1. Two upstreams, same lamports `value`, different `context.slot` → **no**
-   dispute; wait / return highest agreed slot per §3.2 — never punish for lag.
+1. Two upstreams, same lamports `value`, different `context.slot`, equal
+   counts at threshold → **no** dispute; highest slot wins among equal
+   counts (§3.1) — never punish for lag.
 2. Two upstreams, same `context.slot`, different `value`, threshold unmet /
    tied → dispute under `returnError`.
-3. Tip slot with 1 vote + older slot with 2 agreeing votes → wait; if tip
-   gets a second agreeing vote before cap → return tip; else return older
-   agreed.
-4. Mix `minAgreement` enforced on winning **slot** cohort.
-5. Slot-pinned strict path for `getBlock` / `getTransaction` unchanged
-   (request-pinned; not slot-grouped moving-head).
-6. §4.1 (if shipped): `commitment: confirmed` enveloped success is **not**
+3. **Count-first security:** 3× `V@1000` and 2× `V'@1050` (both ≥ threshold)
+   → winner `V@1000` (larger count); fabricated higher slot does not win.
+4. Tip with count below the current top count does not overturn; wait only
+   while remaining participants can still form an **equal** top count at a
+   higher slot (§3.2 / §3.6).
+5. Mixed slotted + non-slotted qualifying groups → slotted path wins; non-
+   slotted only if no slotted group qualifies.
+6. Mix `minAgreement` enforced on winning **slot** cohort.
+7. Slot-pinned strict path for `getBlock` / `getTransaction` unchanged
+   (request-pinned; not moving-head).
+8. §4.1 (if shipped): `commitment: confirmed` enveloped success is **not**
    classified `finalized` solely because `context.slot ≤` tip; finalized
-   commitment + slot ≤ tip may be.
-7. §4.2 (if shipped): cache Get for unpinned `getAccountInfo` uses served
-   finalized tip as slot key (not `"*"` alone); tip advance → miss; confirmed
-   path does not gain permanent finalized cache via §4.1.
+   commitment + slot ≤ `SvmHighestFinalizedSlot` may be.
+9. §4.2 (when un-deferred): cache Get for unpinned `getAccountInfo` uses
+   served finalized tip as slot key; tip advance → miss.
 
 ---
 
@@ -518,7 +552,12 @@ Decisions not forced by the false-dispute bug; settle before or during
      never stored)?
    - Put account reads on never-cache too?
    - Allow balances out of never-cache under slot-keyed finalized Get/Set?
-   Not blocking §3 or §4.1; blocks a coherent §4.2 story if left implicit.
+   Not blocking §3 or §4.1; **blocks un-deferring §4.2**.
+
+2. **Recommended `agreementThreshold` for financial methods (docs only).**
+   No product-default change in this feature. Document that operators may
+   raise threshold above 2 for `getBalance` / `getAccountInfo` when the
+   upstream set is large enough — out of band from this code change.
 
 ---
 
