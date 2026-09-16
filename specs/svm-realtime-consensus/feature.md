@@ -388,7 +388,8 @@ account data `V` with `context.slot: 1000`. Poller’s finalized tip is `1005`.
   says otherwise.
 
 Same promotion applies to other cacheable envelopes (e.g.
-`getMultipleAccounts`) once soak expands.
+`getMultipleAccounts`) once soak expands. Whether this asymmetry with
+`getBalance` should stand is an [open topic](#8-open-topics).
 
 ### Must not
 
@@ -503,7 +504,28 @@ moving-head methods):
 
 ---
 
-## 8. Related
+## 8. Open topics
+
+Decisions not forced by the false-dispute bug; settle before or during
+implementation / Phase 2.
+
+1. **`getBalance` vs `getAccountInfo` cacheability.** Today both are
+   moving-head / `realtime` for finality, but `getBalance` (and
+   `getTokenAccountBalance`) are in `neverCacheMethods` (hard Get/Set skip
+   for financial callers), while `getAccountInfo` is not and can match a
+   realtime TTL — so Phase 2 examples use `getAccountInfo`. Open:
+   - Should `getAccountInfo` stay cacheable (status quo)?
+   - Or should direct account reads join the never-cache list for the same
+     “must not serve stale state” reason as balances?
+   - Or, under Phase 2 slot-keyed finalized cache, should `getBalance` be
+     allowed to leave `neverCacheMethods` when `commitment: finalized` and
+     `context.slot ≤` root?
+   Not blocking §3 consensus; blocks a coherent Phase 2 story if left
+   implicit.
+
+---
+
+## 9. Related
 
 Pointers into gaps, plan, and the code that already defines envelopes,
 finality, and consensus.
