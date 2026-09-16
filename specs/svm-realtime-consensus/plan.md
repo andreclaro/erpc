@@ -39,8 +39,10 @@ independently; slot-grouped voting is the headline correctness piece.
 ## Phase 1 — Slot-grouped voting in `consensus/`
 
 1. **Extract slot** from successful responses (`PeekStringByPath` /
-   `context.slot`) during analysis — do not require a method allowlist in the
-   hot path.
+   `context.slot`) during analysis — discover from the body. The known
+   envelope inventory is `contextSlotMethods`
+   ([`hooks.go` L654–L672](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672));
+   do not require re-listing those names in the consensus hot path.
 2. **Partition** then hash: group by slot first; within each partition use
    existing value hashing (`ignoreFields` still strips `context.*` from the
    hash). Slot is the partition key only.

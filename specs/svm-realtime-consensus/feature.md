@@ -17,9 +17,9 @@ After this feature:
 
 - Financially critical enveloped reads no longer trust a single upstream.
 - Two providers must agree on the **same value at the same `context.slot`**
-  before a result is served under `returnError` / mix-quorum policies.
+  before a result is served under `returnError`
 - Among slots that meet `agreementThreshold`, the **highest agreed slot**
-  (freshest *agreed* tip) wins — a lone tip provider never wins alone.
+  (freshest *agreed* tip) wins
 - Slot-pinned strict consensus (`getBlock`, `getTransaction`, …) is unchanged.
 
 ### Goals
@@ -128,9 +128,6 @@ t=+Δ: Helius → 105@1002
       → agreed 105@1002 (2) → return freshest agreed tip
 ```
 
-**Key rule:** a tip slot with one vote never wins. “Most updated” alone is
-still single-provider trust.
-
 ### 3.2 Wait semantics (locked)
 
 Default: **wait** up to `maxWaitOnResult` for a *higher* qualifying slot before
@@ -152,11 +149,19 @@ Enter slot-grouped mode when **all** of:
 - At least one collected successful response has a parseable `context.slot`.
 
 Fallthrough (no parseable `context.slot` on any success): existing hash
-consensus unchanged. Discovery via response shape — not a hard-coded method
-enum in the hot path (method lists remain a helm concern).
+consensus unchanged. The hot path discovers the slot from the response body
+(not a method-name switch). The known inventory of methods whose result *can*
+carry that envelope is `contextSlotMethods` in
+[`architecture/svm/hooks.go`](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672)
+(Solana `RpcResponse<T>` = `{context:{slot,…}, value:…}`). Failsafe
+`matchMethod` lists which of those operators enable under consensus; methods
+outside the table never produce a slot and stay on today’s path.
 
 No config knob whose “off” setting re-enables never-right naive hashing for
 enveloped responses under `returnError`.
+
+**Key rule under `agreementThreshold ≥ 2`:** a tip slot with one vote does not
+qualify; “most updated” alone is still single-provider trust.
 
 ### 3.4 Misbehavior (locked)
 
@@ -246,21 +251,49 @@ After eRPC code lands:
 
 ## 6. In scope / out of scope
 
-### In scope (context-enveloped)
+### Envelope inventory (`contextSlotMethods`)
 
-Priority: `getAccountInfo`, `getBalance`,
-`getTokenAccountBalance`, `getMultipleAccounts`.
+Canonical list of methods whose result shape *can* carry `context.slot`
+([`hooks.go` L654–L672](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672)):
 
-Any method whose successful result carries parseable `context.slot` may
-participate once a failsafe rule matches it.
+`getAccountInfo`, `getBalance`, `getBlockProduction`, `getFeeForMessage`,
+`getLargestAccounts`, `getLatestBlockhash`, `getMultipleAccounts`,
+`getProgramAccounts` (envelope only with `withContext:true`),
+`getSignatureStatuses`, `getStakeMinimumDelegation`, `getSupply`,
+`getTokenAccountBalance`, `getTokenAccountsByDelegate`,
+`getTokenAccountsByOwner`, `getTokenLargestAccounts`, `getTokenSupply`,
+`isBlockhashValid`, `simulateTransaction`.
 
-### Out of scope
+Same set is mirrored in consensus `ignoreFields` defaults
+(`common/defaults.go`: strip `context.slot` / `context.apiVersion` from the
+value hash). Slot-grouping uses the slot as a **partition key** only; the
+hash remains value-only.
+
+### Enable under slot-grouped consensus (failsafe)
+
+**Priority soak:** `getAccountInfo`, `getBalance`, `getTokenAccountBalance`,
+`getMultipleAccounts`.
+
+**Also suitable** (same moving-head class): token/program account reads
+(`getTokenAccountsByOwner` / `ByDelegate`, `getTokenLargestAccounts`,
+`getProgramAccounts` with context), `getSupply` / `getTokenSupply`,
+`getStakeMinimumDelegation`, `isBlockhashValid`, etc. — enable via
+`matchMethod` once soak looks healthy.
+
+**Usually keep off this rule** (already have tip / other policies, or poor
+agreement fit): `getLatestBlockhash` (fastest-wins), `getFeeForMessage`,
+`getSignatureStatuses`, `getBlockProduction` / `getLargestAccounts`
+(volatile), `simulateTransaction`.
+
+### Out of scope (not in `contextSlotMethods`)
 
 - Bare / non-envelope: `getBlocks`, `getSignaturesForAddress`, `getHealth`,
-  bare integers without envelope.
-- Already handled: `getSlot` / `getBlockHeight` (freshest-wins),
-  `getLatestBlockhash` (fastest-wins), `sendTransaction` (broadcast),
-  slot-pinned strict (`getBlock`, `getTransaction`, `getBlockTime`, …).
+  bare integers (`getSlot`, `getBlockHeight`, …).
+- Already handled elsewhere: `getSlot` / `getBlockHeight` (freshest-wins),
+  `getLatestBlockhash` (fastest-wins — even though it *is* enveloped, tip
+  policy stays), `sendTransaction` (broadcast),
+  slot-pinned strict (`getBlock`, `getTransaction`, `getBlockTime`, …) —
+  request-pinned; **not** the moving-head issue.
 
 ---
 
@@ -296,6 +329,8 @@ participate once a failsafe rule matches it.
 
 - Gaps inventory: [svm-consensus-gaps.md](./svm-consensus-gaps.md)
 - Implementation plan: [plan.md](./plan.md)
+- Envelope method inventory (`contextSlotMethods`):
+  [`architecture/svm/hooks.go#L654-L672`](https://github.com/erpc/erpc/blob/e8a375a1d5b740fe13c1d50a9f3b06758fa7c933/architecture/svm/hooks.go#L654-L672)
 - Existing SVM finality: `architecture/svm/finality.go`
 - Consensus executor: `consensus/executor.go`, `consensus/analysis.go`
 - Envelope ignore defaults: `common/defaults.go` (`context.slot`,
