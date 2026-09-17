@@ -878,6 +878,112 @@ func (n *Network) tryShortCircuitFutureBlock(ctx context.Context, req *common.No
 	return resp, true
 }
 
+// requiredGroups returns the configured served-tip required group selectors for
+// this network, or nil when group-aware mode is disabled. Only the network-wide
+// lane (no request selector) uses this; selector-scoped requests keep their
+// existing scoped-majority behavior.
+func (n *Network) requiredGroups() []string {
+	if n.cfg == nil || n.cfg.Evm == nil || n.cfg.Evm.ServedTip == nil {
+		return nil
+	}
+	return n.cfg.Evm.ServedTip.RequiredGroups
+}
+
+// pickGroupAwareServedTip computes the served tip when requiredGroups is
+// configured. For each group selector it runs the normal strict-majority ballot
+// over the upstreams matching that selector, then returns the minimum group tip
+// and a synthetic regression-guard reference whose Corroborated and Max values
+// are the minima of the per-group references.
+//
+// The global pick's Freshest/Inputs/Sorted are taken from the whole-pool ballot
+// so the lag gauge and trajectory inputs remain meaningful. Per-group tips are
+// emitted as gauges so the bottleneck group is visible.
+func (n *Network) pickGroupAwareServedTip(
+	ups []common.Upstream,
+	useFinalized bool,
+	groups []string,
+	axis string,
+) (evm.ServedTipPick, servedTipReference) {
+	return n.computeGroupAwareServedTip(ups, useFinalized, groups, axis, true)
+}
+
+// computeGroupAwareServedTip is the shared core of the group-aware pick. The
+// emitMetrics flag controls whether per-group gauges are published; the network-
+// wide tip path emits them, the guaranteed-method floor path does not (it would
+// overwrite the group-wide series with method-supporter-only values).
+func (n *Network) computeGroupAwareServedTip(
+	ups []common.Upstream,
+	useFinalized bool,
+	groups []string,
+	axis string,
+	emitMetrics bool,
+) (evm.ServedTipPick, servedTipReference) {
+	globalTips, _ := evmTipBallot(ups, useFinalized)
+	globalPick := evm.PickServedTip(globalTips)
+
+	var minTip int64 = math.MaxInt64
+	var minRef servedTipReference
+	var emptyGroups []string
+
+	for _, sel := range groups {
+		sel = strings.TrimSpace(sel)
+		if sel == "" {
+			continue
+		}
+		filtered := make([]common.Upstream, 0, len(ups))
+		for _, u := range ups {
+			if m, _ := common.UpstreamMatchesSelector(sel, u); m {
+				filtered = append(filtered, u)
+			}
+		}
+		if len(filtered) == 0 {
+			emptyGroups = append(emptyGroups, sel)
+			continue
+		}
+		tips, ref := evmTipBallot(filtered, useFinalized)
+		pick := evm.PickServedTip(tips)
+
+		if pick.Tip > 0 {
+			if pick.Tip < minTip {
+				minTip = pick.Tip
+			}
+			if minRef.Corroborated == 0 || ref.Corroborated < minRef.Corroborated {
+				minRef.Corroborated = ref.Corroborated
+			}
+			if minRef.Max == 0 || ref.Max < minRef.Max {
+				minRef.Max = ref.Max
+			}
+		}
+
+		if emitMetrics && pick.Tip > 0 {
+			telemetry.MetricNetworkServedTipGroupBlockNumber.
+				WithLabelValues(n.projectId, n.Label(), sel, axis).
+				Set(float64(pick.Tip))
+			lag := globalPick.Freshest - pick.Tip
+			if lag < 0 {
+				lag = 0
+			}
+			telemetry.MetricNetworkServedTipGroupLagBlocks.
+				WithLabelValues(n.projectId, n.Label(), sel, axis).
+				Set(float64(lag))
+		}
+	}
+
+	if len(emptyGroups) > 0 {
+		n.logger.Warn().
+			Strs("requiredGroups", emptyGroups).
+			Str("axis", axis).
+			Msg("served tip requiredGroups selectors matched no upstreams; ignoring them")
+	}
+
+	if minTip != math.MaxInt64 {
+		globalPick.Tip = minTip
+	} else {
+		globalPick.Tip = 0
+	}
+	return globalPick, minRef
+}
+
 // servedTip computes the majority served tip for one axis over the
 // selection-policy-eligible upstreams — the freshest block a strict majority of
 // them already has (see evm.PickServedTip) — lets the trajectory referee prefer
@@ -900,21 +1006,42 @@ func (n *Network) servedTip(
 	anchor *servedTipAnchor,
 	lane string,
 ) int64 {
-	tips, ref := n.gatherEvmTipInputsForMethod(ctx, useFinalized, "*")
-	pick := evm.PickServedTip(tips)
+	ups := n.tipCandidateUpstreams(ctx, "*")
+	var pick evm.ServedTipPick
+	var ref servedTipReference
+	groupAware := false
+	if groups := n.requiredGroups(); len(groups) > 0 && requestSelector(ctx) == "" {
+		// Group-aware mode: the tip must be servable by at least one upstream
+		// from every required group. The referee is disabled because raising the
+		// tip above the slowest group would violate that guarantee.
+		pick, ref = n.pickGroupAwareServedTip(ups, useFinalized, groups, axis)
+		groupAware = true
+	} else {
+		tips, r := evmTipBallot(ups, useFinalized)
+		pick = evm.PickServedTip(tips)
+		ref = r
+	}
 
 	// Trajectory referee: when the live heads split and the majority is the
 	// STALLED group, serve the corroborated group that matches where this
 	// network's head has been going for the last ten minutes. Advisory and
 	// upward-only — it can only replace the majority pick with a higher block
-	// that at least two live upstreams already have.
+	// that at least two live upstreams already have. Disabled in group-aware
+	// mode (see above) so the group guarantee is preserved.
 	majority := pick.Tip
-	decision := n.refereeServedTip(anchor, pick.Sorted, pick.Tip, ref)
-	pick.Tip = decision.Pick
+	var decision evm.TipTrajectoryDecision
+	if groupAware {
+		decision = evm.TipTrajectoryDecision{Pick: majority}
+	} else {
+		decision = n.refereeServedTip(anchor, pick.Sorted, pick.Tip, ref)
+		pick.Tip = decision.Pick
+	}
 
 	// Regression guard: "latest" cannot drop far below the corroborated live
 	// head in one evaluation. Runs BEFORE the guaranteed-method floor, which is
-	// a deliberate operator-configured clamp the guard must not fight.
+	// a deliberate operator-configured clamp the guard must not fight. In
+	// group-aware mode the reference is the min of per-group corroborated heads,
+	// so the deliberate gap between fast and slow groups is not a regression.
 	pick.Tip = n.guardServedTipRegression(axis, lane, anchor, pick.Tip, ref)
 
 	// Capability guarantee (#855): the served tip must never exceed what any
@@ -922,7 +1049,7 @@ func (n *Network) servedTip(
 	// request on such a method (e.g. trace_*) never resolves "latest" to a
 	// block only non-supporting upstreams have.
 	if pick.Tip > 0 {
-		if floor := n.guaranteedMethodFloor(ctx, useFinalized); floor > 0 && floor < pick.Tip {
+		if floor := n.guaranteedMethodFloor(ctx, useFinalized, axis); floor > 0 && floor < pick.Tip {
 			pick.Tip = floor
 		}
 	}
@@ -936,6 +1063,7 @@ func (n *Network) servedTip(
 	if common.IsTracingDetailed {
 		span.SetAttributes(
 			attribute.String("served_tip.axis", axis),
+			attribute.Bool("served_tip.group_aware", groupAware),
 			attribute.Int64("served_tip.tip", pick.Tip),
 			attribute.Int64("served_tip.freshest", pick.Freshest),
 			attribute.Int("served_tip.inputs", pick.Inputs),
@@ -1510,7 +1638,7 @@ func (n *Network) EvmHighestFinalizedBlockNumber(ctx context.Context) int64 {
 // serving that method. Otherwise the method sets no floor for this evaluation
 // and the guard's hold (and its bounded fail-open) governs, exactly as it does
 // when the whole ballot goes cap-only.
-func (n *Network) guaranteedMethodFloor(ctx context.Context, useFinalized bool) int64 {
+func (n *Network) guaranteedMethodFloor(ctx context.Context, useFinalized bool, axis string) int64 {
 	if n.cfg == nil || n.cfg.Evm == nil || n.cfg.Evm.ServedTip == nil {
 		return 0
 	}
@@ -1543,7 +1671,17 @@ func (n *Network) guaranteedMethodFloor(ctx context.Context, useFinalized bool) 
 			// value.
 			continue
 		}
-		if t := evm.PickServedTip(tips).Tip; t > 0 && (floor == 0 || t < floor) {
+
+		var t int64
+		if groups := n.requiredGroups(); len(groups) > 0 {
+			// Method floor must also respect group guarantees, so the floor is
+			// the minimum group-majority tip over the method's supporters.
+			pick, _ := n.computeGroupAwareServedTip(supporting, useFinalized, groups, axis, false)
+			t = pick.Tip
+		} else {
+			t = evm.PickServedTip(tips).Tip
+		}
+		if t > 0 && (floor == 0 || t < floor) {
 			floor = t
 		}
 	}

@@ -141,6 +141,26 @@ var (
 		Help:      "Blocks the majority served tip sits behind the single freshest upstream view at pick time, per network, lane and axis. lane=\"all\" is the network-wide pick; a named lane is a use-upstream group's own pick.",
 	}, []string{"project", "network", "lane", "axis"})
 
+	// MetricNetworkServedTipGroupBlockNumber is the strict-majority tip computed
+	// independently inside one required group. It is emitted only when
+	// networks[].evm.servedTip.requiredGroups is configured, so operators can see
+	// which group is the bottleneck for the global group-aware tip.
+	MetricNetworkServedTipGroupBlockNumber = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "network_served_tip_group_block_number",
+		Help:      "Per-group strict-majority served tip when requiredGroups is configured.",
+	}, []string{"project", "network", "group", "axis"})
+
+	// MetricNetworkServedTipGroupLagBlocks is how far a group's own majority tip
+	// sits behind the global corroborated freshest view at pick time. A
+	// persistently high value for one group identifies the group that is holding
+	// back the network-wide tip.
+	MetricNetworkServedTipGroupLagBlocks = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "erpc",
+		Name:      "network_served_tip_group_lag_blocks",
+		Help:      "Per-group lag behind the global corroborated freshest view when requiredGroups is configured.",
+	}, []string{"project", "network", "group", "axis"})
+
 	// MetricNetworkServedTipAdvanceAgeSeconds is the time since this process
 	// last observed the served-tip VALUE change, exported at pick time. This
 	// is the universal stuck-tip detector: regardless of WHICH mechanism would
