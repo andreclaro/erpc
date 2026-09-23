@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/erpc/erpc/architecture/svm/integrity"
 	"github.com/erpc/erpc/common"
 )
 
@@ -125,6 +126,18 @@ func (h *SvmArchitectureHandler) HandleUpstreamPostForward(ctx context.Context, 
 		// History sweep: a 200 answer that is provably incomplete for what the
 		// caller asked becomes MissingData so the sweep tries the next upstream.
 		return upstreamPostForward_historySweep(ctx, upstream, req, resp)
+	}
+	// Data-integrity checks. Opt-in: the network's integrity config selects the
+	// checks (no config → nothing runs). A violation converts to the
+	// content-validation error so retry/failover route around the upstream.
+	// Internal requests are skipped to avoid recursing into the engine.
+	if err == nil && integrity.HasChecks(strings.ToLower(method)) {
+		dirs := req.Directives()
+		if dirs == nil || !dirs.IsInternal {
+			if validationErr := upstreamPostForward_integrity(ctx, network, upstream, req, resp); validationErr != nil {
+				return resp, validationErr
+			}
+		}
 	}
 	return resp, err
 }
