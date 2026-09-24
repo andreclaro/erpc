@@ -39,6 +39,10 @@ type Decoded struct {
 	slotNum       int64
 	slotNumOK     bool
 
+	// chain is the network's verified-block index (Input.Chain), feeding the
+	// commitment-tier link checks.
+	chain *ChainState
+
 	epochInfoParsed bool
 	epochInfo       *epochInfoResult
 	epochInfoErr    error
@@ -473,6 +477,39 @@ func (d *Decoded) ContextSlot() (int64, bool) {
 	}
 	n, ok := rawJSONInt64(env.Context.Slot)
 	return n, ok
+}
+
+// ---------- chain index feed ----------
+
+// observeBlock records a fully-verified block in the chain index.
+func observeBlock(cs *ChainState, d *Decoded) {
+	b, err := d.Block()
+	if err != nil || b == nil || b.Blockhash == "" || b.ParentSlot == nil {
+		return
+	}
+	self, err := base58Decode(b.Blockhash)
+	if err != nil || len(self) != 32 {
+		return
+	}
+	prev, err := base58Decode(b.PreviousBlockhash)
+	if err != nil || len(prev) != 32 {
+		return
+	}
+	slot, ok := d.RequestedSlot()
+	if !ok || slot < 0 {
+		return
+	}
+	height := int64(-1)
+	if b.BlockHeight != nil {
+		height = *b.BlockHeight
+	}
+	cs.Observe(chainEntry{
+		slot:        slot,
+		blockhash:   toHash32(self),
+		blockHeight: height,
+		parentSlot:  *b.ParentSlot,
+		parentHash:  toHash32(prev),
+	})
 }
 
 // ---------- shared helpers ----------

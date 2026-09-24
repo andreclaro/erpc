@@ -444,3 +444,94 @@ func TestSvmIntegrity_GenesisMismatchFailsOver(t *testing.T) {
 		"the served genesis must be the expected one")
 	assert.True(t, req.IntegrityCaught())
 }
+
+// svmChainBlockResult builds a getBlock result with caller-controlled link
+// fields: blockhash/parent hashes derived from byte seeds (independent local
+// base58, same as the rest of this fixture package).
+func svmChainBlockResult(hashSeed, prevSeed byte, parentSlot, blockHeight int64) string {
+	block := map[string]any{
+		"blockhash":         svmB58Encode(svmFixture32(hashSeed)),
+		"previousBlockhash": svmB58Encode(svmFixture32(prevSeed)),
+		"parentSlot":        parentSlot,
+		"blockHeight":       blockHeight,
+		"blockTime":         1700000000,
+		"transactions":      []any{},
+		"rewards":           []any{},
+	}
+	raw, err := json.Marshal(block)
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}
+
+func svmGetBlockAtRequest(slot int) *common.NormalizedRequest {
+	return common.NewNormalizedRequest([]byte(fmt.Sprintf(
+		`{"jsonrpc":"2.0","id":1,"method":"getBlock","params":[%d, {"encoding":"json","transactionDetails":"full"}]}`, slot)))
+}
+
+// mockSvmGetBlockAt registers a getBlock mock that only matches requests for
+// the given slot, replied with resultBody, for times requests.
+func mockSvmGetBlockAt(host string, slot int, resultBody string, times int) {
+	gock.New("http://" + host).
+		Post("").
+		Times(times).
+		Filter(func(r *http.Request) bool {
+			return r.URL.Host == host &&
+				strings.Contains(util.SafeReadBody(r), `"method":"getBlock"`) &&
+				strings.Contains(util.SafeReadBody(r), fmt.Sprintf(`"params":[%d`, slot))
+		}).
+		Reply(200).
+		BodyString(`{"jsonrpc":"2.0","id":1,"result":` + resultBody + `}`)
+}
+
+// TestSvmIntegrity_ParentLinkFailsOver exercises the verified-block chain
+// index end to end: the first getBlock anchors a finalized parent, the second
+// getBlock returns a child whose previousBlockhash does not match the
+// anchored parent — a finalized-slot contradiction (svm.commit.parentLink)
+// that must reject and fail over to the honest upstream's consistent child.
+func TestSvmIntegrity_ParentLinkFailsOver(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc1.localhost", 1000, 990)
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc2.localhost", 1000, 990)
+
+	// Canonical chain: slot 900 (hash seed 7, height 800) ← slot 901
+	// (hash seed 8, height 801). rpc1 poisons 901's parent link (seed 200).
+	mockSvmGetBlockAt("svm-integ-rpc1.localhost", 900, svmChainBlockResult(7, 3, 899, 800), 1)
+	mockSvmGetBlockAt("svm-integ-rpc1.localhost", 901, svmChainBlockResult(8, 200, 900, 801), 1)
+	// rpc2 only gets asked for 901 — request 1 passes on rpc1 and anchors the
+	// shared network index, so no failover occurs on the parent.
+	mockSvmGetBlockAt("svm-integ-rpc2.localhost", 901, svmChainBlockResult(8, 7, 900, 801), 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	net := setupSvmIntegrityNetwork(t, ctx, svmCorroboratedIntegrity(), "mainnet-beta")
+
+	// Request 1: anchor slot 900 on whichever upstream serves it.
+	resp, err := svmProjectForward(ctx, net, svmGetBlockAtRequest(900))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	// Request 2: rpc1 serves a child whose parent link is broken.
+	resp, err = svmProjectForward(ctx, net, svmGetBlockAtRequest(901))
+	require.NoError(t, err, "must fail over to the upstream with the consistent chain")
+	require.NotNil(t, resp)
+	jrr, err := resp.JsonRpcResponse(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, string(jrr.GetResultBytes()), svmB58Encode(svmFixture32(8)),
+		"the served block must be the honest upstream's child")
+	assert.Contains(t, string(jrr.GetResultBytes()), `"blockHeight":801`)
+	// Failover proof: the honest child's previousBlockhash (seed 7) exists
+	// only in rpc2's mock — rpc1's poisoned variant used seed 200.
+	assert.Contains(t, string(jrr.GetResultBytes()), svmB58Encode(svmFixture32(7)),
+		"the served child must be the honest upstream's")
+}
+
+func svmCorroboratedIntegrity() *common.IntegrityConfig {
+	return &common.IntegrityConfig{
+		IntegritySettings: common.IntegritySettings{
+			Level: "corroborated",
+		},
+	}
+}
