@@ -506,12 +506,17 @@ func observeBlock(cs *ChainState, d *Decoded) {
 	if b.BlockHeight != nil {
 		height = *b.BlockHeight
 	}
+	bt := int64(-1)
+	if b.BlockTime != nil {
+		bt = *b.BlockTime
+	}
 	cs.Observe(chainEntry{
 		slot:        slot,
 		blockhash:   toHash32(self),
 		blockHeight: height,
 		parentSlot:  *b.ParentSlot,
 		parentHash:  toHash32(prev),
+		blockTime:   bt,
 	})
 }
 

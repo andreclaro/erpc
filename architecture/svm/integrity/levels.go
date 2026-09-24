@@ -71,8 +71,11 @@ var levelMembership = map[Level][]string{
 		"svm.final.finalizedBound",
 		"svm.final.slotAhead",
 		"svm.final.tipBound",
-		// Phase 2+: svm.commit.chainFollower, svm.commit.slotEpoch,
-		// svm.commit.timeWindow, svm.final.commitmentQuorum,
+		// Phase 2 group E: chain-follower divergence, time window, epoch
+		// self-consistency.
+		"svm.commit.chainFollower",
+		"svm.commit.timeWindow",
+		"svm.commit.slotEpoch",
 		// svm.final.stakeTableJoin, svm.final.rootSlotSanity,
 		// svm.corr.*, svm.cont.*.
 	},
