@@ -192,6 +192,7 @@ func Validate(ctx context.Context, in Input) Result {
 	// the same slot, and the verdict and its metric label must not come from
 	// two separate reads of a moving finalized head.
 	fin := &finalityOnce{}
+	ran := make([]*Check, 0, len(enabled))
 	for _, c := range enabled {
 		cfg := in.Checks.For(c.ID)
 		// Resolve the verdict for this check up front. If it would be ignored
@@ -201,6 +202,7 @@ func Validate(ctx context.Context, in Input) Result {
 			res.Outcomes = append(res.Outcomes, CheckOutcome{c.ID, "off"})
 			continue
 		}
+		ran = append(ran, c)
 
 		v := c.Run(ctx, d, cfg)
 		if v == nil {
@@ -240,11 +242,19 @@ func Validate(ctx context.Context, in Input) Result {
 		res.Outcomes = append(res.Outcomes, CheckOutcome{c.ID, "record_only"})
 		res.Recorded = append(res.Recorded, Recorded{CheckID: c.ID, Reason: v.Reason, Class: c.Class, Finality: fin.label(ctx, in, d), Verdict: "record_only"})
 	}
-	// The block passed every check with no recorded mismatch — anchor it in
-	// the verified chain index so later blocks can link against it. A block
-	// that was served WITH a recorded mismatch never becomes ground truth.
-	if res.Err == nil && len(res.Recorded) == 0 && in.Chain != nil && d.hasBlock() {
-		observeBlock(in.Chain, d)
+	// The response passed every check with no recorded mismatch — NOW it may
+	// become ground truth: checks commit their cross-request state (head
+	// progression, verified-block anchoring). A rejected or merely recorded
+	// response never becomes ground truth for later requests.
+	if res.Err == nil && len(res.Recorded) == 0 {
+		for _, c := range ran {
+			if c.AfterPass != nil {
+				c.AfterPass(ctx, d)
+			}
+		}
+		if in.Chain != nil && d.hasBlock() {
+			observeBlock(in.Chain, d)
+		}
 	}
 	return res
 }
