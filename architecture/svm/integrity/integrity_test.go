@@ -406,6 +406,62 @@ func TestSignatureVerify_NullResultSkips(t *testing.T) {
 	assert.Equal(t, "skip", outcomeOf(res, "svm.auth.signatureVerify"))
 }
 
+func TestSignatureVerify_EmptyInstructionDataPasses(t *testing.T) {
+	// base58 of zero bytes is "" — an empty-string data field is genuinely
+	// empty instruction data (regression: it used to fail decode, silently
+	// skipping every such transaction even though empty data is part of the
+	// signed payload and fully verifiable).
+	keys := makeKeyFixtures(t, 3)
+	recent := make([]byte, 32)
+	recent[0] = 6
+	tx := buildTx(t, false, keys, 2, recent, []tsInstr{{programIDIndex: 1, accounts: []byte{0}, data: []byte{}}}, nil)
+	blockhash := make([]byte, 32)
+	blockhash[0] = 11
+	parent := make([]byte, 32)
+	parent[0] = 10
+	block := map[string]any{
+		"blockhash":         base58Encode(blockhash),
+		"previousBlockhash": base58Encode(parent),
+		"parentSlot":        99,
+		"blockHeight":       98,
+		"blockTime":         1700000000,
+		"transactions":      []any{tx.json},
+	}
+	raw, err := json.Marshal(block)
+	require.NoError(t, err)
+	res := runValidate(t, "getBlock", `[100]`, string(raw), only("svm.auth.signatureVerify", nil))
+	assert.NoError(t, res.Err, "empty instruction data must verify — it is inside the signed payload")
+	assert.Equal(t, "pass", outcomeOf(res, "svm.auth.signatureVerify"))
+}
+
+func TestSignatureVerify_JsonParsedInstructionSkips(t *testing.T) {
+	// encoding:"jsonParsed" replaces raw instructions with a digested
+	// {program, parsed} object — the signed wire bytes are unrecoverable, so
+	// the transaction is unverifiable. Skip, never reject.
+	res := runValidate(t, "getBlock", `[100]`, validBlockFixture(t, func(b map[string]any) {
+		msg := b["transactions"].([]any)[0].(map[string]any)["message"].(map[string]any)
+		msg["instructions"] = []map[string]any{{
+			"program":   "spl-token",
+			"programId": splTokenProgramID,
+			"parsed":    map[string]any{"type": "transfer", "info": map[string]any{}},
+		}}
+	}), only("svm.auth.signatureVerify", nil))
+	assert.NoError(t, res.Err)
+	assert.Equal(t, "skip", outcomeOf(res, "svm.auth.signatureVerify"))
+}
+
+func TestSignatureVerify_MissingInstructionDataSkips(t *testing.T) {
+	// A jsonParsed unknown-program fallback can still carry
+	// programIdIndex/accounts but no data field — still unverifiable, never a
+	// violation (chain-safety: an absent field is never proof of tampering).
+	res := runValidate(t, "getBlock", `[100]`, validBlockFixture(t, func(b map[string]any) {
+		msg := b["transactions"].([]any)[0].(map[string]any)["message"].(map[string]any)
+		msg["instructions"] = []map[string]any{{"programIdIndex": 1, "accounts": []int{0}}}
+	}), only("svm.auth.signatureVerify", nil))
+	assert.NoError(t, res.Err)
+	assert.Equal(t, "skip", outcomeOf(res, "svm.auth.signatureVerify"))
+}
+
 // ---------- tx shape ----------
 
 func TestTxShape_HeaderBounds(t *testing.T) {
@@ -444,6 +500,17 @@ func TestTxShape_HeaderBounds(t *testing.T) {
 	}
 }
 
+func TestTxShape_EmptyInstructionDataPasses(t *testing.T) {
+	// Empty instruction data ("" on the wire) is legal — the shape check must
+	// not trip on it (regression: it used to be a decode failure → skip).
+	res := runValidate(t, "getBlock", `[100]`, validBlockFixture(t, func(b map[string]any) {
+		msg := b["transactions"].([]any)[0].(map[string]any)["message"].(map[string]any)
+		msg["instructions"].([]map[string]any)[0]["data"] = ""
+	}), only("svm.struct.txShape", nil))
+	assert.NoError(t, res.Err)
+	assert.Equal(t, "pass", outcomeOf(res, "svm.struct.txShape"))
+}
+
 // ---------- signature uniqueness ----------
 
 func TestSigUniqueness_DuplicateRejected(t *testing.T) {
@@ -459,6 +526,27 @@ func TestSigUniqueness_DuplicateRejected(t *testing.T) {
 
 func TestSigUniqueness_DistinctPasses(t *testing.T) {
 	res := runValidate(t, "getBlock", `[100]`, validBlockFixture(t, nil), only("svm.struct.sigUniqueness", nil))
+	assert.NoError(t, res.Err)
+	assert.Equal(t, "pass", outcomeOf(res, "svm.struct.sigUniqueness"))
+}
+
+func TestSigUniqueness_SignaturesArrayDuplicatesRejected(t *testing.T) {
+	// transactionDetails:"signatures" serves the signature list top-level
+	// (transactions omitted) — duplicates there are the same replay/synthesis
+	// indicator as inside full tx objects.
+	res := runValidate(t, "getBlock", `[100, {"transactionDetails":"signatures"}]`, validBlockFixture(t, func(b map[string]any) {
+		delete(b, "transactions")
+		b["signatures"] = []string{"sigAlpha", "sigBeta", "sigAlpha"}
+	}), only("svm.struct.sigUniqueness", nil))
+	require.Error(t, res.Err)
+	assert.Equal(t, "svm.struct.sigUniqueness", res.RejectedCheckID)
+}
+
+func TestSigUniqueness_SignaturesArrayDistinctPasses(t *testing.T) {
+	res := runValidate(t, "getBlock", `[100, {"transactionDetails":"signatures"}]`, validBlockFixture(t, func(b map[string]any) {
+		delete(b, "transactions")
+		b["signatures"] = []string{"sigAlpha", "sigBeta"}
+	}), only("svm.struct.sigUniqueness", nil))
 	assert.NoError(t, res.Err)
 	assert.Equal(t, "pass", outcomeOf(res, "svm.struct.sigUniqueness"))
 }
@@ -510,6 +598,44 @@ func TestBlockShape_ValidPasses(t *testing.T) {
 	res := runValidate(t, "getBlock", `[100]`, validBlockFixture(t, nil), only("svm.struct.blockShape", nil))
 	assert.NoError(t, res.Err)
 	assert.Equal(t, "pass", outcomeOf(res, "svm.struct.blockShape"))
+}
+
+func TestBlockShape_SignaturesDetailOmitsTransactions(t *testing.T) {
+	// Agave omits transactions entirely for transactionDetails:"signatures",
+	// substituting the top-level signatures array (regression: a null
+	// transactions field used to be rejected outright in that mode).
+	res := runValidate(t, "getBlock", `[100, {"transactionDetails":"signatures"}]`, validBlockFixture(t, func(b map[string]any) {
+		delete(b, "transactions")
+		b["signatures"] = []string{"sigAlpha", "sigBeta"}
+	}), only("svm.struct.blockShape", nil))
+	assert.NoError(t, res.Err)
+	assert.Equal(t, "pass", outcomeOf(res, "svm.struct.blockShape"))
+}
+
+func TestBlockShape_SignaturesDetailMissingArray(t *testing.T) {
+	// ...but "signatures" mode must still surface the array it substitutes —
+	// its absence means truncation/synthesis, same as null transactions.
+	res := runValidate(t, "getBlock", `[100, {"transactionDetails":"signatures"}]`, validBlockFixture(t, func(b map[string]any) {
+		delete(b, "transactions")
+	}), only("svm.struct.blockShape", nil))
+	require.Error(t, res.Err)
+	assert.Equal(t, "svm.struct.blockShape", res.RejectedCheckID)
+}
+
+func TestBlockShape_NoneDetailOmitsTransactions(t *testing.T) {
+	res := runValidate(t, "getBlock", `[100, {"transactionDetails":"none"}]`, validBlockFixture(t, func(b map[string]any) {
+		delete(b, "transactions")
+	}), only("svm.struct.blockShape", nil))
+	assert.NoError(t, res.Err)
+}
+
+func TestBlockShape_EmptyTransactionsArrayPasses(t *testing.T) {
+	// A skipped-slot placeholder carries an empty tx list — legal under the
+	// default detail level (only ABSENT transactions are suspicious).
+	res := runValidate(t, "getBlock", `[100]`, validBlockFixture(t, func(b map[string]any) {
+		b["transactions"] = []any{}
+	}), only("svm.struct.blockShape", nil))
+	assert.NoError(t, res.Err)
 }
 
 // ---------- genesis hash ----------

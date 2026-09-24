@@ -91,6 +91,18 @@ func TestRequestedSigMatch_RejectsDifferentTx(t *testing.T) {
 	assert.Equal(t, "svm.struct.requestedSigMatch", res.RejectedCheckID)
 }
 
+func TestRequestedSigMatch_LaterServedSignaturePasses(t *testing.T) {
+	// Membership, not index-0: multi-sig transactions are legitimately
+	// queried by any member's signature — signer order is a wallet detail,
+	// not transaction identity (regression: only signatures[0] was compared).
+	req := "5K7R9wBf8h2mX3JvQmPzYcLdNe4fGdKzEtEWsXaF8p3qS1uVbMn6jHkC2oArGiD4tEwFyU7hN"
+	other := "3JkM8pQvR2wXzL9dYnFbThC5sEaGuK7oN4iUfHgD6tAqS1eVrBmWc"
+	res := validateBinding(t, "getTransaction",
+		`["`+req+`"]`, txEnvelopeResultJSON(other, req))
+	assert.NoError(t, res.Err)
+	assert.Equal(t, "pass", outcomeOf(res, "svm.struct.requestedSigMatch"))
+}
+
 func TestRequestedSigMatch_SkipsNullResult(t *testing.T) {
 	res := validateBinding(t, "getTransaction",
 		`["5K7R9wBf8h2mX3JvQmPzYcLdNe4fGdKzEtEWsXaF8p3qS1uVbMn6jHkC2oArGiD4tEwFyU7hN"]`,

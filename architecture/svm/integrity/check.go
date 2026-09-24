@@ -92,6 +92,12 @@ type Check struct {
 	// missing wiring, data not fully modeled) — an absent field is never a
 	// violation.
 	Run func(ctx context.Context, d *Decoded, cfg CheckConfig) *Violation
+	// AfterPass, when non-nil, runs ONLY after the response validated cleanly:
+	// no rejection and no recorded mismatch across every enabled check. It is
+	// the single point where a check may commit cross-request state (head
+	// progression, chain indexes) — committing inside Run would let a rejected
+	// or merely-flagged response become ground truth for later requests.
+	AfterPass func(ctx context.Context, d *Decoded)
 }
 
 // registry maps a lowercased method to the checks that apply to it. Checks

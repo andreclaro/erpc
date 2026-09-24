@@ -33,8 +33,12 @@ func requestedSignatures(d *Decoded) []string {
 }
 
 // svm.struct.requestedSigMatch — getTransaction-family: the served
-// transaction's first signature must be the signature that was requested. A
-// mismatch means the upstream answered a different (cheaper, cached, or
+// transaction must actually be the one the client asked for, so the requested
+// signature must appear among the served transaction's signatures. Index 0
+// is the common case, but signer order is a wallet detail, not tx identity —
+// any served signature matching any requested signature passes (multi-sig
+// wallets legitimately query by any member's signature). A match to none of
+// them means the upstream answered a different (cheaper, cached, or
 // invented) transaction.
 var requestedSigMatch = &Check{
 	ID:      "svm.struct.requestedSigMatch",
@@ -59,13 +63,14 @@ var requestedSigMatch = &Check{
 		if err := json.Unmarshal(t.Transaction, &obj); err != nil || len(obj.Signatures) == 0 {
 			return Skipped
 		}
-		got := obj.Signatures[0]
-		for _, want := range reqSigs {
-			if got == want {
-				return nil
+		for _, got := range obj.Signatures {
+			for _, want := range reqSigs {
+				if got == want {
+					return nil
+				}
 			}
 		}
-		return failf("served transaction signature %s does not match the requested signature %s (answered a different transaction?)", got, reqSigs[0])
+		return failf("served transaction signatures do not include the requested signature %s (answered a different transaction?)", reqSigs[0])
 	},
 }
 
