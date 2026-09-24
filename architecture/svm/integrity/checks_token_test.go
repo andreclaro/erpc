@@ -2,6 +2,7 @@ package integrity
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"testing"
 
@@ -36,6 +37,26 @@ func validTokenAccountBytes(state byte) []byte {
 	}
 	// amount u64 at 64:72 stays 0
 	b[acctStateOff] = state
+	return b
+}
+
+// validTokenAccountBytesWithDelegate builds the REAL base-layout account a
+// wallet holds after approveChecked: delegate set (COption tag 1 at offset
+// 72, delegate pubkey 76..108) and close authority set (tag 1 at offset 129,
+// pubkey 133..165). Offsets are hardcoded against @solana/spl-token
+// AccountLayout on purpose — this fixture is the ground truth the package
+// constants are judged by, so it must not share their arithmetic.
+func validTokenAccountBytesWithDelegate() []byte {
+	b := validTokenAccountBytes(1)
+	binary.LittleEndian.PutUint32(b[72:76], 1) // delegate COption: some
+	for i := 0; i < 32; i++ {
+		b[76+i] = byte(100 + i) // delegate pubkey
+	}
+	// state stays 1 at 108; isNative tag 0 at 109; delegatedAmount 0 at 121
+	binary.LittleEndian.PutUint32(b[129:133], 1) // closeAuthority COption: some
+	for i := 0; i < 32; i++ {
+		b[133+i] = byte(200 - i) // close authority pubkey
+	}
 	return b
 }
 
@@ -212,6 +233,35 @@ func TestTokenAccountShape_RejectsBadDelegateTag(t *testing.T) {
 	res := validateToken(t, "getTokenAccountsByOwner",
 		byOwnerResult(acctEntry(splTokenProgramID, b64(b))), intrinsicTokenSet(t))
 	require.Error(t, res.Err)
+}
+
+func TestTokenAccountShape_RealDelegateAndCloseLayoutPasses(t *testing.T) {
+	// Regression test for the offset bug: a real delegated token account has
+	// non-zero bytes where the OLD wrong offsets (92/144) read COption tags,
+	// so it was deterministically rejected. Must pass now.
+	res := validateToken(t, "getTokenAccountsByOwner",
+		byOwnerResult(acctEntry(splTokenProgramID, b64(validTokenAccountBytesWithDelegate()))),
+		intrinsicTokenSet(t))
+	assert.NoError(t, res.Err)
+	assert.Equal(t, "pass", outcomeOf(res, "svm.struct.tokenAccountShape"))
+}
+
+func TestTokenAccountShape_RejectsBadDelegateTagAtRealOffset(t *testing.T) {
+	b := validTokenAccountBytes(1)
+	binary.LittleEndian.PutUint32(b[72:76], 7) // garbage tag at the REAL delegate offset
+	res := validateToken(t, "getTokenAccountsByOwner",
+		byOwnerResult(acctEntry(splTokenProgramID, b64(b))), intrinsicTokenSet(t))
+	require.Error(t, res.Err, "delegate COption tag 7 at offset 72 must fail")
+	assert.Equal(t, "svm.struct.tokenAccountShape", res.RejectedCheckID)
+}
+
+func TestTokenAccountShape_RejectsBadCloseTagAtRealOffset(t *testing.T) {
+	b := validTokenAccountBytes(1)
+	binary.LittleEndian.PutUint32(b[129:133], 5) // garbage tag at the REAL close-authority offset
+	res := validateToken(t, "getTokenAccountsByOwner",
+		byOwnerResult(acctEntry(splTokenProgramID, b64(b))), intrinsicTokenSet(t))
+	require.Error(t, res.Err, "closeAuthority COption tag 5 at offset 129 must fail")
+	assert.Equal(t, "svm.struct.tokenAccountShape", res.RejectedCheckID)
 }
 
 func TestTokenAccountShape_SkipsParsedEntries(t *testing.T) {

@@ -43,14 +43,23 @@ const (
 	parsedToken2022Prog = "spl-token-2022"
 )
 
-// SPL binary layout offsets (base layouts, cluster-agnostic).
+// SPL binary layout offsets (base layouts, cluster-agnostic), verified
+// against @solana/spl-token AccountLayout:
+//
+//	mint 32 | owner 32 | amount u64 | delegate COption<Pubkey> 36 (u32 tag
+//	+ 32 bytes) | state u8 | isNative COption<u64> 12 (u32 tag + u64)
+//	| closeAuthority COption<Pubkey> 36 (u32 tag + 32 bytes)
+//
+// Tag offsets: delegate tag at 72 (0+32+32+8), close-authority tag at 129
+// (72+36+1+12+8). Both tags sit at the START of their COption, immediately
+// before the 32-byte payload.
 const (
 	mintLen = 82 // COption<mintAuthority>+pubkey+supply u64+decimals u8+isInitialized u8+COption<freezeAuthority>+pubkey
 
-	tokenAccountMinLen = 165 // base SPL token account: mint32+owner32+amount u64+delegate COption32+state u8+isNative u8+delegatedAmount u64+closeAuthority COption32
-	acctDelegateTagOff = 92  // u32 COption tag
+	tokenAccountMinLen = 165 // base SPL token account: mint32+owner32+amount u64+delegate COption32+state u8+isNative COption12+delegatedAmount u64+closeAuthority COption32
+	acctDelegateTagOff = 72  // u32 COption tag
 	acctStateOff       = 108 // u8: 0=uninitialized 1=initialized 2=frozen
-	acctCloseTagOff    = 144 // u32 COption tag
+	acctCloseTagOff    = 129 // u32 COption tag
 )
 
 func isTokenProgramOwner(owner string) bool {

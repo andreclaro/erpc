@@ -100,6 +100,41 @@ func TestHeadProgression_NoChainSkips(t *testing.T) {
 	assert.Equal(t, "skip", outcomeOf(res, "svm.cont.headProgression"))
 }
 
+func TestHeadProgression_RejectedHeadNotCommitted(t *testing.T) {
+	// A head sighting tainted by ANY enabled check must not enter the
+	// progression store — the bad value would become the baseline future
+	// regressions are judged against. tipBound rejects the far-future slot;
+	// headProgression itself passes.
+	chain := NewChainState()
+	cs := corroboratedSet("svm.cont.headProgression", "svm.final.tipBound")
+	enableHardReject(cs, "svm.final.tipBound")
+	tr := tipFake{fakeFinalityResolver{finalizedTip: 1000}, 1000}
+	res := validateChain(t, "getSlot", `[]`, `5000`, cs, chain, tr)
+	require.Error(t, res.Err)
+	assert.Equal(t, "svm.final.tipBound", res.RejectedCheckID)
+	_, seen := chain.LastHead("processed")
+	assert.False(t, seen, "a rejected head must never enter the progression store")
+}
+
+func TestHeadProgression_RecordedMismatchHeadNotCommitted(t *testing.T) {
+	// Same gate for a recorded (not rejected) mismatch: recordOnly still
+	// means "do not trust this response", so no state commit either.
+	chain := NewChainState()
+	cs := corroboratedSet("svm.cont.headProgression", "svm.final.tipBound")
+	tr := tipFake{fakeFinalityResolver{finalizedTip: 1000}, 1000}
+	// 5000 is unfinalized (above the 1000 finalized tip) and beyond latest+1
+	// → tipBound records under the default policy; headProgression passes.
+	res := validateChain(t, "getSlot", `[]`, `5000`, cs, chain, tr)
+	assert.NoError(t, res.Err)
+	require.Len(t, res.Recorded, 1)
+	_, seen := chain.LastHead("processed")
+	assert.False(t, seen, "a recorded-mismatch head must not enter the store")
+	// Clean follow-up DOES commit — the gate is per-response, not a lockout.
+	res = validateChain(t, "getSlot", `[]`, `900`, cs, chain, tr)
+	assert.NoError(t, res.Err)
+	assert.Equal(t, int64(900), chainMustLastHead(t, chain, "processed"))
+}
+
 // ---- svm.cont.minContextSlot ----
 
 func minCtxResult(slot int64) string {
