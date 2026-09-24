@@ -186,6 +186,7 @@ func Validate(ctx context.Context, in Input) Result {
 	d := newDecoded(method, raw)
 	d.reqParams = in.Params
 	d.chain = in.Chain
+	d.finality = in.Finality
 
 	// One finality observation for this whole response: every check here judges
 	// the same slot, and the verdict and its metric label must not come from
