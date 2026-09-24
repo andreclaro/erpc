@@ -13,7 +13,7 @@ import (
 func TestHeadProgression_ForwardMovePasses(t *testing.T) {
 	chain := NewChainState()
 	chain.NoteHead("processed", 900)
-	res := validateChain(t, "getSlot", `[]`, `950`,
+	res := validateChain(t, "getSlot", `["processed"]`, `950`,
 		corroboratedSet("svm.cont.headProgression"), chain, nil)
 	assert.NoError(t, res.Err)
 	assert.Equal(t, "pass", outcomeOf(res, "svm.cont.headProgression"))
@@ -26,7 +26,7 @@ func TestHeadProgression_ForwardMovePasses(t *testing.T) {
 func TestHeadProgression_BackwardMoveRecords(t *testing.T) {
 	chain := NewChainState()
 	chain.NoteHead("processed", 950)
-	res := validateChain(t, "getSlot", `[]`, `900`,
+	res := validateChain(t, "getSlot", `["processed"]`, `900`,
 		corroboratedSet("svm.cont.headProgression"), chain, nil)
 	// ReorgSensitive default: recorded, never rejected.
 	assert.NoError(t, res.Err)
@@ -42,7 +42,7 @@ func TestHeadProgression_BackwardMoveHardRejects(t *testing.T) {
 	chain.NoteHead("processed", 950)
 	cs := corroboratedSet("svm.cont.headProgression")
 	enableHardReject(cs, "svm.cont.headProgression")
-	res := validateChain(t, "getSlot", `[]`, `900`, cs, chain, nil)
+	res := validateChain(t, "getSlot", `["processed"]`, `900`, cs, chain, nil)
 	require.Error(t, res.Err)
 	assert.Equal(t, "svm.cont.headProgression", res.RejectedCheckID)
 }
@@ -50,8 +50,10 @@ func TestHeadProgression_BackwardMoveHardRejects(t *testing.T) {
 func TestHeadProgression_BucketsAreIndependent(t *testing.T) {
 	chain := NewChainState()
 	chain.NoteHead("finalized", 990)
-	// A processed head below the finalized head is an inversion.
-	res := validateChain(t, "getSlot", `[]`, `950`,
+	// An explicitly-processed head below the finalized head is an inversion.
+	// (A BARE getSlot now defaults to the finalized bucket, where 950 < 990
+	// is a plain regression — see TestHeadProgression_BareHeadPollsDefaultToFinalized.)
+	res := validateChain(t, "getSlot", `["processed"]`, `950`,
 		corroboratedSet("svm.cont.headProgression"), chain, nil)
 	require.Len(t, res.Recorded, 1)
 	assert.Contains(t, res.Recorded[0].Reason, "inverted finality")
@@ -86,12 +88,55 @@ func TestHeadProgression_CommitmentStringParam(t *testing.T) {
 
 func TestHeadProgression_EpochInfoUsesAbsoluteSlot(t *testing.T) {
 	chain := NewChainState()
-	chain.NoteHead("processed", 5*432000+200)
+	// A bare getEpochInfo defaults to the finalized commitment, so its
+	// absoluteSlot lands in the finalized bucket.
+	chain.NoteHead("finalized", 5*432000+200)
 	res := validateChain(t, "getEpochInfo", `[]`,
 		epochInfoJSON(5, 300, 5*432000+300),
 		corroboratedSet("svm.cont.headProgression"), chain, nil)
 	assert.NoError(t, res.Err)
-	assert.Equal(t, int64(5*432000+300), chainMustLastHead(t, chain, "processed"))
+	assert.Equal(t, int64(5*432000+300), chainMustLastHead(t, chain, "finalized"))
+}
+
+func TestHeadProgression_BareHeadPollsDefaultToFinalized(t *testing.T) {
+	chain := NewChainState()
+	// A resolver whose finalized tip is 850: the 800 regression below is
+	// provably finalized, so the default policy rejects rather than records.
+	tr := tipFake{fakeFinalityResolver{finalizedTip: 850}, 1000}
+	// Real Agave semantics: bare getSlot/getBlockHeight/getEpochInfo answer
+	// from the FINALIZED bank, so an explicit lower-bucket commitment after
+	// a bare poll is not a regression — and a bare-poll drop IS one.
+	res := validateChain(t, "getSlot", `[]`, `900`,
+		corroboratedSet("svm.cont.headProgression"), chain, tr)
+	assert.NoError(t, res.Err)
+	assert.Equal(t, int64(900), chainMustLastHead(t, chain, "finalized"))
+
+	res = validateChain(t, "getSlot", `["confirmed"]`, `950`,
+		corroboratedSet("svm.cont.headProgression"), chain, tr)
+	assert.NoError(t, res.Err, "confirmed-bucket slot above the finalized head is not a regression")
+	assert.Equal(t, int64(950), chainMustLastHead(t, chain, "confirmed"))
+
+	// A bare poll BELOW its own previous sighting is a finalized regression.
+	res = validateChain(t, "getSlot", `[]`, `800`,
+		corroboratedSet("svm.cont.headProgression"), chain, tr)
+	require.Error(t, res.Err, "bare getSlot regression is a finalized-bucket regression")
+	assert.Equal(t, "svm.cont.headProgression", res.RejectedCheckID)
+}
+
+func TestHeadProgression_FinalizedAliasCommitsToFinalizedBucket(t *testing.T) {
+	chain := NewChainState()
+	tr := tipFake{fakeFinalityResolver{finalizedTip: 850}, 1000}
+	// "max" and "root" are legacy aliases of finalized — they must bucket
+	// (and regress) exactly like "finalized".
+	res := validateChain(t, "getBlockHeight", `["max"]`, `900`,
+		corroboratedSet("svm.cont.headProgression"), chain, tr)
+	assert.NoError(t, res.Err)
+	assert.Equal(t, int64(900), chainMustLastHead(t, chain, "finalized"))
+
+	res = validateChain(t, "getBlockHeight", `["root"]`, `800`,
+		corroboratedSet("svm.cont.headProgression"), chain, tr)
+	require.Error(t, res.Err, "alias regression in the finalized bucket must reject")
+	assert.Equal(t, "svm.cont.headProgression", res.RejectedCheckID)
 }
 
 func TestHeadProgression_NoChainSkips(t *testing.T) {
@@ -130,9 +175,11 @@ func TestHeadProgression_RecordedMismatchHeadNotCommitted(t *testing.T) {
 	_, seen := chain.LastHead("processed")
 	assert.False(t, seen, "a recorded-mismatch head must not enter the store")
 	// Clean follow-up DOES commit — the gate is per-response, not a lockout.
+	// (A bare getSlot defaults to the finalized commitment, so the head lands
+	// in the finalized bucket.)
 	res = validateChain(t, "getSlot", `[]`, `900`, cs, chain, tr)
 	assert.NoError(t, res.Err)
-	assert.Equal(t, int64(900), chainMustLastHead(t, chain, "processed"))
+	assert.Equal(t, int64(900), chainMustLastHead(t, chain, "finalized"))
 }
 
 // ---- svm.cont.minContextSlot ----
@@ -219,4 +266,19 @@ func TestContinuityChecks_Levels(t *testing.T) {
 	assert.Equal(t, FamilyContinuity, checkByID(t, "svm.cont.headProgression").Family)
 	assert.Equal(t, Deterministic, checkByID(t, "svm.cont.minContextSlot").Class)
 	assert.Equal(t, ReorgSensitive, checkByID(t, "svm.cont.headProgression").Class)
+}
+
+func TestMinContextSlot_AppliesToEnvelopeMethods(t *testing.T) {
+	// getBlock is an envelope method: its config carries minContextSlot like
+	// getAccountInfo's. A served slot below the floor is a violation.
+	cs := corroboratedSet("svm.cont.minContextSlot")
+	res := validateChain(t, "getBlock", `[100, {"minContextSlot":150}]`,
+		`{"context":{"slot":100},"value":{"blockhash":"abc"}}`, cs, nil, nil)
+	require.Error(t, res.Err, "serving slot 100 against minContextSlot 150 is a downgrade")
+	assert.Equal(t, "svm.cont.minContextSlot", res.RejectedCheckID)
+
+	res = validateChain(t, "getBlock", `[100, {"minContextSlot":150}]`,
+		`{"context":{"slot":200},"value":{"blockhash":"abc"}}`, cs, nil, nil)
+	assert.NoError(t, res.Err, "serving slot 200 honors the floor")
+	assert.Equal(t, "pass", outcomeOf(res, "svm.cont.minContextSlot"))
 }

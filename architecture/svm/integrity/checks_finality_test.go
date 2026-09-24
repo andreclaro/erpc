@@ -142,3 +142,43 @@ func TestFinalityChecks_InCorroboratedLevelOnly(t *testing.T) {
 		assert.False(t, intr.For(id).Enabled, id)
 	}
 }
+
+func TestFinalizedBound_BareGetSlotUsesFinalizedDefault(t *testing.T) {
+	// A bare getSlot answers from the finalized bank by protocol default and
+	// carries NO context envelope — the check must anchor on the result's
+	// own slot number (Slot() fallback) and treat the claim as finalized.
+	cs := corroboratedSet("svm.final.finalizedBound")
+	tr := tipFake{fakeFinalityResolver{finalizedTip: 990}, 1000}
+	res := validateChain(t, "getSlot", `[]`, `500`, cs, nil, tr)
+	assert.NoError(t, res.Err, "slot 500 is finalized (finalized tip 990) — a bare finalized claim passes")
+	assert.Equal(t, "pass", outcomeOf(res, "svm.final.finalizedBound"))
+
+	enableHardReject(cs, "svm.final.finalizedBound")
+	tr = tipFake{fakeFinalityResolver{finalizedTip: 100}, 1000}
+	res = validateChain(t, "getSlot", `[]`, `500`, cs, nil, tr)
+	require.Error(t, res.Err, "slot 500 is NOT finalized (tip 100) — the bare finalized claim fails")
+	assert.Equal(t, "svm.final.finalizedBound", res.RejectedCheckID)
+}
+
+func TestFinalizedBound_RootAliasCountsAsFinalized(t *testing.T) {
+	// "root" is Agave's legacy alias of finalized: a request carrying it
+	// expects finalized data exactly like "finalized".
+	cs := corroboratedSet("svm.final.finalizedBound")
+	enableHardReject(cs, "svm.final.finalizedBound")
+	tr := tipFake{fakeFinalityResolver{finalizedTip: 100}, 1000}
+	res := validateChain(t, "getBlock", `[100, {"commitment":"root"}]`,
+		`{"context":{"slot":500},"value":{"blockhash":"abc"}}`, cs, nil, tr)
+	require.Error(t, res.Err, "commitment alias 'root' must be judged as finalized")
+	assert.Equal(t, "svm.final.finalizedBound", res.RejectedCheckID)
+}
+
+func TestSlotAhead_BareGetSlotFallsBackToResultSlot(t *testing.T) {
+	// getSlot's bare-number result has no context.slot; the check must fall
+	// back to the decoded slot number instead of skipping.
+	cs := corroboratedSet("svm.final.slotAhead")
+	tr := tipFake{fakeFinalityResolver{finalizedTip: 990}, 1000}
+	res := validateChain(t, "getSlot", `[]`, `1500`, cs, nil, tr)
+	assert.NoError(t, res.Err)
+	require.Len(t, res.Recorded, 1, "slot 1500 beyond latest 1000 must be caught via the result slot")
+	assert.Equal(t, "svm.final.slotAhead", res.Recorded[0].CheckID)
+}
