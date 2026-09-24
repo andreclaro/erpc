@@ -9,7 +9,6 @@ package integrity
 
 import (
 	"context"
-	"strings"
 )
 
 func init() {
@@ -35,15 +34,23 @@ func tipFrom(d *Decoded) (TipResolver, bool) {
 	return tr, ok
 }
 
-// commitmentIsFinalized reports whether the request explicitly asked for
-// finalized commitment (getX with commitment param).
+// commitmentIsFinalized reports whether the response is expected to carry
+// finalized data: the request either named a finalized(-aliased) commitment
+// or used a method whose own default is finalized (getSlot/getBlockHeight/
+// getEpochInfo — a bare head poll asserts a finalized position).
 func commitmentIsFinalized(d *Decoded) bool {
-	for _, c := range d.RequestCommitments() {
-		if strings.EqualFold(c, "finalized") {
-			return true
-		}
+	return commitmentOf(d.method, d.reqParams) == "finalized"
+}
+
+// responseSlot is the slot a response's data is anchored to: context.slot
+// when the envelope carries it, otherwise the best-known slot decoded from
+// the result itself (getSlot/getBlockHeight's number, getBlock's requested
+// slot, the tx envelope's slot, ...).
+func responseSlot(d *Decoded) (int64, bool) {
+	if slot, ok := d.ContextSlot(); ok {
+		return slot, true
 	}
-	return false
+	return d.Slot()
 }
 
 var finalizedBound = &Check{
@@ -55,7 +62,7 @@ var finalizedBound = &Check{
 		if !commitmentIsFinalized(d) {
 			return Skipped
 		}
-		slot, ok := d.ContextSlot()
+		slot, ok := responseSlot(d)
 		if !ok {
 			return Skipped
 		}
@@ -70,7 +77,7 @@ var finalizedBound = &Check{
 		if final {
 			return nil
 		}
-		return failf("response context.slot %d is not finalized on the serving upstream while the request asked for finalized commitment", slot)
+		return failf("response slot %d is not finalized on the serving upstream while the request asked for finalized commitment", slot)
 	},
 }
 
@@ -80,7 +87,7 @@ var slotAhead = &Check{
 	Class:   ReorgSensitive,
 	Methods: envelopeMethodList(),
 	Run: func(ctx context.Context, d *Decoded, cfg CheckConfig) *Violation {
-		slot, ok := d.ContextSlot()
+		slot, ok := responseSlot(d)
 		if !ok {
 			return Skipped
 		}

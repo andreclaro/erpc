@@ -54,6 +54,12 @@ func blockLinkData(d *Decoded) (linkData, bool) {
 	if !ok {
 		return linkData{}, false
 	}
+	// Genesis (slot 0) self-references an all-zeros previous hash — there is
+	// no parent to link against. blockShape admits exactly this one
+	// self-parent; skip rather than compare the block against itself.
+	if slot == *b.ParentSlot {
+		return linkData{}, false
+	}
 	return linkData{
 		claimed: chainEntry{
 			slot:        slot,
