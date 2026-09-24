@@ -645,3 +645,54 @@ func TestSvmIntegrity_TokenProgramFailsOver(t *testing.T) {
 	assert.NotContains(t, string(jrr.GetResultBytes()), "FakeTokenProgram")
 	assert.True(t, req.IntegrityCaught())
 }
+
+// TestSvmIntegrity_RequestedSigMatchFailsOver exercises
+// svm.struct.requestedSigMatch end to end: rpc1 answers a getTransaction for
+// signature A with a different transaction (signature B) — the classic
+// "cached sibling" cheat. With the per-check hardReject override the engine
+// rejects and the retry fails over to rpc2's correctly-bound answer.
+// signatureVerify is disabled for this test so the fixture tx (unsigned
+// material) doesn't trip a different check first.
+func TestSvmIntegrity_RequestedSigMatchFailsOver(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc1.localhost", 1000, 990)
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc2.localhost", 1000, 990)
+
+	const wantSig = "5K7R9wBf8h2mX3JvQmPzYcLdNe4fGdKzEtEWsXaF8p3qS1uVbMn6jHkC2oArGiD4tEwFyU7hN"
+	const wrongSig = "3JkM8pQvR2wXzL9dYnFbThC5sEaGuK7oN4iUfHgD6tAqS1eVrBmWc"
+	txResult := func(sig string) string {
+		return `{"jsonrpc":"2.0","id":1,"result":{"slot":980,"blockTime":1700000000,"transaction":{"signatures":["` + sig + `"],"message":{"accountKeys":[]}},"meta":{"err":null}}}`
+	}
+	mockGetTx := func(host, body string) {
+		gock.New("http://" + host).
+			Post("").Times(1).
+			Filter(func(r *http.Request) bool {
+				return r.URL.Host == host && strings.Contains(util.SafeReadBody(r), `"method":"getTransaction"`)
+			}).
+			Reply(200).BodyString(body)
+	}
+	mockGetTx("svm-integ-rpc1.localhost", txResult(wrongSig))
+	mockGetTx("svm-integ-rpc2.localhost", txResult(wantSig))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := svmCorroboratedIntegrity()
+	disable := false
+	cfg.Checks = map[string]*common.IntegrityCheckConfig{
+		"svm.auth.signatureVerify":     {Enabled: &disable},
+		"svm.struct.requestedSigMatch": {OnFailure: "hardReject"},
+	}
+	net := setupSvmIntegrityNetwork(t, ctx, cfg, "mainnet-beta")
+
+	req := common.NewNormalizedRequest([]byte(
+		`{"jsonrpc":"2.0","id":1,"method":"getTransaction","params":["` + wantSig + `"]}`))
+	resp, err := svmProjectForward(ctx, net, req)
+	require.NoError(t, err, "must fail over to the upstream serving the requested transaction")
+	require.NotNil(t, resp)
+	jrr, err := resp.JsonRpcResponse(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, string(jrr.GetResultBytes()), wantSig)
+	assert.NotContains(t, string(jrr.GetResultBytes()), wrongSig)
+	assert.True(t, req.IntegrityCaught())
+}
