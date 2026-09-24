@@ -239,3 +239,38 @@ Aux-request budget (steady state, per finalized block): `getVoteAccounts` 0 (cac
 3. **Double-vote / duplicate-block fraud proofs**: slashable evidence lives in the shred layer, not RPC.
 4. **Votor certificates**: pending Alpenglow RPC surface (§10).
 5. **DAS vendor variance**: Metis/DAS responses vary across providers; the module ships `off` until profiles exist per deployment.
+
+## 13. Implementation status (updated 2026-09-25)
+
+Lands on branch `feat/svm-integrity` (fork `andreclaro/erpc`), opt-in per
+network, nothing runs without config. Every group has unit suites plus an
+end-to-end failover test (`erpc/svm_integrity_e2e_test.go`) proving a
+violating upstream is rejected and the request lands on the honest one.
+
+| Commit | Group | Checks |
+|---|---|---|
+| `ecdd1d5` | Phase 0/1 | engine, wiring, config; `blockShape`, `txShape`, `sigUniqueness`, `signatureVerify`, `genesisHash`, `magnitude`, `commitmentParam`, `slotEncoding` |
+| `50e7729` | A — slot-chain continuity | `commit.parentLink`, `commit.heightMonotonic` |
+| `8242843` | B — finality vs poller tips | `final.finalizedBound`, `final.slotAhead`, `final.tipBound`; **handler fix: integrity judges a response BEFORE its context slot is harvested** (a rejected response must never seed the poller with poison) |
+| `853cd3f` | C — token authenticity | `auth.tokenProgram`, `struct.tokenMintShape`, `struct.tokenAccountShape` (extension-carrying mints skipped, not guessed) |
+| `0472deb` | D — request/response binding | `struct.requestedSigMatch`, `shape.blocksLimit`, `struct.rewardsShape` |
+| `df3b3eb` | E — follower / time / epoch | `commit.chainFollower` (per-network first-verified pin, not the spec's per-upstream follower — documented deviation), `commit.timeWindow` (bounds are params: cluster genesis times differ), `commit.slotEpoch` (slotsPerEpoch param until aux fetch) |
+| `1d6fd62` | F — finality-evidence shape | `final.commitmentQuorum` (32 tiers, ≤ totalStake, non-increasing), `final.rootSlotSanity` (rootSlot ≤ lastVote; lastVote ≤ head + maxVoteAhead) |
+| `5d9a756` | G — continuity | `cont.headProgression` (per-commitment head store, backwards = reorg evidence, record-by-default), `cont.minContextSlot`, `struct.heightVsSlot` |
+
+**22 checks total** (8 intrinsic + 14 across groups A–G).
+
+**Deferred, with rationale** (all noted in `levels.go`):
+- `final.stakeTableJoin`, `corr.balanceJoin/sigStatusJoin/blockhashJoin/supplyJoin`
+  — require cross-request aux fetch/caching machinery; the module's contract
+  is "no force-fetch at corroborated tier", so these land with the
+  authoritative tier (Phase 3+).
+- `final.voteEvidence` — authoritative tier, needs vote-instruction bincode
+  parsing pinned against agave layouts (§11 drift risk).
+- cacheGuard — cache-path concern, out of scope for the serving-path module.
+
+Battle-scars worth keeping (each cost a debugging round): first-verified-wins
+pinning means reorgs are recorded evidence, not replacements; integrity must
+judge before the poller harvests a response's context slot; scan ALL views —
+one clean view must not mask a poisoned sibling; ambiguous wire shapes
+(extension mints vs token accounts, base58 wire txs) skip rather than guess.
