@@ -25,6 +25,7 @@ type chainEntry struct {
 	blockHeight int64 // -1 when the block carries no blockHeight (very old blocks)
 	parentSlot  int64
 	parentHash  [32]byte
+	blockTime   int64 // -1 when the block carries no blockTime (very old blocks)
 }
 
 // chainIndexCap bounds the index; beyond it, entries more than chainIndexSpan
@@ -87,4 +88,10 @@ func (c *ChainState) Parent(slot int64) (chainEntry, bool) {
 	defer c.mu.RUnlock()
 	e, ok := c.bySlot[slot]
 	return e, ok
+}
+
+// Entry is Parent's explicit alias — reads better at call sites that want
+// the entry at THIS slot (chainFollower), not a parent lookup.
+func (c *ChainState) Entry(slot int64) (chainEntry, bool) {
+	return c.Parent(slot)
 }

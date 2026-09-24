@@ -696,3 +696,48 @@ func TestSvmIntegrity_RequestedSigMatchFailsOver(t *testing.T) {
 	assert.NotContains(t, string(jrr.GetResultBytes()), wrongSig)
 	assert.True(t, req.IntegrityCaught())
 }
+
+// TestSvmIntegrity_ChainFollowerFailsOver exercises svm.commit.chainFollower
+// end to end: the first getBlock anchors slot 901 (bankhash seed 8) in the
+// network's verified index; a second request for the same slot catches rpc1
+// serving a DIFFERENT bankhash (seed 200) — fork/double-produce evidence
+// against the pinned entry. With the per-check hardReject override the engine
+// rejects and fails over to rpc2, which serves the pinned block.
+func TestSvmIntegrity_ChainFollowerFailsOver(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc1.localhost", 1000, 990)
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc2.localhost", 1000, 990)
+
+	// Request 1 anchors 901@seed8 on rpc1. Request 2: rpc1 flips the bankhash.
+	mockSvmGetBlockAt("svm-integ-rpc1.localhost", 901, svmChainBlockResult(8, 7, 900, 801), 1)
+	mockSvmGetBlockAt("svm-integ-rpc1.localhost", 901, svmChainBlockResult(200, 7, 900, 801), 1)
+	mockSvmGetBlockAt("svm-integ-rpc2.localhost", 901, svmChainBlockResult(8, 7, 900, 801), 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := svmCorroboratedIntegrity()
+	disable := false
+	cfg.Checks = map[string]*common.IntegrityCheckConfig{
+		// Isolate chainFollower: sibling corroborated checks stay at record.
+		"svm.commit.chainFollower":   {OnFailure: "hardReject"},
+		"svm.commit.parentLink":      {Enabled: &disable},
+		"svm.commit.heightMonotonic": {Enabled: &disable},
+	}
+	net := setupSvmIntegrityNetwork(t, ctx, cfg, "mainnet-beta")
+
+	resp, err := svmProjectForward(ctx, net, svmGetBlockAtRequest(901))
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	req2 := svmGetBlockAtRequest(901)
+	resp, err = svmProjectForward(ctx, net, req2)
+	require.NoError(t, err, "must fail over to the upstream serving the pinned bankhash")
+	require.NotNil(t, resp)
+	jrr, err := resp.JsonRpcResponse(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, string(jrr.GetResultBytes()), svmB58Encode(svmFixture32(8)),
+		"the served block must be the pinned bankhash")
+	assert.NotContains(t, string(jrr.GetResultBytes()), svmB58Encode(svmFixture32(200)))
+	assert.True(t, req2.IntegrityCaught())
+}
