@@ -741,3 +741,68 @@ func TestSvmIntegrity_ChainFollowerFailsOver(t *testing.T) {
 	assert.NotContains(t, string(jrr.GetResultBytes()), svmB58Encode(svmFixture32(200)))
 	assert.True(t, req2.IntegrityCaught())
 }
+
+// svmCommitmentResult builds a getBlockCommitment histogram: 32 integer tiers
+// starting from values and zero-filled, plus totalStake.
+func svmCommitmentResult(totalStake int64, headTiers ...int64) string {
+	tiers := make([]int64, 32)
+	copy(tiers, headTiers)
+	raw, err := json.Marshal(map[string]any{
+		"commitment": tiers,
+		"totalStake": totalStake,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}
+
+func svmGetBlockCommitmentRequest() *common.NormalizedRequest {
+	return common.NewNormalizedRequest([]byte(
+		`{"jsonrpc":"2.0","id":1,"method":"getBlockCommitment","params":[901]}`))
+}
+
+func mockSvmGetBlockCommitment(host, resultBody string) {
+	gock.New("http://" + host).
+		Post("").
+		Times(1).
+		Filter(func(r *http.Request) bool {
+			return strings.Contains(util.SafeReadBody(r), `"method":"getBlockCommitment"`)
+		}).
+		Reply(200).
+		BodyString(`{"jsonrpc":"2.0","id":1,"result":` + resultBody + `}`)
+}
+
+// TestSvmIntegrity_CommitmentQuorumFailsOver exercises svm.final.commitmentQuorum
+// end to end: rpc1 serves a getBlockCommitment histogram whose top tier exceeds
+// totalStake — fabricated stake evidence — and the per-check hardReject
+// override fails over to rpc2's consistent histogram.
+func TestSvmIntegrity_CommitmentQuorumFailsOver(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc1.localhost", 1000, 990)
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc2.localhost", 1000, 990)
+
+	mockSvmGetBlockCommitment("svm-integ-rpc1.localhost",
+		svmCommitmentResult(1000, 2000, 800, 700)) // tier[0] > totalStake
+	mockSvmGetBlockCommitment("svm-integ-rpc2.localhost",
+		svmCommitmentResult(1000, 900, 800, 700))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := svmCorroboratedIntegrity()
+	cfg.Checks = map[string]*common.IntegrityCheckConfig{
+		"svm.final.commitmentQuorum": {OnFailure: "hardReject"},
+	}
+	net := setupSvmIntegrityNetwork(t, ctx, cfg, "mainnet-beta")
+
+	req := svmGetBlockCommitmentRequest()
+	resp, err := svmProjectForward(ctx, net, req)
+	require.NoError(t, err, "must fail over to the upstream with the consistent histogram")
+	require.NotNil(t, resp)
+	jrr, err := resp.JsonRpcResponse(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, string(jrr.GetResultBytes()), `"totalStake":1000`)
+	assert.Contains(t, string(jrr.GetResultBytes()), `"totalStake":1000`)
+	assert.True(t, req.IntegrityCaught())
+}
