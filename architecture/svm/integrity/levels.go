@@ -51,6 +51,11 @@ var levelMembership = map[Level][]string{
 		"svm.shape.magnitude",
 		"svm.shape.commitmentParam",
 		"svm.shape.slotEncoding",
+		// Phase 2 group C: token authenticity — program ownership and SPL
+		// binary layout are deterministic rules over served data.
+		"svm.auth.tokenProgram",
+		"svm.struct.tokenMintShape",
+		"svm.struct.tokenAccountShape",
 	},
 	LevelCorroborated: {
 		// Phase 2: slot-chain continuity over the verified-block index (first

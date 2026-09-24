@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -587,4 +588,60 @@ func TestSvmIntegrity_FinalizedBoundFailsOver(t *testing.T) {
 
 func svmItoa(n int) string {
 	return fmt.Sprintf("%d", n)
+}
+
+// TestSvmIntegrity_TokenProgramFailsOver exercises svm.auth.tokenProgram end
+// to end: rpc1 answers getTokenAccountsByOwner with an entry owned by a bogus
+// "token" program — synthesized token data. With the per-check hardReject
+// override the engine rejects and the retry fails over to rpc2's honest list.
+func TestSvmIntegrity_TokenProgramFailsOver(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc1.localhost", 1000, 990)
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc2.localhost", 1000, 990)
+
+	// Honest 165-byte base SPL token account (state=initialized).
+	honest := make([]byte, 165)
+	honest[108] = 1
+	// Dishonest: same shape but under a fake program id.
+	dishonest := make([]byte, 165)
+	dishonest[108] = 1
+
+	entry := func(owner string, data []byte) string {
+		return `{"pubkey":"Addr1111111111111111111111111111111111111","account":{"owner":"` + owner + `","lamports":100,"executable":false,"rentEpoch":2,"data":["` + base64.StdEncoding.EncodeToString(data) + `","base64"]}}`
+	}
+	byOwner := func(entries string) string {
+		return `{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":990},"value":[` + entries + `]}}`
+	}
+	mockByOwner := func(host, body string) {
+		gock.New("http://" + host).
+			Post("").Times(1).
+			Filter(func(r *http.Request) bool {
+				return r.URL.Host == host && strings.Contains(util.SafeReadBody(r), `"method":"getTokenAccountsByOwner"`)
+			}).
+			Reply(200).BodyString(body)
+	}
+	mockByOwner("svm-integ-rpc1.localhost",
+		byOwner(entry("FakeTokenProgram111111111111111111111111111", dishonest)))
+	mockByOwner("svm-integ-rpc2.localhost",
+		byOwner(entry("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", honest)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := svmCorroboratedIntegrity()
+	cfg.Checks = map[string]*common.IntegrityCheckConfig{
+		"svm.auth.tokenProgram": {OnFailure: "hardReject"},
+	}
+	net := setupSvmIntegrityNetwork(t, ctx, cfg, "mainnet-beta")
+
+	req := common.NewNormalizedRequest([]byte(
+		`{"jsonrpc":"2.0","id":1,"method":"getTokenAccountsByOwner","params":["Owner1111111111111111111111111111111111111", {"encoding":"base64"}]}`))
+	resp, err := svmProjectForward(ctx, net, req)
+	require.NoError(t, err, "must fail over to the upstream with token-program-owned accounts")
+	require.NotNil(t, resp)
+	jrr, err := resp.JsonRpcResponse(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, string(jrr.GetResultBytes()), "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+	assert.NotContains(t, string(jrr.GetResultBytes()), "FakeTokenProgram")
+	assert.True(t, req.IntegrityCaught())
 }
