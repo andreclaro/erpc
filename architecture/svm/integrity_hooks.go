@@ -3,6 +3,7 @@ package svm
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/erpc/erpc/architecture/svm/integrity"
@@ -38,6 +39,8 @@ func upstreamPostForward_integrity(ctx context.Context, n common.Network, u comm
 		Checks:      cs,
 		Reorg:       policy,
 		ObserveOnly: observeOnly,
+		Chain:       chainStateFor(n),
+		Finality:    svmFinalityResolver{u: u},
 	}
 	// Request-aware checks (commitment vocabulary, requested slot) need the
 	// original params; read-only access under the request's RLock.
@@ -119,4 +122,48 @@ func mustMethod(rq *common.NormalizedRequest) string {
 		return ""
 	}
 	return m
+}
+
+// chainStates holds one verified-block index per project+network. Single-
+// process memory for the commitment tier's Phase-2 scope; the EVM ChainView's
+// shared-state connector lands with the full follower.
+var chainStates sync.Map // key: projectID + "\x00" + networkLabel → *integrity.ChainState
+
+func chainStateFor(n common.Network) *integrity.ChainState {
+	if n == nil {
+		return nil
+	}
+	key := n.ProjectId() + "\x00" + n.Label()
+	if v, ok := chainStates.Load(key); ok {
+		return v.(*integrity.ChainState)
+	}
+	cs, _ := chainStates.LoadOrStore(key, integrity.NewChainState())
+	return cs.(*integrity.ChainState)
+}
+
+// svmFinalityResolver resolves a slot's finality from the upstream's own
+// state poller — the same finalized tip the router already trusts for lag
+// detection. A poller that has never observed a finalized slot reports
+// "unknown", which the default policy records rather than rejects.
+type svmFinalityResolver struct {
+	u common.Upstream
+}
+
+func (r svmFinalityResolver) IsFinalized(ctx context.Context, slot int64) (final bool, known bool) {
+	if r.u == nil {
+		return false, false
+	}
+	sup, ok := r.u.(common.SvmUpstream)
+	if !ok {
+		return false, false
+	}
+	p := sup.SvmStatePoller()
+	if p == nil || p.IsObjectNull() {
+		return false, false
+	}
+	fin := p.FinalizedSlot()
+	if fin <= 0 {
+		return false, false
+	}
+	return slot <= fin, true
 }
