@@ -79,6 +79,10 @@ type Input struct {
 	// Finality resolves the response's slot finality for reorg-sensitive
 	// verdicts. Nil disables it (finality "unknown").
 	Finality FinalityResolver
+	// Chain is the network's verified-block index, feeding the commitment-tier
+	// link checks and receiving blocks that passed every check. Nil disables
+	// both (the checks skip).
+	Chain *ChainState
 	// Reorg maps finality state to the behavior for reorg-sensitive checks.
 	Reorg ReorgPolicy
 	// ObserveOnly suppresses every rejection: checks run and violations are
@@ -181,6 +185,7 @@ func Validate(ctx context.Context, in Input) Result {
 
 	d := newDecoded(method, raw)
 	d.reqParams = in.Params
+	d.chain = in.Chain
 
 	// One finality observation for this whole response: every check here judges
 	// the same slot, and the verdict and its metric label must not come from
@@ -233,6 +238,12 @@ func Validate(ctx context.Context, in Input) Result {
 		// recordOnly verdict: surface the violation but serve the response.
 		res.Outcomes = append(res.Outcomes, CheckOutcome{c.ID, "record_only"})
 		res.Recorded = append(res.Recorded, Recorded{CheckID: c.ID, Reason: v.Reason, Class: c.Class, Finality: fin.label(ctx, in, d), Verdict: "record_only"})
+	}
+	// The block passed every check with no recorded mismatch — anchor it in
+	// the verified chain index so later blocks can link against it. A block
+	// that was served WITH a recorded mismatch never becomes ground truth.
+	if res.Err == nil && len(res.Recorded) == 0 && in.Chain != nil && d.hasBlock() {
+		observeBlock(in.Chain, d)
 	}
 	return res
 }
