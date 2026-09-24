@@ -71,11 +71,23 @@ var blockShape = &Check{
 				return failf("blockTime %d is %ds in the future (clock skew bound exceeded)", *b.BlockTime, *b.BlockTime-now)
 			}
 		}
-		// A block carrying a blockhash always carries a tx list (possibly empty
-		// for a skipped-slot placeholder); a null transactions array with a real
-		// blockhash means the payload was truncated/synthesized.
+		// A block carrying a blockhash always carries a tx list — possibly
+		// empty (skipped-slot placeholders are legal). Agave omits the field
+		// entirely only when the request set transactionDetails:"signatures"
+		// (top-level signatures array instead) or "none"; anywhere else, a
+		// null transactions array means the payload was truncated/synthesized.
 		if b.Transactions == nil {
-			return failf("block %s has a null transactions array (missing transactionDetails or truncated payload)", b.Blockhash)
+			td, _ := d.requestTransactionDetails()
+			switch td {
+			case "signatures", "none":
+				// legal omission — "signatures" mode must still surface the
+				// signature array it substitutes.
+				if td == "signatures" && b.Signatures == nil {
+					return failf("block %s requested with transactionDetails:\"signatures\" carries no signatures array", b.Blockhash)
+				}
+			default:
+				return failf("block %s has a null transactions array (missing transactionDetails or truncated payload)", b.Blockhash)
+			}
 		}
 		_ = bh
 		return nil
@@ -176,24 +188,33 @@ var sigUniqueness = &Check{
 	Class:   Deterministic,
 	Methods: []string{"getblock", "getconfirmedblock"},
 	Run: func(ctx context.Context, d *Decoded, cfg CheckConfig) *Violation {
-		// transactionDetails:"signatures" — bare signature strings.
-		if strs, err := d.BlockSignatureStrings(); err == nil {
-			return sigUniquenessOf(strs)
-		}
-		// Full tx objects.
-		txs, err := d.BlockTxs()
-		if err != nil || len(txs) == 0 {
+		b, err := d.Block()
+		if err != nil || b == nil {
 			return Skipped
 		}
-		sigs := make([]string, 0, len(txs))
-		for _, tx := range txs {
-			sigs = append(sigs, tx.Signatures...)
+		if b.Transactions != nil {
+			// Full tx objects (transactionDetails full/accounts — the default).
+			txs, err := d.BlockTxs()
+			if err != nil || len(txs) == 0 {
+				return Skipped
+			}
+			sigs := make([]string, 0, len(txs))
+			for _, tx := range txs {
+				sigs = append(sigs, tx.Signatures...)
+			}
+			return sigUniquenessOf(sigs)
 		}
-		return sigUniquenessOf(sigs)
+		// transactionDetails:"signatures" — Agave omits transactions and
+		// substitutes the top-level signatures array. transactionDetails:"none"
+		// emits neither — nothing to compare.
+		return sigUniquenessOf(b.Signatures)
 	},
 }
 
 func sigUniquenessOf(sigs []string) *Violation {
+	if len(sigs) == 0 {
+		return Skipped // "pass" must mean a comparison happened
+	}
 	seen := make(map[string]struct{}, len(sigs))
 	for _, s := range sigs {
 		if s == "" {

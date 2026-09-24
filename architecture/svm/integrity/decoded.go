@@ -68,6 +68,10 @@ type blockResult struct {
 	BlockTime         *int64            `json:"blockTime"`
 	Transactions      []json.RawMessage `json:"transactions"`
 	Rewards           []json.RawMessage `json:"rewards"`
+	// Signatures is the top-level signature array Agave emits when the
+	// request set transactionDetails:"signatures" (transactions is omitted
+	// in that mode).
+	Signatures []string `json:"signatures"`
 }
 
 func (d *Decoded) Block() (*blockResult, error) {
@@ -95,6 +99,22 @@ func (d *Decoded) hasBlock() bool {
 // for (params[0]), when present and numeric.
 func (d *Decoded) RequestedSlot() (int64, bool) {
 	return paramSlot(d.reqParams, 0)
+}
+
+// requestTransactionDetails returns the transactionDetails level a getBlock
+// request asked for (params[1].transactionDetails), when present. Agave
+// honors "full" (default), "accounts", "signatures", and "none" — the
+// latter two change which top-level fields the response carries.
+func (d *Decoded) requestTransactionDetails() (string, bool) {
+	if len(d.reqParams) < 2 {
+		return "", false
+	}
+	m, ok := d.reqParams[1].(map[string]any)
+	if !ok {
+		return "", false
+	}
+	td, ok := m["transactionDetails"].(string)
+	return td, ok && td != ""
 }
 
 // ---------- getTransaction ----------
@@ -357,25 +377,40 @@ func parseTx(raw json.RawMessage) (*parsedTx, error) {
 	return tx, nil
 }
 
+// parseInstr decodes one instruction. An empty-string data field carries
+// genuinely empty instruction data (base58 of zero bytes is "") — that is
+// legal and must not fail decode. A data field that is ABSENT marks a
+// jsonParsed-style instruction: getBlock/getTransaction with
+// encoding:"jsonParsed" replace raw instructions with a digested
+// {"program", "parsed": ...} object (known-program instructions lose the
+// raw triplet entirely), so the signed wire bytes are not reconstructible —
+// the transaction is unverifiable rather than malformed.
 func parseInstr(raw json.RawMessage) (parsedInstr, error) {
 	var obj struct {
-		ProgramIDIndex int    `json:"programIdIndex"`
-		Accounts       []int  `json:"accounts"`
-		Data           string `json:"data"`
+		ProgramIDIndex int             `json:"programIdIndex"`
+		Accounts       []int           `json:"accounts"`
+		Data           *string         `json:"data"`
+		Parsed         json.RawMessage `json:"parsed"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return parsedInstr{}, err
 	}
-	data, err := base58Decode(obj.Data)
-	if err != nil {
-		return parsedInstr{}, err
+	if obj.Parsed != nil || obj.Data == nil {
+		return parsedInstr{}, errNotVerifiable
 	}
-	inst := parsedInstr{ProgramIDIndex: obj.ProgramIDIndex, Data: data}
+	inst := parsedInstr{ProgramIDIndex: obj.ProgramIDIndex}
 	for _, a := range obj.Accounts {
 		if a < 0 || a > 255 {
 			return parsedInstr{}, errOutOfRange
 		}
 		inst.Accounts = append(inst.Accounts, byte(a))
+	}
+	if *obj.Data != "" {
+		data, err := base58Decode(*obj.Data)
+		if err != nil {
+			return parsedInstr{}, err
+		}
+		inst.Data = data
 	}
 	return inst, nil
 }
@@ -424,27 +459,6 @@ func (d *Decoded) BlockTxs() ([]*parsedTx, error) {
 			return nil, err
 		}
 		out = append(out, tx)
-	}
-	return out, nil
-}
-
-// BlockSignatureStrings returns the signatures when the block was requested
-// with transactionDetails:"signatures" (transactions are bare strings).
-func (d *Decoded) BlockSignatureStrings() ([]string, error) {
-	b, err := d.Block()
-	if err != nil {
-		return nil, err
-	}
-	if b.Transactions == nil {
-		return nil, errNotVerifiable
-	}
-	out := make([]string, 0, len(b.Transactions))
-	for _, rt := range b.Transactions {
-		var s string
-		if err := json.Unmarshal(rt, &s); err != nil {
-			return nil, errNotVerifiable
-		}
-		out = append(out, s)
 	}
 	return out, nil
 }

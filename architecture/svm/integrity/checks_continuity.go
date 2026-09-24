@@ -27,21 +27,33 @@ func init() {
 	register(heightVsSlot)
 }
 
+// headSlot is the progression truth for the polled-head methods: the numeric
+// result for getSlot/getBlockHeight, absoluteSlot for getEpochInfo (whose
+// other slot-shaped fields are epoch-relative, not head positions).
+func headSlot(d *Decoded) (int64, bool) {
+	slot, ok := d.SlotNumber()
+	if d.method == "getepochinfo" {
+		if e, err := d.EpochInfo(); err == nil && e != nil && e.AbsoluteSlot != nil {
+			slot, ok = *e.AbsoluteSlot, true
+		}
+	}
+	return slot, ok
+}
+
 // svm.cont.headProgression — getSlot/getBlockHeight/getEpochInfo heads move
 // forward within their commitment bucket and never invert across buckets.
 // Reorg-sensitive: a reorg IS a backwards move; default policy records it.
+// Detection is read-only; the high-water mark is committed by AfterPass only
+// after the whole response validated cleanly — a head sighting tainted by
+// any other check's mismatch must not become the baseline future
+// regressions are judged against.
 var headProgression = &Check{
 	ID:      "svm.cont.headProgression",
 	Family:  FamilyContinuity,
 	Class:   ReorgSensitive,
 	Methods: []string{"getslot", "getblockheight", "getepochinfo"},
 	Run: func(ctx context.Context, d *Decoded, cfg CheckConfig) *Violation {
-		slot, ok := d.SlotNumber()
-		if d.method == "getepochinfo" {
-			if e, err := d.EpochInfo(); err == nil && e != nil && e.AbsoluteSlot != nil {
-				slot, ok = *e.AbsoluteSlot, true
-			}
-		}
+		slot, ok := headSlot(d)
 		if !ok || slot < 0 || d.chain == nil {
 			return Skipped
 		}
@@ -60,8 +72,14 @@ var headProgression = &Check{
 				return failf("processed head %d sits below the observed confirmed head %d — inverted finality", slot, cf)
 			}
 		}
-		d.chain.NoteHead(bucket, slot)
 		return nil
+	},
+	AfterPass: func(ctx context.Context, d *Decoded) {
+		slot, ok := headSlot(d)
+		if !ok || slot < 0 || d.chain == nil {
+			return
+		}
+		d.chain.NoteHead(commitmentOf(d.reqParams), slot)
 	},
 }
 
