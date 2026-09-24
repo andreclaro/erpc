@@ -101,18 +101,16 @@ func (h *SvmArchitectureHandler) HandleUpstreamPostForward(ctx context.Context, 
 	if IsNonRetryableWriteMethod(method) {
 		return upstreamPostForward_nonRetryableWrite(resp, err)
 	}
-	// Opportunistic slot tracking — uses response.context.slot to keep the
-	// upstream's SvmStatePoller fresh between polling ticks (and to feed the
-	// poller's traffic gate). The hook itself filters to the methods whose
-	// result actually carries a context envelope (see contextSlotMethods), so
-	// this never walks a multi-megabyte getBlock payload. Silent on miss.
-	if err == nil {
-		upstreamPostForward_trackContextSlot(ctx, network, upstream, req, resp)
-	}
 	// Data-integrity checks. Opt-in: the network's integrity config selects the
 	// checks (no config → nothing runs). A violation converts to the
 	// content-validation error so retry/failover route around the upstream.
 	// Internal requests are skipped to avoid recursing into the engine.
+	//
+	// This runs BEFORE trackContextSlot deliberately: a response that labels
+	// unfinalized data as finalized must not be harvested into the upstream's
+	// finalized tip before the integrity engine judges it — otherwise the
+	// poison becomes its own ground truth (a node could lift its own tip past
+	// any svm.final.* bound it just violated).
 	if err == nil && integrity.HasChecks(strings.ToLower(method)) {
 		dirs := req.Directives()
 		if dirs == nil || !dirs.IsInternal {
@@ -120,6 +118,15 @@ func (h *SvmArchitectureHandler) HandleUpstreamPostForward(ctx context.Context, 
 				return resp, validationErr
 			}
 		}
+	}
+	// Opportunistic slot tracking — uses response.context.slot to keep the
+	// upstream's SvmStatePoller fresh between polling ticks (and to feed the
+	// poller's traffic gate). The hook itself filters to the methods whose
+	// result actually carries a context envelope (see contextSlotMethods), so
+	// this never walks a multi-megabyte getBlock payload. Silent on miss.
+	// Rejected responses never reach here, so poison cannot be harvested.
+	if err == nil {
+		upstreamPostForward_trackContextSlot(ctx, network, upstream, req, resp)
 	}
 	return resp, err
 }
