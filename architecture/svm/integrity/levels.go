@@ -76,8 +76,11 @@ var levelMembership = map[Level][]string{
 		"svm.commit.chainFollower",
 		"svm.commit.timeWindow",
 		"svm.commit.slotEpoch",
-		// svm.final.stakeTableJoin, svm.final.rootSlotSanity,
-		// svm.corr.*, svm.cont.*.
+		// Phase 2 group F: finality-evidence shape.
+		"svm.final.commitmentQuorum",
+		"svm.final.rootSlotSanity",
+		// Remaining: svm.final.stakeTableJoin (needs cross-request aux),
+		// svm.corr.* (join vs cached partner), svm.cont.* (head progression).
 	},
 	LevelAuthoritative: {
 		// Phase 3+: svm.final.voteEvidence.
