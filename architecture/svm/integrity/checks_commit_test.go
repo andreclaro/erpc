@@ -252,3 +252,19 @@ func TestLevelMembership_CorroboratedIncludesChainChecks(t *testing.T) {
 	intr := CheckSetForLevel(LevelIntrinsic)
 	assert.False(t, intr.For("svm.commit.parentLink").Enabled)
 }
+
+func TestParentLink_GenesisSelfParentSkips(t *testing.T) {
+	// The genesis block (slot 0) self-references an all-zeros previous hash
+	// and has no real parent. Once genesis is anchored, re-fetching slot 0
+	// must skip — never compare the block against itself.
+	chain := NewChainState()
+	cs := corroboratedSet("svm.commit.parentLink", "svm.commit.heightMonotonic")
+	genesis := `{"context":{"slot":0},"value":` + chainBlock(0, 0, 0, 1, 0) + `}`
+	res := validateChain(t, "getBlock", `[0]`, genesis, cs, chain, nil)
+	assert.NoError(t, res.Err)
+	res = validateChain(t, "getBlock", `[0]`, genesis, cs, chain, nil)
+	assert.NoError(t, res.Err, "genesis self-parent must skip, not compare the block to itself")
+	assert.Empty(t, res.Recorded)
+	assert.Equal(t, "skip", outcomeOf(res, "svm.commit.parentLink"))
+	assert.Equal(t, "skip", outcomeOf(res, "svm.commit.heightMonotonic"))
+}
