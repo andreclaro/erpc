@@ -57,7 +57,7 @@ var headProgression = &Check{
 		if !ok || slot < 0 || d.chain == nil {
 			return Skipped
 		}
-		bucket := commitmentOf(d.reqParams)
+		bucket := commitmentOf(d.method, d.reqParams)
 		if prev, seen := d.chain.LastHead(bucket); seen && slot < prev {
 			return failf("head regressed in %q bucket: %d after %d — reorg evidence", bucket, slot, prev)
 		}
@@ -79,59 +79,96 @@ var headProgression = &Check{
 		if !ok || slot < 0 || d.chain == nil {
 			return
 		}
-		d.chain.NoteHead(commitmentOf(d.reqParams), slot)
+		d.chain.NoteHead(commitmentOf(d.method, d.reqParams), slot)
 	},
 }
 
-// commitmentOf extracts the commitment bucket from params[0] (bare string or
-// config object). Unknown/absent means the default ("processed") processing
-// commitment.
-func commitmentOf(params []any) string {
-	if len(params) == 0 {
+// canonicalCommitment maps Agave's commitment vocabulary — the canonical
+// three plus the legacy aliases every validator still accepts — onto the
+// three canonical buckets used by the progression store.
+func canonicalCommitment(level string) string {
+	switch strings.ToLower(level) {
+	case "finalized", "root", "max":
+		return "finalized"
+	case "confirmed", "single", "singlegossip":
+		return "confirmed"
+	default: // "processed", "recent", unknown
 		return "processed"
 	}
-	switch p := params[0].(type) {
-	case string:
-		if p != "" {
-			return strings.ToLower(p)
+}
+
+// commitmentOf extracts the request's commitment bucket: the param when
+// given (bare string or config object), normalized through
+// canonicalCommitment; otherwise the METHOD's default. getSlot,
+// getBlockHeight and getEpochInfo default to the finalized commitment on
+// Agave — a bare call's reported head is a finalized claim, not a
+// processed one, and must live in (and be judged against) the finalized
+// bucket.
+func commitmentOf(method string, params []any) string {
+	// The config object carrying "commitment" can sit at any param index
+	// (getEpochInfo: params[0]; getBlock/getAccountInfo: params[1]) — scan
+	// every param, like RequestCommitments does.
+	for _, p := range params {
+		if m, ok := p.(map[string]any); ok {
+			if c, ok := m["commitment"].(string); ok && c != "" {
+				return canonicalCommitment(c)
+			}
 		}
-	case map[string]any:
-		if c, ok := p["commitment"].(string); ok && c != "" {
-			return strings.ToLower(c)
+	}
+	// Legacy bare-string commitment as the leading param (getVoteAccounts-
+	// style). Only recognized commitment vocabulary counts — an address or
+	// other string is not a bucket.
+	if len(params) > 0 {
+		if s, ok := params[0].(string); ok {
+			switch strings.ToLower(s) {
+			case "processed", "recent", "confirmed", "single", "singlegossip", "finalized", "root", "max":
+				return canonicalCommitment(s)
+			}
 		}
+	}
+	switch method {
+	case "getslot", "getblockheight", "getepochinfo":
+		return "finalized"
 	}
 	return "processed"
 }
 
 // svm.cont.minContextSlot — a response served for a request that carried
-// minContextSlot must have context.slot >= that floor. Deterministic: the
-// server either honored the floor or it did not.
+// minContextSlot must have context.slot >= that floor. Applies to the whole
+// envelope-method set (every one of them answers from a bank whose slot is
+// reported in context). Deterministic: the server either honored the floor
+// or it did not.
 var minContextSlot = &Check{
 	ID:      "svm.cont.minContextSlot",
 	Family:  FamilyContinuity,
 	Class:   Deterministic,
-	Methods: []string{"getaccountinfo", "gettokenaccountbalance"},
+	Methods: envelopeMethodList(),
 	Run: func(ctx context.Context, d *Decoded, cfg CheckConfig) *Violation {
-		if len(d.reqParams) < 2 {
-			return Skipped
-		}
-		cfgMap, ok := d.reqParams[1].(map[string]any)
-		if !ok {
-			return Skipped
-		}
-		floorRaw, ok := cfgMap["minContextSlot"]
-		if !ok {
-			return Skipped
-		}
-		// Numbers arrive as float64 through encoding/json; accept any
-		// integer-valued form.
+		// The config object carrying minContextSlot sits at params[1] for
+		// most envelope methods (and params[0] for the bare-config head
+		// polls) — scan every param; the key only ever appears inside a
+		// config object.
 		var floor int64
-		switch v := floorRaw.(type) {
-		case float64:
-			floor = int64(v)
-		case int64:
-			floor = v
-		default:
+		found := false
+		for _, p := range d.reqParams {
+			cfgMap, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			floorRaw, ok := cfgMap["minContextSlot"]
+			if !ok {
+				continue
+			}
+			// Numbers arrive as float64 through encoding/json; accept any
+			// integer-valued form.
+			switch v := floorRaw.(type) {
+			case float64:
+				floor, found = int64(v), true
+			case int64:
+				floor, found = v, true
+			}
+		}
+		if !found {
 			return Skipped
 		}
 		served, ok := d.ContextSlot()
