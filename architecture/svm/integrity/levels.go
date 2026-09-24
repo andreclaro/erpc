@@ -56,6 +56,11 @@ var levelMembership = map[Level][]string{
 		"svm.auth.tokenProgram",
 		"svm.struct.tokenMintShape",
 		"svm.struct.tokenAccountShape",
+		// Phase 2 group D: request/response binding — the answer must be to
+		// the question that was actually asked.
+		"svm.struct.requestedSigMatch",
+		"svm.shape.blocksLimit",
+		"svm.struct.rewardsShape",
 	},
 	LevelCorroborated: {
 		// Phase 2: slot-chain continuity over the verified-block index (first
