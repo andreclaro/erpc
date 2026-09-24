@@ -42,6 +42,9 @@ type Decoded struct {
 	// chain is the network's verified-block index (Input.Chain), feeding the
 	// commitment-tier link checks.
 	chain *ChainState
+	// finality is Input.Finality, exposed to checks that compare response
+	// slots against the upstream's observed tips.
+	finality FinalityResolver
 
 	epochInfoParsed bool
 	epochInfo       *epochInfoResult

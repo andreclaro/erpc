@@ -535,3 +535,56 @@ func svmCorroboratedIntegrity() *common.IntegrityConfig {
 		},
 	}
 }
+
+// TestSvmIntegrity_FinalizedBoundFailsOver exercises svm.final.finalizedBound
+// end to end: rpc1 answers a finalized-commitment getAccountInfo with data
+// from a slot ABOVE its own finalized tip (internally contradictory — the
+// node labels unfinalized data as finalized). With the per-check hardReject
+// override the engine rejects and the retry fails over to rpc2's consistent
+// answer.
+func TestSvmIntegrity_FinalizedBoundFailsOver(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc1.localhost", 1000, 990)
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc2.localhost", 1000, 990)
+
+	acctResult := func(slot, lamports int) string {
+		return `{"jsonrpc":"2.0","id":1,"result":{"context":{"slot":` + svmItoa(slot) + `},"value":{"lamports":` + svmItoa(lamports) + `,"data":["","base64"],"owner":"11111111111111111111111111111111","executable":false}}}`
+	}
+	mockGetAccountInfo := func(host string, body string) {
+		gock.New("http://" + host).
+			Post("").Times(1).
+			Filter(func(r *http.Request) bool {
+				return r.URL.Host == host && strings.Contains(util.SafeReadBody(r), `"method":"getAccountInfo"`)
+			}).
+			Reply(200).BodyString(body)
+	}
+	// rpc1 claims finalized data from slot 995 while its own finalized tip is 990.
+	mockGetAccountInfo("svm-integ-rpc1.localhost", acctResult(995, 999))
+	// rpc2 answers from below the tip.
+	mockGetAccountInfo("svm-integ-rpc2.localhost", acctResult(980, 111))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := svmCorroboratedIntegrity()
+	cfg.Checks = map[string]*common.IntegrityCheckConfig{
+		"svm.final.finalizedBound": {OnFailure: "hardReject"},
+	}
+	net := setupSvmIntegrityNetwork(t, ctx, cfg, "mainnet-beta")
+
+	req := common.NewNormalizedRequest([]byte(
+		`{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["Addr1111111111111111111111111111111111111", {"commitment":"finalized"}]}`))
+	resp, err := svmProjectForward(ctx, net, req)
+	require.NoError(t, err, "must fail over to the upstream with consistent finality")
+	require.NotNil(t, resp)
+	jrr, err := resp.JsonRpcResponse(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, string(jrr.GetResultBytes()), `"lamports":111`,
+		"the served account must be the honest upstream's")
+	assert.Contains(t, string(jrr.GetResultBytes()), `"slot":980`)
+	assert.True(t, req.IntegrityCaught())
+}
+
+func svmItoa(n int) string {
+	return fmt.Sprintf("%d", n)
+}
