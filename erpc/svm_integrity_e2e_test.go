@@ -806,3 +806,58 @@ func TestSvmIntegrity_CommitmentQuorumFailsOver(t *testing.T) {
 	assert.Contains(t, string(jrr.GetResultBytes()), `"totalStake":1000`)
 	assert.True(t, req.IntegrityCaught())
 }
+
+func svmGetSlotRequest() *common.NormalizedRequest {
+	return common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]}`))
+}
+
+func mockSvmGetSlot(host string, slot int, times int) {
+	gock.New("http://" + host).
+		Post("").
+		Times(times).
+		Filter(func(r *http.Request) bool {
+			return strings.Contains(util.SafeReadBody(r), `"method":"getSlot"`)
+		}).
+		Reply(200).
+		BodyString(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":%d}`, slot))
+}
+
+// TestSvmIntegrity_HeadProgressionFailsOver exercises svm.cont.headProgression
+// end to end: the first getSlot anchors the processed head at 950; a second
+// request catches rpc1 serving a regressed head (900) — reorg evidence against
+// the network's own observed history — and the per-check hardReject override
+// fails over to rpc2's forward-consistent head.
+func TestSvmIntegrity_HeadProgressionFailsOver(t *testing.T) {
+	util.ResetGock()
+	defer util.ResetGock()
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc1.localhost", 1000, 990)
+	util.SetupMocksForSvmStatePoller("svm-integ-rpc2.localhost", 1000, 990)
+
+	mockSvmGetSlot("svm-integ-rpc1.localhost", 950, 1)
+	mockSvmGetSlot("svm-integ-rpc1.localhost", 900, 1) // regression
+	mockSvmGetSlot("svm-integ-rpc2.localhost", 950, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := svmCorroboratedIntegrity()
+	disable := false
+	cfg.Checks = map[string]*common.IntegrityCheckConfig{
+		"svm.cont.headProgression": {OnFailure: "hardReject"},
+		"svm.final.tipBound":       {Enabled: &disable},
+		"svm.final.slotAhead":      {Enabled: &disable},
+	}
+	net := setupSvmIntegrityNetwork(t, ctx, cfg, "mainnet-beta")
+
+	resp, err := svmProjectForward(ctx, net, svmGetSlotRequest())
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	req2 := svmGetSlotRequest()
+	resp, err = svmProjectForward(ctx, net, req2)
+	require.NoError(t, err, "must fail over to the upstream with the forward-consistent head")
+	require.NotNil(t, resp)
+	jrr, err := resp.JsonRpcResponse(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, string(jrr.GetResultBytes()), `950`)
+	assert.True(t, req2.IntegrityCaught())
+}

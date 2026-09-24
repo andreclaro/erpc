@@ -40,6 +40,11 @@ type ChainState struct {
 	mu     sync.RWMutex
 	bySlot map[int64]chainEntry
 	newest int64
+	// lastHead tracks the highest head slot observed per commitment bucket
+	// ("processed"/"confirmed"/"finalized" and the empty default), for
+	// headProgression's backwards-move detection. Only advances: a reorg is
+	// evidence, not a state update.
+	lastHead map[string]int64
 }
 
 // NewChainState returns an empty index.
@@ -94,4 +99,33 @@ func (c *ChainState) Parent(slot int64) (chainEntry, bool) {
 // the entry at THIS slot (chainFollower), not a parent lookup.
 func (c *ChainState) Entry(slot int64) (chainEntry, bool) {
 	return c.Parent(slot)
+}
+
+// NoteHead records the highest head slot seen for a commitment bucket.
+// Only advances: a later lower value (reorg) must remain observable by
+// headProgression, so this store never moves backwards.
+func (c *ChainState) NoteHead(bucket string, slot int64) {
+	if c == nil || slot < 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lastHead == nil {
+		c.lastHead = make(map[string]int64, 4)
+	}
+	if prev, ok := c.lastHead[bucket]; ok && prev >= slot {
+		return
+	}
+	c.lastHead[bucket] = slot
+}
+
+// LastHead returns the highest head slot previously observed for a bucket.
+func (c *ChainState) LastHead(bucket string) (int64, bool) {
+	if c == nil {
+		return 0, false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	n, ok := c.lastHead[bucket]
+	return n, ok
 }

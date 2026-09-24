@@ -61,6 +61,9 @@ var levelMembership = map[Level][]string{
 		"svm.struct.requestedSigMatch",
 		"svm.shape.blocksLimit",
 		"svm.struct.rewardsShape",
+		// Phase 2 group G (structural member): a block's height never exceeds
+		// its slot — per-block tick-count truth, no external knowledge needed.
+		"svm.struct.heightVsSlot",
 	},
 	LevelCorroborated: {
 		// Phase 2: slot-chain continuity over the verified-block index (first
@@ -79,8 +82,12 @@ var levelMembership = map[Level][]string{
 		// Phase 2 group F: finality-evidence shape.
 		"svm.final.commitmentQuorum",
 		"svm.final.rootSlotSanity",
+		// Phase 2 group G: continuity — head progression, minContextSlot
+		// binding.
+		"svm.cont.headProgression",
+		"svm.cont.minContextSlot",
 		// Remaining: svm.final.stakeTableJoin (needs cross-request aux),
-		// svm.corr.* (join vs cached partner), svm.cont.* (head progression).
+		// svm.corr.* (join vs cached partner).
 	},
 	LevelAuthoritative: {
 		// Phase 3+: svm.final.voteEvidence.
