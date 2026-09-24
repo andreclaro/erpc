@@ -167,3 +167,24 @@ func (r svmFinalityResolver) IsFinalized(ctx context.Context, slot int64) (final
 	}
 	return slot <= fin, true
 }
+
+// Latest returns the upstream's latest observed slot, making the resolver a
+// TipResolver for the svm.final.* consistency checks.
+func (r svmFinalityResolver) Latest(ctx context.Context) (slot int64, known bool) {
+	if r.u == nil {
+		return 0, false
+	}
+	sup, ok := r.u.(common.SvmUpstream)
+	if !ok {
+		return 0, false
+	}
+	p := sup.SvmStatePoller()
+	if p == nil || p.IsObjectNull() {
+		return 0, false
+	}
+	latest := p.LatestSlot()
+	if latest <= 0 {
+		return 0, false
+	}
+	return latest, true
+}

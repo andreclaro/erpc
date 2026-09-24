@@ -57,6 +57,10 @@ var levelMembership = map[Level][]string{
 		// ReorgSensitive checks — verdict resolves per finality).
 		"svm.commit.parentLink",
 		"svm.commit.heightMonotonic",
+		// Phase 2: finality consistency against the upstream's own poller tips.
+		"svm.final.finalizedBound",
+		"svm.final.slotAhead",
+		"svm.final.tipBound",
 		// Phase 2+: svm.commit.chainFollower, svm.commit.slotEpoch,
 		// svm.commit.timeWindow, svm.final.commitmentQuorum,
 		// svm.final.stakeTableJoin, svm.final.rootSlotSanity,
