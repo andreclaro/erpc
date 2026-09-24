@@ -2,7 +2,7 @@ package integrity
 
 // Level is the single front-door preset over the check catalog
 // (specs/svm-integrity/feature.md §3): the one knob most operators set. Higher
-// levels are supersets of lower ones — same contract as the EVM engine.
+// levels are supersets of lower ones - same contract as the EVM engine.
 type Level string
 
 const (
@@ -31,13 +31,13 @@ func (l Level) rank() int {
 // level *introduces*. A level enables the union of its row and all lower rows
 // (intrinsic ⊂ corroborated ⊂ authoritative):
 //
-//   - intrinsic     — pure self-consistency; no upstream cost, always safe.
-//   - corroborated  — compare against ground truth already available (follower,
+//   - intrinsic     - pure self-consistency; no upstream cost, always safe.
+//   - corroborated  - compare against ground truth already available (follower,
 //     cached stake table); no force-fetch.
-//   - authoritative — force-fetch the canonical entity to corroborate against.
+//   - authoritative - force-fetch the canonical entity to corroborate against.
 //
 // Every registered check id must appear in exactly one row, and no row may name
-// an unknown id — both enforced by TestLevelMembershipCoversAllChecks.
+// an unknown id - both enforced by TestLevelMembershipCoversAllChecks.
 //
 // Rows for the commitment/corroboration tiers land with their phases; keeping
 // them empty (rather than absent) documents the intended shape.
@@ -53,8 +53,11 @@ var levelMembership = map[Level][]string{
 		"svm.shape.slotEncoding",
 	},
 	LevelCorroborated: {
-		// Phase 2+: svm.commit.chainLink, svm.commit.chainFollower,
-		// svm.commit.heightMonotonic, svm.commit.slotEpoch,
+		// Phase 2: slot-chain continuity over the verified-block index (first
+		// ReorgSensitive checks — verdict resolves per finality).
+		"svm.commit.parentLink",
+		"svm.commit.heightMonotonic",
+		// Phase 2+: svm.commit.chainFollower, svm.commit.slotEpoch,
 		// svm.commit.timeWindow, svm.final.commitmentQuorum,
 		// svm.final.stakeTableJoin, svm.final.rootSlotSanity,
 		// svm.corr.*, svm.cont.*.
