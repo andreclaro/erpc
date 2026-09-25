@@ -39,6 +39,14 @@ type Decoded struct {
 	slotNum       int64
 	slotNumOK     bool
 
+	// contextSlotParsed caches the envelope scan: responseSlot() in the
+	// finality checks reads ContextSlot on every check, and the raw
+	// unmarshal re-validates the whole document each time (~100us on a
+	// 20-tx getBlock). Parse once, sticky like every other accessor.
+	contextSlotParsed bool
+	contextSlot       int64
+	contextSlotOK     bool
+
 	// chain is the network's verified-block index (Input.Chain), feeding the
 	// commitment-tier link checks.
 	chain *ChainState
@@ -480,6 +488,10 @@ func (d *Decoded) TxForVerify() (*parsedTx, error) {
 // ContextSlot extracts result.context.slot for envelope-carrying methods. ok
 // is false when the envelope or slot is absent.
 func (d *Decoded) ContextSlot() (int64, bool) {
+	if d.contextSlotParsed {
+		return d.contextSlot, d.contextSlotOK
+	}
+	d.contextSlotParsed = true
 	var env struct {
 		Context struct {
 			Slot json.RawMessage `json:"slot"`
@@ -492,8 +504,8 @@ func (d *Decoded) ContextSlot() (int64, bool) {
 	if len(env.Context.Slot) == 0 {
 		return 0, false
 	}
-	n, ok := rawJSONInt64(env.Context.Slot)
-	return n, ok
+	d.contextSlot, d.contextSlotOK = rawJSONInt64(env.Context.Slot)
+	return d.contextSlot, d.contextSlotOK
 }
 
 // ---------- chain index feed ----------
