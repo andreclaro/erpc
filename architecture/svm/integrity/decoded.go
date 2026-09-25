@@ -19,6 +19,13 @@ type Decoded struct {
 	block       *blockResult
 	blockErr    error
 
+	// blockTxs caches BlockTxs' per-tx parse: txShape, sigUniqueness and
+	// signatureVerify all funnel through it, and re-parsing 20 txs per
+	// check costs ~290us of shared work per getBlock response.
+	blockTxsParsed bool
+	blockTxs       []*parsedTx
+	blockTxsErr    error
+
 	txParsed bool
 	tx       *txEnvelopeResult
 	txErr    error
@@ -451,23 +458,32 @@ func parseLookup(raw json.RawMessage) (parsedLookup, error) {
 // BlockTxs iterates the block's transactions, normalizing each into a parsedTx.
 // A transaction the check cannot fully model (wire-string encoding, missing
 // message) yields errNotVerifiable for that entry — callers skip the whole
-// check on ANY such entry (chain-safety).
+// check on ANY such entry (chain-safety). The parse is cached and sticky:
+// every check that inspects transactions shares one parse per response.
 func (d *Decoded) BlockTxs() ([]*parsedTx, error) {
+	if d.blockTxsParsed {
+		return d.blockTxs, d.blockTxsErr
+	}
+	d.blockTxsParsed = true
 	b, err := d.Block()
 	if err != nil {
+		d.blockTxsErr = err
 		return nil, err
 	}
 	if b.Transactions == nil {
+		d.blockTxsErr = errNotVerifiable
 		return nil, errNotVerifiable
 	}
 	out := make([]*parsedTx, 0, len(b.Transactions))
 	for _, rt := range b.Transactions {
 		tx, err := parseTx(rt)
 		if err != nil {
+			d.blockTxsErr = err
 			return nil, err
 		}
 		out = append(out, tx)
 	}
+	d.blockTxs = out
 	return out, nil
 }
 
