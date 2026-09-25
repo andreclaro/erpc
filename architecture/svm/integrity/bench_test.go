@@ -278,6 +278,58 @@ func BenchmarkDecodedGetBlock(b *testing.B) {
 	}
 }
 
+// BenchmarkChecks measures each registered check's marginal cost on the
+// bench fixtures, two ways per check:
+//
+//   - /run     — the check's Run directly, on a warm Decoded (the JSON parse
+//     is shared across all checks per response, so it is excluded; add the
+//     ~411us parse layer for a cold per-response picture).
+//   - /validate — the full Validate pipeline with ONLY that check enabled, so
+//     per-response construction overhead is included.
+//
+// Checks whose wiring is absent on the fixture (Phase-2 checks without a
+// Chain, finality resolver, or stake table) measure their real cost there:
+// the skip path.
+func BenchmarkChecks(b *testing.B) {
+	ctx := context.Background()
+
+	benchMethod := func(b *testing.B, method, rawResult, paramsJSON string, params []any) {
+		for _, c := range checksFor(method) {
+			c := c
+			b.Run(c.ID+"/run", func(b *testing.B) {
+				d := newDecoded(method, []byte(rawResult))
+				d.reqParams = params
+				cfg := benchCorroborated.For(c.ID)
+				if v := c.Run(ctx, d, cfg); v != nil && v != Skipped {
+					b.Fatalf("bench fixture must pass %s: %s", c.ID, v.Reason)
+				}
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					_ = c.Run(ctx, d, cfg)
+				}
+			})
+			b.Run(c.ID+"/validate", func(b *testing.B) {
+				cs := CheckSet{}.Enable(c.ID, nil)
+				b.ReportAllocs()
+				for i := 0; i < b.N; i++ {
+					if res := benchValidate(rawResult, paramsJSON, cs); res.Err != nil {
+						b.Fatal(res.Err)
+					}
+				}
+			})
+		}
+	}
+
+	b.Run("getBlock", func(b *testing.B) {
+		benchMethod(b, "getblock", benchBlockResult, benchBlockParams,
+			[]any{float64(benchSlot), map[string]any{"commitment": "finalized", "encoding": "json"}})
+	})
+	b.Run("getSlot", func(b *testing.B) {
+		benchMethod(b, "getslot", `950`, `[]`, nil)
+	})
+}
+
 // BenchmarkValidate is the end-to-end pipeline including response
 // construction — the per-response cost a deployment actually pays.
 func BenchmarkValidate(b *testing.B) {
