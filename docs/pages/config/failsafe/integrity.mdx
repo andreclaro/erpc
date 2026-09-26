@@ -31,6 +31,11 @@ eRPC has **two independent layers** of integrity, configured separately:
    root recompute, cross-block continuity, authoritative corroboration). **Off by
    default** — deploy with no `integrity:` block and nothing runs.
 
+The Layer-2 catalog is **per-architecture** — the EVM catalog is documented below,
+followed by the [SVM (Solana) catalog](#the-svm-solana-check-catalog) with measured
+per-tier costs. The `level` knob, `invalidBehavior`, `observeOnly`, and every other
+mechanism on this page work identically for both.
+
 ## Quick taste
 
 Turn on the intrinsic data-integrity checks (cheap, self-contained, no extra upstream calls):
@@ -51,6 +56,31 @@ Turn on the intrinsic data-integrity checks (cheap, self-contained, no extra ups
   networks: [{
     architecture: "evm",
     evm: { chainId: 1 },
+    integrity: {
+      level: "intrinsic", // off | intrinsic | corroborated | authoritative
+    },
+  }],
+}]`}
+/>
+
+The identical one-liner for a Solana network — same knob, Solana-native catalog:
+
+<ConfigTabs
+	path="projects[].networks[]"
+	focusYaml="6-7"
+	focusTs="6-7"
+	yaml={`projects:
+  - id: main
+    networks:
+      - architecture: svm
+        svm: { cluster: mainnet-beta }
+        integrity:
+          level: intrinsic   # off | intrinsic | corroborated | authoritative`}
+	ts={`projects: [{
+  id: "main",
+  networks: [{
+    architecture: "svm",
+    svm: { cluster: "mainnet-beta" },
     integrity: {
       level: "intrinsic", // off | intrinsic | corroborated | authoritative
     },
@@ -277,6 +307,83 @@ Methods column: **block** = `eth_getBlockByNumber`/`eth_getBlockByHash`; **recei
 | `receiptsRootRecompute` | authoritative | receipts | receipt MPT root ≠ the header's `receiptsRoot` (force-fetched by hash) |
 
 ※ = **reorg-sensitive** (governed by `invalidBehavior`). All others are deterministic and always reject on violation. Note the division of labour on `eth_getBlockByHash`: `blockByHashIdentity` enforces that you got **the block you asked for**, while the continuity pair (which judges *canonicality*, a question a by-hash lookup never asked) deliberately does not run there — see [Edge cases](#edge-cases--gotchas) #7. Both stateful tiers share one **reorg-aware per-network ChainView** — a bounded `number→hash` pin plus a content-addressed header cache (window `reorgWindow`, default 32). `corroborated` populates it passively from blocks your own traffic already pulled (it **never fetches a block sequence**); `authoritative` additionally force-fetches a missing anchor **once** through the normal network path (cache-backed, recursion-guarded, deduped by the ChainView), capped by `budget`. A changed hash for a number is treated as a reorg: the new fork is adopted and its stale descendants are rolled back, so the pin always reflects one consistent fork — block and receipts can't disagree.
+
+### The SVM (Solana) check catalog
+
+The same module and `level` knob serve `architecture: svm` networks with a
+Solana-native catalog of 27 checks. The model differs from EVM in three ways:
+Solana has **no receipts** (the transaction signature *is* the proof —
+`svm.auth.signatureVerify` is the ed25519 counterpart of EVM sender recovery),
+finality is expressed in **commitment levels** rather than confirmation counts,
+and an unfinalized block is *replaced* at its slot (slot rotation) rather than
+reorged away — so the reorg-sensitive tier is keyed on finality evidence, not
+canonical-chain reconstruction. `authoritative` currently runs the corroborated
+set; no SVM checks require force-fetching yet.
+
+Methods column: **block** = `getBlock`/`getConfirmedBlock`; **tx** =
+`getTransaction`/`getConfirmedTransaction`; **envelope** = every method whose
+response carries a `context` envelope. All checks are chain-safe: a transaction
+in a wire-string encoding (base64/base58/raw, or `transactionDetails:
+"signatures"`/`"none"`) carries no verifiable message material, so the
+transaction-inspecting checks **skip, never false-flag**.
+
+| Check id | Level | Methods | What it catches |
+|---|---|---|---|
+| `svm.struct.blockShape` | intrinsic | block | a block missing `blockhash`/`parentSlot`/`blockHeight`/`blockTime`, or with non-positive slot/height |
+| `svm.struct.txShape` | intrinsic | block, tx | a transaction with no signatures, no message account keys, or instruction program-id indices outside the account list |
+| `svm.struct.sigUniqueness` | intrinsic | block | duplicate signatures inside one block |
+| `svm.struct.rewardsShape` | intrinsic | block | a rewards entry whose payee isn't decodable base58 or whose lamports aren't a signed integer (rent rewards go negative) |
+| `svm.struct.heightVsSlot` | intrinsic | block | `blockHeight` greater than the slot — more produced blocks than ticks |
+| `svm.struct.requestedSigMatch` | intrinsic | tx | the served transaction isn't the one asked for (no requested signature among the served ones) |
+| `svm.struct.tokenMintShape` | intrinsic | `getAccountInfo` | a token-program-owned account with the canonical 82-byte payload that isn't a structurally valid mint |
+| `svm.struct.tokenAccountShape` | intrinsic | `getTokenAccountsByOwner`/`Delegate` | token-account entries whose binary payload isn't the base SPL token-account layout |
+| `svm.auth.signatureVerify` | intrinsic | block, tx | the recomputed v0/v1 wire message doesn't verify against the required signer keys' ed25519 signatures |
+| `svm.auth.genesisHash` | intrinsic | `getGenesisHash` | a genesis hash that doesn't match the network's known value |
+| `svm.auth.tokenProgram` | intrinsic | `getTokenAccountsByOwner`/`Delegate` | token accounts owned by a bogus program (synthesized token data) |
+| `svm.shape.magnitude` | intrinsic | block, `getBlockCommitment`, `getSignaturesForAddress` | implausible magnitudes — slots near the int64 ceiling, absurd balances |
+| `svm.shape.slotEncoding` | intrinsic | `getBlocks`, `getBlocksWithLimit`, `getSlot`, `getBlockHeight`, `getTransactionCount`, `getEpochInfo` | a slot/epoch/height field that isn't an integer |
+| `svm.shape.commitmentParam` | intrinsic | envelope | an unrecognized commitment vocabulary value |
+| `svm.shape.blocksLimit` | intrinsic | `getBlocks`, `getBlocksWithLimit` | a returned slot list longer than the request asked for |
+| `svm.commit.parentLink` ※ | corroborated | block | the block's `previousBlockhash` ≠ the hash observed for its parent slot |
+| `svm.commit.heightMonotonic` ※ | corroborated | block | block heights going backwards along the observed chain |
+| `svm.commit.chainFollower` ※ | corroborated | block | a served block disagreeing with the chain follower's pinned entry at its slot (bankhash / parent mismatch — double-produce or slot-shift evidence) |
+| `svm.commit.timeWindow` ※ | corroborated | block | `blockTime` outside the possible envelope or grossly earlier than the pinned parent's |
+| `svm.commit.slotEpoch` | corroborated | `getEpochInfo` | epoch bookkeeping that doesn't add up (`epoch × slotsPerEpoch + slotIndex ≠ absoluteSlot`) |
+| `svm.final.finalizedBound` ※ | corroborated | envelope | a response served under a finalized commitment whose slot the finality resolver knows is unfinalized |
+| `svm.final.slotAhead` ※ | corroborated | envelope | a response `context.slot` ahead of the observed tip |
+| `svm.final.tipBound` ※ | corroborated | `getSlot`, `getBlockHeight` | a head implausibly far beyond the tip evidence |
+| `svm.final.commitmentQuorum` | corroborated | `getBlockCommitment` | a commitment histogram without exactly 32 non-increasing integer tiers within total stake |
+| `svm.final.rootSlotSanity` ※ | corroborated | `getVoteAccounts` | a vote account whose root slot exceeds its last vote, or votes impossibly far ahead of the observed head |
+| `svm.cont.headProgression` ※ | corroborated | `getSlot`, `getBlockHeight`, `getEpochInfo` | heads moving backward within a commitment bucket, or inverting across buckets |
+| `svm.cont.minContextSlot` | corroborated | envelope | a response whose `context.slot` is below the request's `minContextSlot` floor |
+
+※ = **reorg-sensitive** (governed by `invalidBehavior`); the rest are deterministic
+and always reject on violation. The stateful tier shares one per-network view: a
+**chain follower** (verified bankhash pins per slot, seeded from traffic that
+passed every enabled check — first sight of a slot seeds, later disagreement is
+divergence), a **finality resolver** (commitment-level classification per slot),
+and a head high-water mark that `AfterPass` commits only after the whole response
+validated cleanly — a head sighting tainted by any other mismatch never becomes
+the baseline future responses are judged against. None of it fetches block
+sequences; everything is seeded passively from responses your own traffic
+already pulled.
+
+#### What it costs (measured)
+
+Benchmarked on the production hot paths (`architecture/svm/integrity/bench_test.go`,
+Xeon Platinum, 20-transaction `getBlock` response, ~15 KB):
+
+| Path | Latency | Note |
+|---|---|---|
+| `svm.auth.signatureVerify` | ~105 µs **per signature** | the only material cost — ed25519 is the Solana analogue of EVM's keccak + ecrecover, and it dominates exactly like them |
+| full `getBlock` at `corroborated` | ~2.9 ms | signatureVerify × 20 signatures + one shared transaction parse |
+| same, without `signatureVerify` | ~0.7 ms | structural + shape + finality + continuity combined |
+| `getSlot` at `corroborated` | ~8 µs | every check is within noise of the response-construction floor — integrity on slot polling is effectively free |
+
+Every transaction-inspecting check shares one cached parse per response and the
+envelope accessors parse once and stick, so the marginal cost of checks beyond
+`signatureVerify` is nanoseconds-to-microseconds. Pick a level by crypto budget,
+not by fear of the rest of the catalog.
 
 ### Per-finality verdict: `invalidBehavior`
 
@@ -608,6 +715,8 @@ integrity:
 - [`common/config_integrity.go`](https://github.com/erpc/erpc/blob/main/common/config_integrity.go) — the `IntegrityConfig` schema + merge.
 - [`common/defaults.go`](https://github.com/erpc/erpc/blob/main/common/defaults.go) — `migrateLegacyIntegrityChecks`: deprecated flag → `integrity.checks` translation.
 - [`architecture/evm/eth_blockNumber.go`](https://github.com/erpc/erpc/blob/main/architecture/evm/eth_blockNumber.go) / [`eth_getBlockByNumber.go`](https://github.com/erpc/erpc/blob/main/architecture/evm/eth_getBlockByNumber.go) / [`block_range.go`](https://github.com/erpc/erpc/blob/main/architecture/evm/block_range.go) — Layer-1 block-tip & availability enforcement.
+- [`architecture/svm/integrity/`](https://github.com/erpc/erpc/blob/main/architecture/svm/integrity) — the SVM check engine, catalog, levels, decoded accessors, chain follower, finality resolver.
+- [`architecture/svm/integrity_hooks.go`](https://github.com/erpc/erpc/blob/main/architecture/svm/integrity_hooks.go) — `HandleUpstreamPostForward` runs the SVM engine (opt-in via `resolveIntegrity`).
 
 ### Observability
 
@@ -657,5 +766,7 @@ tracing is off. Sample a few requests in detailed mode to audit a specific upstr
 - [Timeout](/config/failsafe/timeout) — bounds the re-fetch triggered by highest-block enforcement and authoritative force-fetch.
 - [Selection policies](/config/projects/selection-policies) — upstream scoring uses stale-block metrics.
 - [Survive provider outages](/use-cases/survive-provider-outages) — the broader scenario this feature serves.
+- [Commitment & finality](/reference/svm/commitment) — the commitment layer the SVM finality checks classify against.
+- [Slot tracking & health](/reference/svm/slot-tracking) — the head high-water marks the SVM continuity checks judge against.
 
 </AISection>
