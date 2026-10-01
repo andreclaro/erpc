@@ -1,0 +1,283 @@
+---
+title: "Failsafe, in depth - Inside eRPC"
+description: "The network-scope failsafe stack as a nesting doll — timeout(consensus(retry(hedge(upstream)))) — and the three-way classification that decides, after every attempt, whether to wait, switch, race, or give up."
+---
+
+import { LLMsTxtLink, AISection, SourceLink, PromptExample } from "../../components";
+import { TimelineRace } from "../../components/explainer/TimelineRace";
+import { failsafeScenarios } from "../../components/explainer/scenarios/failsafe";
+
+<LLMsTxtLink />
+
+# Failsafe, in depth — the nesting doll
+
+Every request that reaches the network scope passes through a stack of policies
+that nest like a matryoshka doll: a lifecycle **timeout** wraps an optional
+**consensus** race, which wraps the **retry** loop, which wraps the **hedge**
+race, which finally runs the upstream sweep. Each layer is independently
+optional and independently matched per (method, finality, request kind) — but
+the composition order never changes.
+
+The hard part is not the nesting, it is the classification. After every attempt
+eRPC decides which of three worlds it is in: **real data** (return it),
+**empty** (maybe not-yet-data — wait about one block, then retry), or **error**
+(retryable → back off and try the next upstream; deterministic → surface it
+immediately). Retrying an empty result the way you retry a 502 would hammer
+upstreams for data that does not exist yet; waiting a full block time for a
+crashed upstream would add seconds for nothing. The two kinds of retry
+therefore have different reasons, different delays, and different caps.
+
+The timelines below play the three canonical paths through the doll: a block
+that has not reached the upstream yet, a pool of 5xx-ing upstreams, and a hedge
+race where a fast-but-empty answer is refused so a slower sibling with real
+data can win.
+
+<TimelineRace scenarios={failsafeScenarios} caption="Three trips through the same nesting doll: a catch-up wait for a not-yet-produced block, exponential backoff across a 5xx-ing pool, and a hedge race that rejects a fast empty so the sibling's data can win." />
+
+## The workflow
+
+**Tab 1 — Block unavailable** (2s-block chain):
+
+1. Your request asks for block **N** — produced seconds ago. Upstream A's head
+   is still N−1.
+2. **Attempt 1**: before any network call, the sweep's pre-forward check
+   (`checkUpstreamBlockAvailability`) sees N above A's serving upper bound and
+   skips it with `ErrUpstreamBlockUnavailable` — a *retryable* skip.
+3. The pool is exhausted, so the retry classifier returns reason
+   **`block_unavailable`**. This path is governed by its own cap,
+   `emptyResultMaxAttempts` (default **2** — original + one retry), not by
+   `maxAttempts`.
+4. `computeDelay` takes the catch-up branch: wait **≈ EMA block time ×
+   `blockUnavailableDelayMultiplier`** (default **1.0**) — about one block, the
+   time the data usually needs to appear.
+5. One block later, block N lands on upstream A.
+6. **Attempt 2**: sweep → A → round trip → **200 OK**. Had it failed again, the
+   cap would stop a third attempt — waiting longer is a chain problem, not a
+   request problem.
+
+**Tab 2 — Upstream 5xx** (policy: `maxAttempts: 3`, `delay: 250ms`,
+`backoffFactor: 1.2`):
+
+1. **Attempt 1**: the sweep tries upstream A → **502 Bad Gateway**. A
+   retryable-toward-network error does *not* end the attempt — the sweep
+   continues to **B within the same attempt**, and B 502s too.
+2. Pool exhausted → `ErrUpstreamsExhausted` wrapping server errors → the
+   classifier returns reason **`retryable_error`**.
+3. `computeDelay` takes the backoff branch: `ComputeBackoff(cfg, 0)` = 250ms ×
+   1.2⁰ = **250ms**.
+4. **Attempt 2**: a fresh sweep → A (recovered) → **200 OK**. A third attempt,
+   had it been needed, would have waited 300ms (250ms × 1.2), capped by
+   `maxAttempts: 3` total rounds.
+
+**Tab 3 — Hedge race** (policy: `hedge.delay.quantile: 0.7`, `maxCount: 1`):
+
+1. `eth_getTransactionByHash` — a `null` answer means "this upstream does not
+   have it yet", so the method is **not** in `emptyResultAccept`.
+2. The **primary leg to A fires immediately**; a pooled timer arms to the
+   method's measured p70 latency (~250ms).
+3. A answers fast — with **null**. `keep()` **rejects the fast empty**: letting
+   it win would cancel the legs that could still return real data. The race
+   continues.
+4. The timer fires → the **hedge leg to B** launches.
+5. B returns the transaction → `keep()` accepts → **winner**. The victory is
+   recorded (`network_hedge_winner_total{upstream="b"}`) and any in-flight
+   siblings are canceled via `siblingCtx`.
+6. Client gets **200 OK**. If every leg had come back empty, the last response
+   would be returned instead — hedging never ends worse than not hedging.
+
+## In the source
+
+### The nesting doll — `erpc/network_executor.go:164`
+
+- `networkExecutor.Run` first wraps the whole invocation in the lifecycle
+  **timeout** (a `context.WithTimeoutCause`, so it bounds *all* retries and
+  hedges, not individual attempts), then branches: with consensus configured,
+  `consensus.Run(ctx, req, slotInner)` where each slot is
+  `retry(hedge(tryOneUpstream))`; otherwise `runRetryHedge` =
+  `retry(hedge(runUpstreamSweep))` (`:205-225`).
+- The scope boundaries are enforced at construction: a **circuit breaker is
+  rejected at network scope** (`NewNetworkExecutor`, `:71`), and **consensus is
+  rejected at upstream scope** (`upstream/upstream_executor.go:47`).
+- The two closures come from `Network.Forward` (`erpc/networks.go:2350-2357`):
+  `tryOneUpstream` for consensus slots, `runUpstreamSweep` for the standard
+  path. Within one sweep, a retryable error does not stop the loop — the next
+  upstream is tried in the same attempt (`networks.go:2294`); only a
+  non-retryable verdict breaks early.
+
+### Policy match — `erpc/networks.go:1708`
+
+`getFailsafeExecutor` walks the network's `failsafe` array **in config order**
+and returns the first entry whose `matchMethod` (wildcard-aware),
+`matchFinality`, and `matchRequestKind` all match the request. A catch-all
+no-op executor is appended at build time (`erpc/networks_registry.go:141-143`),
+so an unmatched request still runs — just with no policies.
+
+### The retry classifier — `shouldRetryWithReason` (`erpc/network_executor.go:396`)
+
+One function maps every (resp, err) outcome to a reason string that becomes the
+`reason` label of `network_retry_attempt_total`:
+
+- `block_unavailable` — `ErrUpstreamBlockUnavailable`;
+- `missing_data` — `ErrEndpointMissingData`, or an exhausted pool where *every*
+  cause is missing-data (permanently-absent data, e.g. a skipped slot, returns
+  no-retry immediately);
+- `empty_result` — an emptyish response while `retryEmpty` is on and the method
+  is not in `emptyResultAccept`;
+- `pending_tx` — tx-lookup methods while `retryPending` is on;
+- `retryable_error` — anything `IsRetryableTowardNetwork` (5xx, transport,
+  capacity, …);
+- `execution_exception_retryable` — an execution exception explicitly flagged
+  retryable toward the network.
+
+The first three share the data-unavailable cap: `dataUnavailableCapReached`
+(`:385`) compares the attempt index against `emptyResultMaxAttempts` (default
+**2**, `common/defaults.go:2412`) — deliberately separate from `maxAttempts`
+(default **3**, `common/defaults.go:2724`), which governs genuine-error
+failover. Deterministic errors (client faults, execution reverts) return `""`:
+no retry, the answer is the answer.
+
+### Two delay regimes — `computeDelay` (`erpc/network_executor.go:554`)
+
+- **Catch-up waits** (`block_unavailable` / `empty_result` / `missing_data`):
+  the dynamic delay — EMA block time × `blockUnavailableDelayMultiplier`
+  (default **1.0**, `common/defaults.go:2366`; wired per network in
+  `erpc/networks_registry.go:105-115`) — with the static `emptyResultDelay` as
+  cold-start fallback. One mechanism: the data usually appears within one
+  block.
+- **Genuine errors**: `failsafe.ComputeBackoff` (`failsafe/backoff.go:21`) —
+  `delay × backoffFactor^attempt`, capped at `backoffMaxDelay` (defaults: factor
+  **1.2**, cap **3s**, base delay **0** — retry immediately unless configured).
+- The catch-up wait is also measured:
+  `MetricNetworkDataUnavailableWaitSeconds` is observed right next to the sleep
+  (`network_executor.go:344-353`), so operators can split retry latency into
+  "chain catching up" vs "upstream failing".
+
+### The hedge race — `runHedge` (`erpc/network_executor.go:589`) + `failsafe/hedge.go`
+
+- Write methods (`eth_sendRawTransaction`, SVM `sendTransaction`, …) are never
+  hedged — non-idempotent broadcasts must not fan out (`:604-608`).
+- The delay is one `AdaptiveDuration` (`common/adaptive_duration.go:83`):
+  scalar `base` for fixed delays; `quantile` for adaptive — the per-method pXX
+  from the network's `QuantileTracker`, clamped to `[min, max]` (defaults
+  **100ms / 999s**; `maxCount` default **1**, `common/defaults.go:2801-2831`).
+  Cold start (no latency data) falls back to `min`.
+- `RunHedged` fires the primary immediately, arms a pooled `time.Timer` per
+  hedge (pool added after `time.NewTimer` showed up in prod heap profiles), and
+  races all legs for the first result `keep()` accepts. `keep()` rejects
+  retryable errors and — unless the method is in `emptyResultAccept`
+  (`common/defaults.go:2441`: `eth_getLogs`, `eth_call`, `eth_getBalance`, …) —
+  emptyish responses. Winner selection cancels the siblings' `siblingCtx`;
+  losers are `Release()`d; if nothing is kept, the last result is returned.
+- Kept winners are counted per upstream:
+  `MetricNetworkHedgeWinnerTotal` (`network_executor.go:638-644`) — skew here
+  means your primary ordering is wrong.
+
+### The breaker lives one scope down — `failsafe/breaker.go` + `upstream/upstream_executor.go`
+
+The circuit breaker runs per upstream, not per network
+(`upstream/upstream_executor.go:361-371`): before the call it takes a permit,
+after the call `upstreamBreakerOutcome` (`:398`) records **failure** for 5xx /
+transport / unauthorized / billing (and syncing-and-empty success), **ignore**
+for cancellations and skips — hedges, internal probes, and composite requests
+never move the counters. The breaker itself is a policy-free state machine: a
+ring buffer of the last **80** outcomes opens the circuit at **20** failures;
+after `halfOpenAfter` (**5m**) a limited trial (8 of 200 capacity successes)
+closes it again (defaults: `common/defaults.go:2836-2879`). Transitions fire
+`OnTransition` without holding the breaker mutex.
+
+## First principles
+
+> **∅ Empty ≠ error.** Every classification in the stack is three-way: data,
+> empty, error. Empty point-lookups get a patient, block-time wait and their own
+> attempt cap; errors get fast backoff and upstream rotation; data goes home.
+> Methods where empty *is* the canonical answer are named explicitly in
+> `emptyResultAccept` — everything else treats null as "not here yet".
+
+> **⏳ A wait is only meaningful for not-yet-data.** The long delay exists
+> because a block that was just produced will exist one block from now. The
+> same wait applied to a 5xx would be pure latency — and no wait at all applied
+> to a not-yet-indexed block would burn every attempt before the data arrives.
+> Delay policy follows the failure mode, never a global constant.
+
+> **🪆 Policies nest in a fixed order; each one is optional.** Timeout bounds
+> everything, consensus arbitrates slots, retry picks attempts, hedge races
+> siblings, the breaker guards each upstream. Layers can be absent, but they
+> never reorder — so any outcome can be explained by walking the doll from the
+> outside in.
+
+## Agent reference
+
+<PromptExample
+  n={1}
+  title="Explain my retry latency"
+  prompt="Using my eRPC metrics, break down network retry attempts by reason and tell me how much of my request latency is chain catch-up waiting versus genuine upstream errors. Then suggest failsafe tuning for my eRPC config based on what you find."
+  defaultOpen={false}
+/>
+
+Reference URL for agents: `https://docs.erpc.cloud/inside-erpc/failsafe-in-depth.llms.txt`
+
+<AISection title="Failsafe — full agent reference" hint="Executor composition, retry classification, delay regimes, hedge and breaker mechanics, metrics, and source entry points.">
+
+### How it works
+
+`Network.Forward` resolves the request's failsafe executor by walking the
+network's `failsafe` array in config order (first match on `matchMethod`
+wildcard + `matchFinality` + `matchRequestKind`; a catch-all no-op executor is
+always appended). The executor composes
+`timeout( consensus( retry( hedge( tryOneUpstream ))) )` when consensus is
+configured, else `timeout( retry( hedge( runUpstreamSweep )))`. The timeout is
+lifecycle-scoped (bounds all attempts). Within one attempt the sweep tries
+upstreams in selection-policy order, continuing past retryable errors and
+stopping only on usable responses or non-retryable verdicts. After each
+attempt, `shouldRetryWithReason` classifies the outcome into `block_unavailable`
+/ `missing_data` / `empty_result` (data-unavailable: capped by
+`emptyResultMaxAttempts`, default 2; delayed by EMA block time ×
+`blockUnavailableDelayMultiplier`, default 1.0, static `emptyResultDelay` as
+cold-start fallback), or `pending_tx` / `retryable_error` /
+`execution_exception_retryable` (genuine-error failover: capped by
+`maxAttempts`, default 3; delayed by `ComputeBackoff` = delay ×
+backoffFactor^attempt capped at backoffMaxDelay, defaults 0ms / 1.2 / 3s), or
+no-retry. Hedge (network scope) races `maxCount` extra sweep legs after an
+`AdaptiveDuration` delay (quantile from the per-method QuantileTracker, clamped
+to min 100ms / max 999s; cold start → min); `keep()` rejects retryable errors
+and emptyish results for methods outside `emptyResultAccept`, so a fast null
+never cancels a slower leg carrying data; winner selection cancels siblings and
+increments the per-upstream winner counter. The circuit breaker exists only at
+upstream scope (rejected at network scope): ring of 80 outcomes, opens at 20
+failures (5xx/transport/unauthorized/billing/syncing-empty), half-open trial
+after 5m, closes on 8 successes; hedges, internal probes, composite requests,
+cancellations and skips do not move it.
+
+### Observability
+
+| Metric | Type | Labels | When it fires |
+|---|---|---|---|
+| `erpc_network_retry_attempt_total` | counter | `project`, `network`, `category`, `reason`, `finality` | Each network-scope retry; `reason` ∈ `empty_result` / `pending_tx` / `retryable_error` / `block_unavailable` / `missing_data` |
+| `erpc_network_data_unavailable_wait_seconds` | histogram | `project`, `network`, `category`, `reason`, `finality` | Wall-clock catch-up wait slept before a data-unavailable retry (block-time-relative delay) |
+| `erpc_network_hedge_winner_total` | counter | `project`, `network`, `upstream`, `category`, `finality` | A hedge leg's response was kept — per-upstream race wins; skew = bad primary ordering |
+| `erpc_network_hedged_request_total` | counter | `project`, `network`, `upstream`, `category`, `attempt`, `finality`, `user`, `agent_name` | An upstream attempt ran as part of a hedge (`hedges > 0`) |
+| `erpc_network_timeout_fired_total` | counter | `project`, `network`, `category`, `finality`, `scope` | The lifecycle timeout killed the request |
+| `erpc_upstream_breaker_state_change_total` | counter | `project`, `upstream`, `transition` | Breaker transition (`closed_to_open` / `half_open_to_open` / `half_open_to_closed` / `open_to_half_open`) |
+
+### Source code entry points
+
+- Executor composition (timeout → consensus/retry/hedge) — [<SourceLink file="erpc/network_executor.go" lines="151-225" />]
+- Policy match chain (`getFailsafeExecutor`) — [<SourceLink file="erpc/networks.go" lines="1708-1741" />]
+- Retry classifier (`shouldRetryWithReason`, caps) — [<SourceLink file="erpc/network_executor.go" lines="380-552" />]
+- Delay regimes (`computeDelay`) + dynamic block-time wiring — [<SourceLink file="erpc/network_executor.go" lines="554-587" />], [<SourceLink file="erpc/networks_registry.go" lines="102-143" />]
+- Backoff math — [<SourceLink file="failsafe/backoff.go" />]
+- Hedge race (`runHedge` + `RunHedged`, keep/release) — [<SourceLink file="erpc/network_executor.go" lines="589-733" />], [<SourceLink file="failsafe/hedge.go" />]
+- Adaptive duration (quantile/min/max resolution) — [<SourceLink file="common/adaptive_duration.go" lines="60-160" />]
+- Upstream-scope breaker (permit, outcome classification) — [<SourceLink file="upstream/upstream_executor.go" lines="352-428" />], [<SourceLink file="failsafe/breaker.go" />]
+- Upstream sweep loop (continues on retryable errors) — [<SourceLink file="erpc/networks.go" lines="2154-2345" />]
+- Verified defaults (retry/hedge/breaker `SetDefaults`, `DefaultEmptyResultMaxAttempts`, `DefaultBlockUnavailableDelayMultiplier`, `DefaultEmptyResultAccept`) — [<SourceLink file="common/defaults.go" lines="2719-2880" />], [<SourceLink file="common/defaults.go" lines="2363-2454" />]
+
+### Related pages
+
+- [Failsafe policies](/config/failsafe) — config overview and composition reference
+- [Retry policy](/config/failsafe/retry), [Hedge policy](/config/failsafe/hedge), [Timeout policy](/config/failsafe/timeout), [Circuit breaker](/config/failsafe/circuit-breaker), [Consensus](/config/failsafe/consensus) — the per-policy schema references
+- [Block availability, in depth](/inside-erpc/block-availability) — the catch-up wait and block-availability gating in depth
+- [Consensus, in depth](/inside-erpc/consensus) — what wraps the retry loop when consensus is configured
+- [Request lifecycle, in depth](/inside-erpc/request-lifecycle) — where the executor sits in the overall pipeline
+
+</AISection>

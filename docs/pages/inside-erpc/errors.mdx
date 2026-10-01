@@ -1,0 +1,266 @@
+---
+title: "Errors - Inside eRPC"
+description: "How eRPC turns ~25 vendors' idiosyncratic failures into one typed taxonomy — structural retryability flags, vendor hooks that fire before generic rules, decision gates, and a deterministic single verdict for the client."
+---
+
+import { LLMsTxtLink, AISection, SourceLink, PromptExample } from "../../components";
+import { ErrorJourney } from "../../components/explainer/ErrorJourney";
+
+<LLMsTxtLink />
+
+# Errors — one taxonomy, every provider
+
+Every upstream speaks its own dialect of failure. Alchemy returns code `3` for two
+completely different conditions; Solana assigns `-32005` to "NodeUnhealthy" while eRPC
+uses it for rate limits; some providers answer HTTP 400, others a JSON-RPC error inside
+a 200. Before retry logic, hedges, circuit breakers, or metrics can act, each of those
+shapes is normalized into **one typed taxonomy** with behavioral flags attached — and
+every downstream decision is just a query over those flags.
+
+The [error taxonomy reference](/reference/errors) catalogs all ~73 types. This page is
+about the *machinery*: what happens to a raw wire error from the moment it arrives
+until your client receives a single, deterministic verdict.
+
+<ErrorJourney caption="Three wire errors travel the same pipeline — revert (code 3), getLogs too large (-32012), missing data (-32014) — each normalized, flagged, decided, and rendered. The footer shows the exhausted-bundle collapse." />
+
+## The workflow
+
+1. **A raw wire error arrives** from the JSON-RPC client (or an HTTP status > 299).
+   The client calls the injected `JsonRpcErrorExtractor` before anything else runs.
+2. **Vendor hooks fire first.** Each vendor gets a chance to classify its own
+   idiosyncrasies before the generic matchers run. In lane 1, Alchemy's hook matches
+   code `3`; in lanes 2 and 3 no vendor claims the error and it falls through.
+3. **The architecture normalizer** (EVM, SVM, or the gRPC twin) maps what remains to
+   a typed error — `ErrEndpointExecutionException`, `ErrEndpointRequestTooLarge`,
+   `ErrEndpointMissingData` — stamping the `retryableTowardNetwork` flag.
+4. **The flag flips to its verdict:** `false` for the deterministic revert and the
+   too-large request; `true` for missing data (with `permanentMissingData: false`).
+5. **Decision gates read the flags, not the wire.** No retry for the revert; the
+   too-large request is routed to proactive range splitting instead of a blind retry;
+   missing data enters the catch-up retry loop — and upstream B answers, so the client
+   sees `200 OK` with a result, not an error at all.
+6. **If nothing worked, the bundle collapses.** The footer strip shows three upstream
+   causes joined into `ErrUpstreamsExhausted`, ordered by `orderCauses` (retryable
+   first), reduced to a dominant code, and rendered as one wire error with a human
+   summary — `{"code": -32014, "message": "all upstream attempts failed (2 upstream
+   missing data, 1 upstream timeout)"}` — over HTTP 200, by design.
+
+## In the source
+
+### One foundation type — `common/errors.go`
+
+- Everything is a `BaseError{Code, Message, Cause, Details}` (`common/errors.go:187-192`)
+  behind the `StandardError` seam (`:194-203`). The `Details` map carries the behavioral
+  flags: `WithRetryableTowardNetwork` (`:210-218`) and `WithPermanentMissingData`
+  (`:225-233`). There are **no architecture-specific error types** — EVM, SVM, and gRPC
+  all normalize into this one taxonomy.
+- Retryability is **structural, not configured** — there is no `RetryableErrorHint`
+  config and no per-method retry-code table (readers expect both; neither exists):
+  - `IsRetryableTowardNetwork` (`:2550-2607`) — default `true`; `false` only for a
+    causeless exhausted bundle, an all-children-non-retryable join, or an explicit flag
+    on the single-cause chain. It deliberately never descends into joined bundles via
+    `DeepSearch` (`:2544-2549`).
+  - `IsRetryableTowardsUpstream` (`:2636-2701`) with a hard no-retry list
+    (`:2653-2690`: breaker open, unsupported, billing, 4xx-class, invalid request,
+    execution exception, unauthorized, too large, content-validation).
+  - `IsPermanentlyMissingData` (`:2616-2634`), `IsCapacityIssue` (`:2703-2712`),
+    `ClassifySeverity` (`:2736-2771` — critical/warning/info).
+
+### Normalization: raw to typed
+
+- The HTTP client calls the injected extractor on any JSON-RPC error or HTTP > 299
+  (`clients/http_json_rpc_client.go:924`).
+- `CompositeJsonRpcErrorExtractor` (`upstream/composite_error_extractor.go:13-42`) tries
+  each registered architecture's extractor **in sorted order**, first non-nil wins. The
+  file is about *architecture multiplexing* — one client serving many chain types — not
+  about merging responses from multiple upstreams.
+- The EVM cascade (`architecture/evm/error_normalizer.go:20`) runs ordered matchers and
+  falls back to `ErrEndpointServerSideException` with raw-code passthrough (`:701-711`).
+  The gRPC twin is `ExtractGrpcError` (`:769`) built on `common/grpc_errors.go:12`.
+  The SVM normalizer (`architecture/svm/error_normalizer.go`) marks client-side 4xx as
+  `WithRetryableTowardNetwork(false)` (`:206-209`); its permanent-missing wire codes
+  `-32007`/`-32009` are consumed by the network retry loop
+  (`erpc/network_executor.go:441-446`) to skip futile wait-and-retries.
+
+### Vendor hooks fire first — `thirdparty/`
+
+- `Vendor.GetVendorSpecificErrorIfAny` runs *before* the generic rules
+  (`architecture/evm/error_normalizer.go:29`, dispatcher at `:987-1009`); **25 vendors**
+  implement it.
+- Exemplar Alchemy (`thirdparty/alchemy.go:481-549`): an access-key `-32600` becomes
+  `ErrEndpointUnauthorized` (`-32016` on the wire), and code `3` is disambiguated by
+  `IsMissingDataError` — a data-availability message ("Unknown block") becomes
+  missing data (`-32014`, retryable toward the network) while "execution reverted"
+  stays an execution exception. Both directions are asserted in
+  `thirdparty/alchemy_test.go:235-258`.
+
+### The decision points that read the flags
+
+- **Upstream retry** — `shouldRetry` (`upstream/upstream_executor.go:233-265`):
+  execution exceptions retry only when flagged (`:240-247`), non-retryable writes never
+  retry (`:249-253`), missing data honors the explicit `RetryEmpty` directive (`:254-263`).
+- **Network retry** — `shouldRetryWithReason` (`erpc/network_executor.go:396-536`): the
+  returned reason string becomes the `reason` label of `erpc_network_retry_attempt_total`
+  (`:310-320`). An all-missing-data exhausted bundle waits for indexing *only* when no
+  cause is permanent (`:441-446`).
+- **Hedge keep-rule**: upstream (`upstream/upstream_executor.go:314-325` — keep a failed
+  hedge leg unless the error is retryable toward the network) and network
+  (`kept = !IsRetryableTowardNetwork`, `erpc/network_executor.go:677`).
+- **Circuit breaker**: `upstreamBreakerOutcome` (`upstream/upstream_executor.go:398-428`)
+  — cancellations, skips, and unknown errors are ignored; 5xx/transport/unauthorized/
+  billing fail the breaker; a syncing upstream returning empty fails it too. Hedge
+  attempts, internal probes, and composite requests never touch the breaker
+  (`:378-392`).
+
+### Rendering the verdict — `common/json_rpc.go` + `erpc/http_server.go`
+
+- `TranslateToJsonRpcException` (`common/json_rpc.go:1704-1878`) collapses an exhausted
+  bundle to its dominant cause (`:1721-1757`). Causes arrive pre-ordered by
+  `orderCauses` (`common/errors.go:916-978`): rank 1 retryable-toward-network first,
+  rank 2 upstream id, tie-break error text — deterministic, never map order. The
+  representative is the *first of the dominant-code bucket*, so a disagreement between
+  "not yet available" and "permanently skipped" surfaces the retryable verdict.
+- Class-to-wire map: rate limits `-32005` (`:1769-1783`), auth `-32016` (`:1784-1795`),
+  method ignored `-32601` (`:1796-1810`), a **unanimous** block-unavailable verdict
+  `-32014` via `isBlockUnavailableVerdict` (`:1684-1700`, mapped at `:1811-1836`),
+  unmarshal `-32700` (`:1837-1845`), invalid request `-32602` (`:1846-1854`), getLogs
+  guardrails `-32012` (`:1855-1863`), else `-32603` with the deepest cause's message
+  (`:1864-1877`). Errors already carrying a normalized JSON-RPC representation are
+  returned as-is (`:1762-1764`).
+- HTTP status: JSON-RPC responses default to **200** even for errors
+  (`erpc/http_server.go:1840-1860` reserves 400/401/404/429 for transport-level
+  conditions). One wrinkle: eRPC's generic capacity code `-32005` collides with
+  Solana's `NodeUnhealthy`, so *local* rate limits are remapped to `-32000` on SVM
+  requests (`erpc/http_server.go:1775-1789`) while native upstream `-32005` passes
+  through untouched.
+- `NewErrUpstreamsExhausted` (`common/errors.go:980-1013`) joins the per-upstream
+  causes plus execution details (duration, project, network, method, attempts, retries,
+  hedges) and appends a `SummarizeCauses` string — 18 buckets (`:1060-1206`), e.g.
+  "2 upstream missing data, 1 upstream timeout" — to the message.
+- The named wire codes live in one enum (`common/errors.go:2322-2345`): `-99999` unknown,
+  `-32000` call exception, `-32003` transaction rejected, `-32600`/`-32601`/`-32602`/
+  `-32603`/`-32700` JSON-RPC standard, `3` revert (de-facto), `-32005` capacity,
+  `-32012` too large, `-32014` missing data, `-32015` node timeout, `-32016` unauthorized.
+
+## First principles
+
+> **Errors are data.** The `Details` flags are the API the policies query — retry loops,
+> hedges, breakers, and metrics never parse messages or match wire codes.
+
+> **Retryability is structural, not configured.** The error's class and flags decide;
+> directives (`RetryEmpty` / `RetryPending`) only widen the retry set for empty results
+> and pending transactions.
+
+> **The client sees a verdict, not a log.** Bundles collapse to one dominant cause —
+> deterministic, retryable-first, unanimity-gated — and HTTP 200 for JSON-RPC errors is
+> deliberate: non-200 is reserved for transport-level conditions.
+
+## Agent reference
+
+<PromptExample
+  n={1}
+  title="Trace why requests are failing end to end"
+  prompt={`Using my eRPC config, logs, and metrics, trace one failing request through the
+error pipeline: which vendor hook or normalizer classified it, what the
+retryableTowardNetwork / permanentMissingData flags were set to, which decision gates
+(no-retry list, hedge keep-rule, breaker) saw it, and what wire code and HTTP status the
+client finally received. Suggest the config change that would have rescued it if
+possible. Reference: https://docs.erpc.cloud/inside-erpc/errors.llms.txt`}
+  defaultOpen={false}
+/>
+
+Reference URL for agents: `https://docs.erpc.cloud/inside-erpc/errors.llms.txt`
+
+<AISection title="Errors — full agent reference" hint="Taxonomy foundation, normalization pipeline, decision points, edge cases, metrics, and source entry points.">
+
+### How it works
+
+Inbound errors (JSON-RPC error body or HTTP > 299) hit the injected
+`JsonRpcErrorExtractor` in the HTTP client. `CompositeJsonRpcErrorExtractor` fans out to
+each registered architecture's extractor in sorted order (first non-nil wins — a
+multiplexing seam, not a merge of upstreams). Inside each extractor, the owning vendor's
+`GetVendorSpecificErrorIfAny` runs before the generic matcher cascade; the generic
+fallback is `ErrEndpointServerSideException` with the raw wire code preserved. The
+result is always a `BaseError` in the shared taxonomy with behavioral flags in
+`Details`. Policies then query the flags structurally: `shouldRetry` /
+`shouldRetryWithReason` (retry), the hedge keep-rules (`kept = !IsRetryableTowardNetwork`
+at both scopes), `upstreamBreakerOutcome` (breaker), and `ClassifySeverity` (metrics).
+At the response boundary, `TranslateToJsonRpcException` collapses exhausted bundles to a
+deterministic dominant cause and maps classes to wire codes; the HTTP layer defaults to
+status 200 for JSON-RPC errors.
+
+**Config schema: none.** There is no errors config block and no retryability knob —
+retryability is derived from the error's class and flags. The only user-facing levers
+are the failsafe policies that *consume* the flags: [retry](/config/failsafe/retry),
+[hedge](/config/failsafe/hedge), [circuit breaker](/config/failsafe/circuit-breaker),
+and the per-request [directives](/config/projects/directives) (`retryEmpty`,
+`retryPending`) that widen the retry set for empty results and pending transactions. The
+full error catalog with per-type retry behavior lives on the
+[error taxonomy](/reference/errors) page — it is not duplicated here.
+
+### Edge cases & gotchas
+
+1. **Alchemy code `3` is two errors.** `IsMissingDataError` disambiguates data-
+   availability messages (missing data, network-retryable) from genuine reverts
+   (execution exception, not retryable). Tests assert both directions
+   (`thirdparty/alchemy_test.go:235-258`).
+2. **The `-32005` collision.** eRPC's capacity code collides with Solana `NodeUnhealthy`;
+   only *local* rate-limit errors are remapped to `-32000` on SVM requests
+   (`erpc/http_server.go:1775-1789`). A native upstream `-32005` passes through as-is.
+3. **A causeless `ErrUpstreamsExhausted` is terminal.** Nothing was ever tried, so
+   `IsRetryableTowardNetwork` returns `false` (`common/errors.go:2562-2566`) — do not
+   expect an automatic re-sweep.
+4. **Bundles: any-child retryable.** For joined causes the predicate returns `true` if
+   *any* child is retryable; it never descends into multi-error wrappers via
+   `DeepSearch` (`common/errors.go:2568-2582`) — that order-dependence bug is fixed by
+   construction.
+5. **SVM permanent-missing codes `-32007`/`-32009`.** When every provider reports a slot
+   permanently skipped/absent, the wait-and-retry is skipped and the verdict surfaces
+   immediately (`erpc/network_executor.go:441-446`).
+6. **Non-retryable writes never retry.** At upstream scope, write methods
+   (`eth_sendRawTransaction`, SVM send variants) short-circuit `shouldRetry`
+   (`upstream/upstream_executor.go:249-253`).
+7. **The `-32014` block-unavailable verdict is unanimity-gated.** Only when *every*
+   non-skipped cause agrees the block is unavailable does the client get `-32014`;
+   otherwise the bundle collapses to the dominant cause's normal mapping
+   (`common/json_rpc.go:1684-1700`).
+8. **Dominance tally skips boring causes.** `ErrUpstreamRequestSkipped` and
+   `ErrEndpointUnsupported` are excluded from the dominant-code frequency count
+   (`common/json_rpc.go:1738-1741`).
+9. **HTTP 200 is deliberate.** JSON-RPC application errors ride inside a 200 body;
+   400/401/404/429 are reserved for transport-level conditions (`erpc/http_server.go:1840-1860`).
+10. **`RetryEmpty`/`RetryPending` only widen.** They enable retries for empty results and
+    pending tx lookups; they cannot make a structurally non-retryable error retryable.
+
+### Observability
+
+| Metric | Type | Labels | When it fires |
+|---|---|---|---|
+| `erpc_upstream_attempt_outcome_total` | counter | `project`, `network`, `upstream`, `category`, `outcome`, `is_hedge`, `is_retry`, `finality` | Every terminal upstream attempt. `outcome` is closed-set 13: `success`, `empty`, `transport_error`, `server_error`, `client_error`, `rate_limited`, `missing_data`, `exec_revert`, `block_unavailable`, `breaker_open`, `cancelled`, `timeout`, `skipped` (enum `common/exec_state.go:17-30`; precedence in `classifyUpstreamOutcome`, `upstream/upstream.go:37-79` — unmatched defaults to `server_error`) |
+| `erpc_upstream_selection_total` | counter | `project`, `network`, `upstream`, `category`, `reason`, `finality` | Each upstream pick; `reason` ∈ `primary` / `retry` / `hedge` / `consensus_slot` / `sweep` (`common/exec_state.go:39-45`, derived in `upstream/upstream.go:145-158`) |
+| `erpc_network_retry_attempt_total` | counter | `project`, `network`, `category`, `reason`, `finality` | Each network-scope retry; 6 `reason` values from `shouldRetryWithReason`: `execution_exception_retryable`, `block_unavailable`, `missing_data`, `retryable_error`, `empty_result`, `pending_tx` (emission at `erpc/network_executor.go:310-320`) |
+| `erpc_upstream_request_errors_total` | counter | `project`, `vendor`, `network`, `upstream`, `category`, `error`, `severity`, `composite`, `finality`, `user`, `agent_name` | Each upstream request error; `severity` from `ClassifySeverity` (critical/warning/info) |
+
+### Source code entry points
+
+- Error foundation (`BaseError`, flags, structural predicates) — [<SourceLink file="common/errors.go" lines="185-233" />], [<SourceLink file="common/errors.go" lines="2532-2771" />]
+- Wire-code enum — [<SourceLink file="common/errors.go" lines="2322-2345" />]
+- Exhausted-bundle construction + `orderCauses` + `SummarizeCauses` — [<SourceLink file="common/errors.go" lines="916-1013" />], [<SourceLink file="common/errors.go" lines="1060-1206" />]
+- Client-side extractor call — [<SourceLink file="clients/http_json_rpc_client.go" lines="905-944" />]
+- Architecture-multiplexing extractor — [<SourceLink file="upstream/composite_error_extractor.go" />]
+- EVM normalizer cascade (vendor hook first, fallback passthrough) — [<SourceLink file="architecture/evm/error_normalizer.go" lines="20-40" />], [<SourceLink file="architecture/evm/error_normalizer.go" lines="695-711" />]
+- Vendor hook exemplar (Alchemy) — [<SourceLink file="thirdparty/alchemy.go" lines="481-549" />]
+- Upstream-scope decision points (retry / hedge keep / breaker) — [<SourceLink file="upstream/upstream_executor.go" lines="233-265" />], [<SourceLink file="upstream/upstream_executor.go" lines="314-325" />], [<SourceLink file="upstream/upstream_executor.go" lines="375-428" />]
+- Network-scope decision points (retry reasons / hedge keep) — [<SourceLink file="erpc/network_executor.go" lines="396-536" />], [<SourceLink file="erpc/network_executor.go" lines="660-679" />]
+- Client rendering (bundle collapse + wire map) — [<SourceLink file="common/json_rpc.go" lines="1684-1878" />]
+- HTTP status + `-32005` Solana remap — [<SourceLink file="erpc/http_server.go" lines="1770-1792" />], [<SourceLink file="erpc/http_server.go" lines="1838-1870" />]
+
+### Related pages
+
+- [Error taxonomy](/reference/errors) — the full catalog of ~73 typed errors with per-type retry behavior
+- [Failsafe, in depth](/inside-erpc/failsafe-in-depth) — the retry/hedge/breaker machinery that consumes these flags
+- [EVM translation](/inside-erpc/evm-translation) — where too-large getLogs requests go instead of retrying
+- [Request lifecycle](/inside-erpc/request-lifecycle) — where normalization sits in the request path
+- [Request tracing](/inside-erpc/request-tracing) — following one error through every span
+
+</AISection>

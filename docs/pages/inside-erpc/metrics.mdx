@@ -1,0 +1,269 @@
+---
+title: "Metrics - reading erpc_* like a pro - Inside eRPC"
+description: "One request through the pipeline, annotated with every erpc_* series it touches — which metric family fires at which decision point, and the ten readings that quietly mislead operators."
+---
+
+import { LLMsTxtLink, AISection, SourceLink, PromptExample } from "../../components";
+import { MetricAnatomy } from "../../components/explainer/MetricAnatomy";
+
+<LLMsTxtLink />
+
+# Metrics — reading erpc_* like a pro
+
+The [metrics reference](/reference/metrics) lists every series eRPC exports. This page
+teaches the shape underneath: **each metric family fires at exactly one decision point**
+in the request path, so a dashboard is a map of commitments — a selection reason, a retry
+reason, an attempt outcome — not a bag of counters.
+
+The widget below replays one cold read with a hedge, lighting up the exact series each
+stage emits as the playhead crosses it. Flip the toggle to a cache HIT and count what
+goes *absent* — that absence is the single most misread property of this metrics surface.
+
+<MetricAnatomy caption="A cold read touches 11 series across 6 families; the cancelled hedge-loser is accounted as an outcome, never as an error. Toggle to a cache HIT: 4 series, and the upstream families are absent — not zero." />
+
+## The workflow
+
+1. **Ingress emits nothing on a healthy pass.** The first counter fires one layer down,
+   when `Project.Forward` commits to serving the call:
+   `erpc_network_request_received_total` +1 (`erpc/projects.go:152`). Auth only emits on
+   failure (`erpc_auth_failed_total`, `telemetry/metrics.go:941-945`).
+2. **The cache GET misses** — `erpc_cache_get_success_miss_total` +1 with
+   `reason="connector_miss"` (`architecture/evm/json_rpc_cache.go:541`). The `reason`
+   label is what separates a cold cache from a *broken* one
+   (`telemetry/metrics.go:848-858`).
+3. **The failsafe executor arms a hedge**: `erpc_upstream_selection_total` +1 with
+   `reason="hedge"`, and the adaptive delay is recorded in
+   `erpc_network_hedge_delay_seconds` (`telemetry/metrics.go:1121-1126`).
+4. **Two attempts race.** Both terminate in `erpc_upstream_attempt_outcome_total`
+   (one `success`, one `cancelled`) — but the cancelled hedge-loser never reaches the
+   error counters; the churn surfaces only in `erpc_network_hedge_discards_total` +1,
+   while `erpc_network_hedge_winner_total` +1 marks the keeper
+   (`upstream/upstream.go:730-751`, `erpc/network_executor.go:638`).
+5. **The response commits**: `erpc_network_successful_request_total` +1 and
+   `erpc_network_request_duration_seconds` observed (`erpc/projects.go:250`,
+   `erpc/projects.go:269`) — the denominator behind every "how healthy is my traffic"
+   ratio.
+6. **Only after the 200 leaves**, the async cache writer emits
+   `erpc_cache_set_success_total` +1 (`architecture/evm/json_rpc_cache.go:873`) — client
+   latency never pays for bookkeeping.
+
+## In the source
+
+### The registry — `telemetry/metrics.go`
+
+Every `erpc_*` name, label set, and help string lives in one file. The help strings are
+part of the contract: they carry the reason-label enums, the deprecation notice on
+`erpc_rate_limiter_budget_decision_total` (`telemetry/metrics.go:791-795`), and the
+"transitions, not evaluations" warnings on the served-tip family
+(`telemetry/metrics.go:157-198`). High-cardinality counters go through `CounterHandle`
+so the health tracker's idle sweep can evict stale label combinations
+(`telemetry/metrics.go` + `health/tracker.go`).
+
+### Emission sites by scope
+
+- **Network scope** — received/successful/failed/duration all fire in `Project.Forward`
+  (`erpc/projects.go:152`, `:250`, `:269`, `:332`); hedge discards at
+  `erpc/networks.go:2835`; retry reasons at `erpc/network_executor.go:314`.
+- **Upstream scope** — one attempt-outcome and one selection increment per attempt in the
+  deferred record (`upstream/upstream.go:690-707`); `erpc_upstream_request_total` at
+  `:757`; hedge exclusion from the health-scoring counters at `:745-751` and `:859-866`.
+- **Cache scope** — hit/miss in `architecture/evm/json_rpc_cache.go:598` and `:541`; the
+  async SET at `:873`; cache-connector executor attempts at `data/cache_executor.go:119`.
+- **Consensus scope** — outcomes at `consensus/executor.go:1601`; the analyzer goroutine
+  keeps emitting responses-collected even after the caller abandons the request
+  (`consensus/executor.go:320-337`).
+- **Error-label hygiene** — the `error` label is `ErrorFingerprint`: sanitized and capped
+  at 256 characters, never a raw error string (`common/errors.go:117-125`).
+
+## First principles
+
+> **Counters are denominators.** Every ratio worth alerting on divides by
+> `erpc_upstream_attempt_outcome_total` or `erpc_upstream_request_total` — per network,
+> upstream, and method. A bare counter tells you volume; only a rate tells you health.
+
+> **Metrics fire at decision points, not wrappers.** Each family maps to one place where
+> eRPC commits to an outcome: a selection reason, a retry reason, an attempt outcome, a
+> consensus verdict. If you know the pipeline, you can predict the metric — and vice versa.
+
+> **Absent is not zero.** Families that never ran emit nothing — a cache HIT produces no
+> upstream series at all — and some series are deliberately absent by mode
+> (`erpc_network_served_tip_lag_blocks` in default MAX mode). Build queries that survive
+> absence.
+
+## Agent reference
+
+<PromptExample
+  n={1}
+  title="Audit my metrics for misleading alerts"
+  prompt="Using my eRPC Prometheus metrics, find which upstream is quietly losing every hedge race, confirm my catch-up retry baseline is healthy chain-follow rather than an incident, and flag any alert rules against erpc_network_served_tip_* or erpc_upstream_block_head_large_rollback that would page falsely (sticky gauges, transition counters, absent series). Work with my existing eRPC config."
+  defaultOpen={false}
+/>
+
+Reference URL for agents: `https://docs.erpc.cloud/inside-erpc/metrics.llms.txt`
+
+<AISection title="Metrics — full agent reference" hint="Metric families with label enums and emission sites, the ten commonly-misread series, and source entry points.">
+
+### How it works
+
+All series live in a single registry (`telemetry/metrics.go`), built with `promauto` at
+package init. Filter-aware histograms get their buckets from config
+(`SetHistogramBuckets`, `telemetry/metrics.go:1250-1254`); counter/histogram handles that
+carry caller-controlled labels (method, user, agent name) go through
+`CounterHandle`/`ObserverHandle` so the health tracker can sweep and delete stale series
+every few minutes. The `error` label is always `common.ErrorFingerprint` — non-alphanumerics
+collapsed, 256-char cap (`common/errors.go:117-125`) — so error cardinality stays bounded.
+
+### Metric families
+
+#### Network scope
+
+| Metric | Type | Key labels / value enums | Main emission site |
+|---|---|---|---|
+| `erpc_network_request_received_total` | counter | project, network, category, finality, user, agent_name | `erpc/projects.go:152` |
+| `erpc_network_successful_request_total` | counter | + vendor, upstream, attempt, emptyish | `erpc/projects.go:250` |
+| `erpc_network_failed_request_total` | counter | + attempt, error (fingerprint), severity | `erpc/projects.go:332` |
+| `erpc_network_request_duration_seconds` | histogram | project, network, vendor, upstream, category, finality, user | `erpc/projects.go:269` |
+| `erpc_network_multiplexed_request_total` | counter | in-flight dedup followers | `erpc/networks.go:3091` |
+| `erpc_network_static_response_served_total` | counter | project, network, category | `telemetry/metrics.go:645-649` |
+| `erpc_network_hedged_request_total` | counter | upstream, attempt, category | `erpc/networks.go:2204` |
+| `erpc_network_hedge_discards_total` | counter | + hedge, attempt | `erpc/networks.go:2835` |
+| `erpc_network_hedge_winner_total` | counter | winning upstream | `erpc/network_executor.go:638` |
+| `erpc_network_retry_attempt_total` | counter | reason: `execution_exception_retryable` / `block_unavailable` / `missing_data` / `retryable_error` / `empty_result` / `pending_tx` (6; the help string at `telemetry/metrics.go:720` omits the first — the code at `erpc/network_executor.go:396-536` is authoritative) | `erpc/network_executor.go:314` |
+| `erpc_network_timeout_fired_total` | counter | scope: network \| upstream | `telemetry/metrics.go:663-667` |
+| `erpc_network_timeout_duration_seconds` | histogram | computed dynamic timeout | `telemetry/metrics.go:1128-1133` |
+| `erpc_network_hedge_delay_seconds` | histogram | adaptive hedge delay | `telemetry/metrics.go:1121-1126` |
+| `erpc_network_data_unavailable_wait_seconds` | histogram | reason: block_unavailable / empty_result / missing_data (the catch-up waits — a non-zero baseline is normal; see `monitoring/catch-up-metrics.md`) | `telemetry/metrics.go:1143-1150` |
+| `erpc_network_no_upstreams_available_total` | counter | project, network | `telemetry/metrics.go:674-678` |
+| `erpc_network_evm_get_logs_split_*` / `erpc_network_evm_trace_filter_split_*` (+ `_forced_splits_total`) | counters | dimension: block_range / from_address / to_address | `telemetry/metrics.go:515-548` |
+| `erpc_network_served_tip_block_number` (gauge), `_lag_blocks` (gauge), `_advance_age_seconds` (gauge), `_regression_total`, `_trajectory_total` (counters) | mixed | lane, axis: latest \| finalized; regression outcome: held / failed_open; trajectory outcome: override / fallback — all count **transitions, not evaluations** | `telemetry/metrics.go:127-198` |
+
+#### Upstream scope
+
+| Metric | Type | Key labels / value enums | Main emission site |
+|---|---|---|---|
+| `erpc_upstream_request_total` | counter | per attempt (incl. hedge fan-out), attempt index, composite, finality | `upstream/upstream.go:757` |
+| `erpc_upstream_request_errors_total` | counter | error (fingerprint), severity | `upstream/upstream.go:868` |
+| `erpc_upstream_attempt_outcome_total` | counter | outcome ×13: success, empty, transport_error, server_error, client_error, rate_limited, missing_data, exec_revert, block_unavailable, breaker_open, cancelled, timeout, skipped; + is_hedge, is_retry (`common/exec_state.go:18-30`) | `upstream/upstream.go:690-699` |
+| `erpc_upstream_selection_total` | counter | reason ×5: primary, retry, hedge, consensus_slot, sweep (`common/exec_state.go:39-45`) | `upstream/upstream.go:700-707` |
+| `erpc_upstream_credit_units_total` | counter | vendor-owned units (Alchemy CUs, QuickNode credits, …); retries/hedges/slots included | `upstream/upstream.go:715-724` |
+| `erpc_upstream_request_duration_seconds` | histogram | project, vendor, network, upstream, category, composite, finality, user | `health/tracker.go:974-1004` |
+| `erpc_upstream_response_size_bytes` | histogram | project, network, category, finality (tight cardinality on purpose) | `telemetry/metrics.go:1232-1237`, `upstream/upstream.go:795-803` |
+| `erpc_upstream_wrong_empty_response_total` | counter | | `telemetry/metrics.go:579-583` |
+| `erpc_upstream_misbehavior_total` | counter | consensus disputes, integrity rejects, wrong-empty, rollbacks, state-probe disproof | `health/tracker.go:1047-1064` |
+| `erpc_upstream_breaker_state_change_total` | counter | transition ×4: closed_to_open, half_open_to_open, half_open_to_closed, open_to_half_open | `telemetry/metrics.go:736-740`, `upstream/upstream.go:173` |
+| `erpc_upstream_cordoned` (gauge), `erpc_upstream_cordon_event_total`, `erpc_upstream_cordon_duration_seconds` | mixed | reason | `telemetry/metrics.go:200-204`, `:330-341` |
+| `erpc_upstream_stale_{latest,finalized,upper_bound,lower_bound}_block_total` | counters | staleness family | `telemetry/metrics.go:343-364` |
+| `erpc_upstream_state_probe_total` | counter | probe (context / proof), outcome (match / mismatch / unsupported / error) | `telemetry/metrics.go:401-406` |
+| `erpc_upstream_block_head_large_rollback` | gauge — sticky, see misread #1 | finality label here = head axis (latest / finalized) | `telemetry/metrics.go:573-577` |
+
+#### Cache scope
+
+| Metric | Type | Key labels / value enums | Main emission site |
+|---|---|---|---|
+| `erpc_cache_get_success_hit_total` / `erpc_cache_get_success_miss_total` | counters | connector, policy, ttl; miss adds reason: connector_miss / connector_error / ttl_rejected / empty_result | `architecture/evm/json_rpc_cache.go:598`, `:541` |
+| `erpc_cache_get_error_total`, `erpc_cache_get_skipped_total`, `erpc_cache_get_age_guard_reject_total` | counters | + error / method | `telemetry/metrics.go:860-881` |
+| `erpc_cache_set_success_total`, `erpc_cache_set_error_total`, `erpc_cache_set_skipped_total` | counters | async write fires after the response | `architecture/evm/json_rpc_cache.go:873` |
+| `erpc_cache_set_original_bytes_total`, `erpc_cache_set_compressed_bytes_total` | counters | compression ratio source | `telemetry/metrics.go:882-893` |
+| `erpc_cache_executor_attempt_total` | counter | outcome ×7: success, not_found, timeout, transport_error, error, breaker_open, interrupted — **success = answered within budget, not a cache hit** | `data/cache_executor.go:119`, `telemetry/metrics.go:753-757` |
+| `erpc_cache_executor_breaker_state_change_total` | counter | transition ×4 | `telemetry/metrics.go:761-765` |
+| `erpc_cache_connector_{earliest,latest,finalized}_block_number` (+ `_timestamp_seconds`) | gauges | per connector | `telemetry/metrics.go:74-108` |
+| `erpc_ristretto_cache_current_cost` | gauge | in-memory cache cost | `telemetry/metrics.go:912-916` |
+
+#### Consensus scope
+
+| Metric | Type | Key labels / value enums | Main emission site |
+|---|---|---|---|
+| `erpc_consensus_total` | counter | outcome ×7: success, dispute, dispute_composition, consensus_on_error, low_participants, generic_error, caller_abandoned (`consensus/executor.go:1573-1584`, `:335-337`) | `consensus/executor.go:1601` |
+| `erpc_consensus_duration_seconds` | histogram | + outcome | `telemetry/metrics.go:1166-1171` |
+| `erpc_consensus_agreement_count` | histogram **of counts** | upstreams agreeing on the modal result | `telemetry/metrics.go:1159-1164` |
+| `erpc_consensus_responses_collected` | histogram **of counts** (not a duration) | + vendors, short_circuited | `telemetry/metrics.go:1152-1157` |
+| `erpc_consensus_short_circuit_total`, `erpc_consensus_wait_capped_total` (trigger), `erpc_consensus_misbehavior_detected_total`, `erpc_consensus_upstream_punished_total`, `erpc_consensus_upstream_errors_total`, `erpc_consensus_errors_total`, `erpc_consensus_cancellations_total` (phase=caller_abandoned), `erpc_consensus_panics_total` | counters | | `telemetry/metrics.go:953-1004` |
+
+#### Selection scope (`erpc_selection_*`)
+
+| Metric | Type | Key labels / value enums | Main emission site |
+|---|---|---|---|
+| `erpc_selection_position` | gauge | 0 = primary, 1+ = runner-up, -1 = excluded this tick | `telemetry/metrics.go:210-214` |
+| `erpc_selection_score` | gauge | **HIGHER is better** — the "Lower = better" help string at `telemetry/metrics.go:260` is stale; the sort is descending (`internal/policy/stdlib/stdlib.js:676`, `:744`) | `telemetry/metrics.go:257-261` |
+| `erpc_selection_rejection_total` | counter | step (std-lib leaf step slug) | `telemetry/metrics.go:216-220` |
+| `erpc_selection_exclusion_total`, `erpc_selection_shadow_exclusion_total` | counters | reason = leaf-predicate slug (compound predicates attribute per leaf) | `telemetry/metrics.go:263-273` |
+| `erpc_selection_excluded_seconds` | gauge | continuously-excluded wall clock; alert on > 600 | `telemetry/metrics.go:275-279` |
+| `erpc_selection_primary_switch_total` | counter | from, to | `telemetry/metrics.go:222-226` |
+| `erpc_selection_readmit_total`, `erpc_selection_readmit_age_seconds` | counter / histogram | | `telemetry/metrics.go:281-292` |
+| `erpc_selection_sticky_hold_total` | counter | sticky-primary holds; ratio vs primary_switch = smoothing | `telemetry/metrics.go:294-298` |
+| `erpc_selection_eval_duration_seconds`, `erpc_selection_eval_errors_total` (kind), `erpc_selection_eligible_upstreams` | histogram / counter / gauge | | `telemetry/metrics.go:228-245` |
+| `erpc_selection_probe_requests_total`, `erpc_selection_probe_errors_total`, `erpc_selection_probe_skipped_total` (reason), `erpc_selection_probe_dropped_total` | counters | shadow-mirror probes at excluded upstreams | `telemetry/metrics.go:305-329` |
+
+#### Rate limit, auth, and misc
+
+| Metric | Type | Key labels / value enums | Main emission site |
+|---|---|---|---|
+| `erpc_rate_limits_total` | counter | origin ×4: auth (`auth/authorizer.go:137`), project (`erpc/projects.go:400`), network (`erpc/networks.go:3386`), upstream (`upstream/ratelimiter_budget.go:243`); + budget, scope, auth label | `telemetry/metrics.go:779-783` |
+| `erpc_rate_limiter_budget_max_count` | gauge | budget, method, scope | `telemetry/metrics.go:785-789` |
+| `erpc_rate_limiter_failopen_total` | counter | reason | `telemetry/metrics.go:797-801` |
+| `erpc_rate_limiter_remote_inflight` / `_remote_admission_shedded_total` / `_remote_duration_seconds` | gauge / counters / histogram | remote (Redis) limiter health | `telemetry/metrics.go:803-824`, `:1211-1216` |
+| `erpc_rate_limiter_budget_decision_total` | counter | **DEPRECATED** — use `erpc_rate_limits_total` | `telemetry/metrics.go:791-795` |
+| `erpc_auth_failed_total` | counter | strategy, reason | `telemetry/metrics.go:941-945` |
+| `erpc_cors_requests_total`, `erpc_cors_preflight_requests_total`, `erpc_cors_disallowed_origin_total` | counters | | `telemetry/metrics.go:894-911` |
+| `erpc_shadow_response_identical_total`, `erpc_shadow_response_mismatch_total`, `erpc_shadow_response_error_total` | counters | shadow-upstream comparisons | `telemetry/metrics.go:924-938` |
+| `erpc_unexpected_panic_total` | counter | scope, extra, error | `telemetry/metrics.go:13-18` |
+| `erpc_grpc_bds_hard_timeout_total`, `erpc_grpc_bds_conn_replacements_total` | counters | BDS gRPC wedged-stream watchdog | `telemetry/metrics.go:619-630` |
+
+### Commonly misread — the ten that bite
+
+1. **`erpc_upstream_block_head_large_rollback` is a sticky gauge.** It is set to the size
+   of the last rollback and never reset: `> 0` latches forever and `rate()`/`increase()`
+   are meaningless (`telemetry/metrics.go:568-577`). Alert on transition-to-nonzero via an
+   `changes()`-style rule or scrape-time reset handling, not on the raw value.
+2. **Served-tip regression/trajectory count transitions, not evaluations.** The pick runs
+   several times per request; these counters deliberately count state entries, so any
+   sustained non-zero rate is alert-worthy (`telemetry/metrics.go:157-198`).
+3. **`erpc_network_served_tip_lag_blocks` is ABSENT, not 0**, when served-tip is in
+   default MAX mode (`telemetry/metrics.go:133-142`). Use `or on(...)` vector matching in
+   queries that must treat it as zero.
+4. **`erpc_rate_limiter_budget_decision_total` is deprecated** in favor of
+   `erpc_rate_limits_total` (`telemetry/metrics.go:791-795`). Old dashboards keep working
+   but new rules should use the unified counter.
+5. **The `finality` label is dual-meaning.** On the rollback gauge it is the head axis
+   (`latest`/`finalized`); on the request/attempt families it is a
+   `common.DataFinalityState` (`telemetry/metrics.go:562-567`). Never join the two
+   without a label rewrite.
+6. **`cache_executor_attempt_total{outcome="success"}` ≠ cache hit.** It means "answered
+   within budget" — a gRPC connector miss is a null-result success. Hit/miss live in
+   `erpc_cache_get_success_hit/miss_total` (`telemetry/metrics.go:742-757`).
+7. **`erpc_upstream_request_total` (pre-dispatch) vs `erpc_upstream_misbehavior_total`
+   (post-resolution) label the same request differently** — the former often reports
+   `finality="unknown"` while the latter reports the resolved finality, so per-finality
+   misbehavior ratios can exceed 100%. Divide on unfiltered totals
+   (`telemetry/metrics.go:595-609`).
+8. **Hedge attempts are excluded from the health-scoring rate counters**
+   (`upstream/upstream.go:745-751`, `:842-866`) — a slow-but-functional upstream does not
+   get double-penalized for losing hedge races. The tell for heavy hedge churn is
+   `erpc_network_hedge_discards_total` (`telemetry/metrics.go:657-661`), not error rates.
+9. **Catch-up retries have a normal non-zero baseline on live chains.**
+   `missing_data` / `block_unavailable` / `empty_result` retries wait ~one block by
+   design — judge the pressure trend and per-chain wait sanity, never raw counts
+   (`monitoring/catch-up-metrics.md`, `telemetry/metrics.go:1135-1150`).
+10. **`erpc_consensus_responses_collected` is a histogram of response counts** (buckets
+    1–10), not a duration — `histogram_quantile` on it answers "how many upstreams
+    replied before the decision", nothing about time (`telemetry/metrics.go:1152-1157`).
+
+### Source code entry points
+
+- Metric registry (every name/labels/help) — [<SourceLink file="telemetry/metrics.go" />]
+- Health-tracker recording + misbehavior ledger — [<SourceLink file="health/tracker.go" lines="945-1064" />]
+- Per-attempt outcome/selection emission — [<SourceLink file="upstream/upstream.go" lines="638-725" />]
+- Network retry reasons + catch-up wait attribution — [<SourceLink file="erpc/network_executor.go" lines="305-360" />], [<SourceLink file="erpc/network_executor.go" lines="393-551" />]
+- Network-scope counters — [<SourceLink file="erpc/projects.go" lines="145-155" />], [<SourceLink file="erpc/projects.go" lines="245-345" />]
+- Consensus outcomes + caller-abandoned background analysis — [<SourceLink file="consensus/executor.go" lines="320-345" />], [<SourceLink file="consensus/executor.go" lines="1570-1610" />]
+- Score direction (higher-is-better sort) — [<SourceLink file="internal/policy/stdlib/stdlib.js" lines="676-745" />]
+
+### Related pages
+
+- [Metrics reference](/reference/metrics) — the full 122-metric catalog with label tables
+- [Inside eRPC](/inside-erpc) — the animated pipeline overview these families hang on
+- [Failsafe, in depth](/inside-erpc/failsafe-in-depth) — the retry/hedge decisions behind `erpc_network_retry_attempt_total` and the hedge family
+- [Health & selection](/inside-erpc/health-and-selection) — what the `erpc_selection_*` family is scoring
+- `monitoring/catch-up-metrics.md` (repo runbook) — how to read the Catch-up panels before alerting
+
+</AISection>
