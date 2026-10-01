@@ -75,6 +75,20 @@ func (s *happyRPCServer) GetBlockByNumber(ctx context.Context, req *evm.GetBlock
 	}, nil
 }
 
+// GetTransactionByHash answers with a fixed one-byte r/s so tests can pin
+// the JSON-RPC signature encoding the client selects for its chain.
+func (s *happyRPCServer) GetTransactionByHash(ctx context.Context, req *evm.GetTransactionByHashRequest) (*evm.GetTransactionByHashResponse, error) {
+	s.calls.Add(1)
+	s.recordMetadata(ctx)
+	return &evm.GetTransactionByHashResponse{
+		Transaction: &evm.Transaction{
+			Hash: req.TransactionHash,
+			R:    []byte{0x01},
+			S:    []byte{0x02},
+		},
+	}, nil
+}
+
 func startHappyServer(t *testing.T, chainID, blockNumber uint64) (string, *happyRPCServer, func()) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -121,7 +135,7 @@ func newTestClient(t *testing.T, addr string) *GenericGrpcBdsClient {
 	logger := zerolog.New(io.Discard)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0)
+	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", nil, parsedURL, 0, "")
 	require.NoError(t, err)
 	return client.(*GenericGrpcBdsClient)
 }
@@ -210,7 +224,7 @@ func TestSendRequest_ConfigHeadersReachWireAsMetadata(t *testing.T) {
 	ups := common.NewFakeUpstream("test-ups", common.WithGrpcConfig(&common.GrpcUpstreamConfig{
 		Headers: map[string]string{"authorization": "Bearer secret-token"},
 	}))
-	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", ups, parsedURL, 0)
+	client, err := NewGrpcBdsClient(ctx, &logger, "test-project", ups, parsedURL, 0, "")
 	require.NoError(t, err)
 
 	req := common.NewNormalizedRequest([]byte(`{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}`))

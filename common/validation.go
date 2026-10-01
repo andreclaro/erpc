@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/erpc/erpc/telemetry"
 	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog/log"
 )
@@ -158,6 +159,14 @@ func (m *MetricsConfig) Validate() error {
 		}
 	}
 
+	// A malformed customization silently keeps or drops the wrong families, so
+	// reject it here rather than at Init, where the process is already committed
+	// to starting.
+	o := m.TelemetryOptions()
+	if _, err := telemetry.NewMetricPolicy(o.Customizations, o.LegacyLabels); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -205,7 +214,22 @@ func (b *RateLimitBudgetConfig) Validate() error {
 			return err
 		}
 	}
+	for method, units := range b.CreditUnits {
+		if units < 0 {
+			return fmt.Errorf("rateLimiter.*.budget.creditUnits.%s must not be negative", method)
+		}
+	}
 	return nil
+}
+
+// HasCreditRule reports whether any rule in the budget counts credits.
+func (b *RateLimitBudgetConfig) HasCreditRule() bool {
+	for _, rule := range b.Rules {
+		if rule != nil && rule.CountMode == RateLimitCountModeCredit {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *RateLimitRuleConfig) Validate() error {
@@ -224,6 +248,18 @@ func (r *RateLimitRuleConfig) Validate() error {
 		// ok
 	default:
 		return fmt.Errorf("rateLimiter.*.budget.rules.*.period must be one of: second, minute, hour, day, week, month, year")
+	}
+
+	switch r.CountMode {
+	case "", RateLimitCountModeRequest, RateLimitCountModeCredit:
+		// ok
+	default:
+		return fmt.Errorf("rateLimiter.*.budget.rules.*.countMode '%s' is invalid, must be one of: %s, %s", r.CountMode, RateLimitCountModeRequest, RateLimitCountModeCredit)
+	}
+
+	// A zero ceiling would reject every request with a non-zero cost.
+	if r.CountMode == RateLimitCountModeCredit && r.MaxCount == 0 {
+		return fmt.Errorf("rateLimiter.*.budget.rules.*.maxCount must be greater than 0 when countMode is %s", RateLimitCountModeCredit)
 	}
 	return nil
 }
@@ -722,6 +758,11 @@ func (p *ProjectConfig) Validate(c *Config) error {
 	} else if len(p.Providers) == 0 {
 		return fmt.Errorf("project.*.upstreams or project.*.providers is required, add at least one of them")
 	}
+	if p.NetworkDefaults != nil {
+		if err := p.NetworkDefaults.Validate(); err != nil {
+			return err
+		}
+	}
 	if p.Networks != nil {
 		existingIds := make(map[string]bool)
 		existingAliases := make(map[string]bool)
@@ -1001,15 +1042,25 @@ func (u *UpstreamConfig) Validate(c *Config, skipEndpointCheck bool) error {
 			return err
 		}
 	}
-	if u.RateLimitBudget != "" {
-		if !c.HasRateLimiterBudget(u.RateLimitBudget) {
-			return fmt.Errorf("upstream.*.rateLimitBudget '%s' does not exist in config.rateLimiters", u.RateLimitBudget)
-		}
-	}
 	switch u.RateLimitCountMode {
 	case "", RateLimitCountModeRequest, RateLimitCountModeCredit:
 	default:
 		return fmt.Errorf("upstream.*.rateLimitCountMode '%s' is invalid, must be one of: %s, %s", u.RateLimitCountMode, RateLimitCountModeRequest, RateLimitCountModeCredit)
+	}
+	if u.RateLimitBudget != "" {
+		budget := c.RateLimiterBudget(u.RateLimitBudget)
+		if budget == nil {
+			return fmt.Errorf("upstream.*.rateLimitBudget '%s' does not exist in config.rateLimiters", u.RateLimitBudget)
+		}
+		// Two cost sources for one counter; reject rather than pick silently.
+		if u.RateLimitCountMode == RateLimitCountModeCredit {
+			if len(budget.CreditUnits) > 0 {
+				return fmt.Errorf("upstream.*.rateLimitCountMode is '%s' but its budget '%s' also defines creditUnits; an upstream prices calls from its vendor's table, so remove one of them", RateLimitCountModeCredit, budget.Id)
+			}
+			if budget.HasCreditRule() {
+				return fmt.Errorf("upstream.*.rateLimitCountMode is '%s' but its budget '%s' also sets rules.*.countMode; set it in one place only", RateLimitCountModeCredit, budget.Id)
+			}
+		}
 	}
 	return nil
 }
@@ -1458,6 +1509,9 @@ func (n *NetworkConfig) Validate(c *Config) error {
 			return fmt.Errorf("network.*.alias '%s' must contain only alphanumeric characters, dash, or underscore", n.Alias)
 		}
 	}
+	if err := validateCacheKeySuffix("network.*.cacheKeySuffix", n.CacheKeySuffix); err != nil {
+		return err
+	}
 	for i, sr := range n.StaticResponses {
 		if err := sr.Validate(); err != nil {
 			return fmt.Errorf("network.*.staticResponses[%d]: %w", i, err)
@@ -1465,6 +1519,23 @@ func (n *NetworkConfig) Validate(c *Config) error {
 	}
 	if err := n.Integrity.Validate(); err != nil {
 		return fmt.Errorf("network.*: %w", err)
+	}
+	return nil
+}
+
+func (n *NetworkDefaults) Validate() error {
+	if n == nil {
+		return nil
+	}
+	return validateCacheKeySuffix("networkDefaults.cacheKeySuffix", n.CacheKeySuffix)
+}
+
+func validateCacheKeySuffix(field, suffix string) error {
+	if suffix == "" {
+		return nil
+	}
+	if !util.IsValidIdentifier(suffix) {
+		return fmt.Errorf("%s '%s' must contain only alphanumeric characters, dash, or underscore", field, suffix)
 	}
 	return nil
 }
@@ -1529,6 +1600,11 @@ func (e *EvmNetworkConfig) Validate() error {
 		for _, m := range e.ServedTip.GuaranteedMethods {
 			if err := ValidatePattern(m); err != nil {
 				return fmt.Errorf("network.*.evm.servedTip.guaranteedMethods has invalid pattern %q: %w", m, err)
+			}
+		}
+		for _, sel := range e.ServedTip.GuaranteedFor {
+			if err := ValidatePattern(sel); err != nil {
+				return fmt.Errorf("network.*.evm.servedTip.guaranteedFor has invalid selector %q: %w", sel, err)
 			}
 		}
 	}
