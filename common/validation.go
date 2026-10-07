@@ -1013,6 +1013,33 @@ func (u *UpstreamConfig) Validate(c *Config, skipEndpointCheck bool) error {
 	if !skipEndpointCheck && u.Endpoint == "" {
 		return fmt.Errorf("upstream.*.endpoint is required")
 	}
+	// jsonrpc upstreams: type must be explicit and the slug binds the upstream
+	// to its network. For evm/svm upstreams a slug is meaningless — catch the
+	// "forgot to set type: jsonrpc" misconfiguration here instead of at
+	// bootstrap. This runs BEFORE the generic evm/svm/failsafe validation so
+	// the rejection names the actual misconfiguration (a jsonrpc upstream
+	// carrying an evm block) rather than some incidental evm field error.
+	if u.Type == UpstreamTypeJsonRpc {
+		if u.Evm != nil || u.Svm != nil {
+			return fmt.Errorf("upstream.*.evm/svm blocks are not allowed on a jsonrpc upstream (type is 'jsonrpc')")
+		}
+		if u.JsonRpc == nil || u.JsonRpc.Slug == "" {
+			return fmt.Errorf("upstream.*.jsonRpc.slug is required for jsonrpc upstreams (it binds the upstream to network jsonrpc:<slug>)")
+		}
+		if !isValidJsonRpcSlug(u.JsonRpc.Slug) {
+			return fmt.Errorf("upstream.*.jsonRpc.slug '%s' is invalid, must contain only alphanumeric characters, dash, or underscore", u.JsonRpc.Slug)
+		}
+		// No consensus machinery at the upstream level either.
+		if u.Failsafe != nil {
+			for _, fs := range u.Failsafe {
+				if fs.Consensus != nil {
+					return fmt.Errorf("upstream.*.failsafe.consensus is not supported on jsonrpc upstreams (no consensus machinery in the generic jsonrpc architecture)")
+				}
+			}
+		}
+	} else if u.JsonRpc != nil && u.JsonRpc.Slug != "" {
+		return fmt.Errorf("upstream.*.jsonRpc.slug is only allowed when type is 'jsonrpc' (add 'type: jsonrpc' or remove the slug)")
+	}
 	if u.Evm != nil {
 		if err := u.Evm.Validate(u); err != nil {
 			return err
@@ -1034,23 +1061,6 @@ func (u *UpstreamConfig) Validate(c *Config, skipEndpointCheck bool) error {
 		if err := u.JsonRpc.Validate(c); err != nil {
 			return err
 		}
-	}
-	// jsonrpc upstreams: type must be explicit and the slug binds the upstream
-	// to its network. For evm/svm upstreams a slug is meaningless — catch the
-	// "forgot to set type: jsonrpc" misconfiguration here instead of at
-	// bootstrap.
-	if u.Type == UpstreamTypeJsonRpc {
-		if u.Evm != nil || u.Svm != nil {
-			return fmt.Errorf("upstream.*.evm/svm blocks are not allowed on a jsonrpc upstream (type is 'jsonrpc')")
-		}
-		if u.JsonRpc == nil || u.JsonRpc.Slug == "" {
-			return fmt.Errorf("upstream.*.jsonRpc.slug is required for jsonrpc upstreams (it binds the upstream to network jsonrpc:<slug>)")
-		}
-		if !isValidJsonRpcSlug(u.JsonRpc.Slug) {
-			return fmt.Errorf("upstream.*.jsonRpc.slug '%s' is invalid, must contain only alphanumeric characters, dash, or underscore", u.JsonRpc.Slug)
-		}
-	} else if u.JsonRpc != nil && u.JsonRpc.Slug != "" {
-		return fmt.Errorf("upstream.*.jsonRpc.slug is only allowed when type is 'jsonrpc' (add 'type: jsonrpc' or remove the slug)")
 	}
 	if u.Grpc != nil {
 		if err := u.Grpc.Validate(); err != nil {
