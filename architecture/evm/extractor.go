@@ -16,8 +16,14 @@ func (e *JsonRpcErrorExtractor) Extract(resp *http.Response, nr *common.Normaliz
 	// The composite runs extractors in sorted order (evm before svm); without this
 	// guard the EVM extractor would claim SVM JSON-RPC codes first and drop the SVM
 	// taxonomy (incl. the sendTransaction non-retryable-toward-network guard).
-	if upstream != nil && upstream.Config() != nil && upstream.Config().Type == common.UpstreamTypeSvm {
-		return nil
+	// Empty Type is treated as EVM: bootstrap defaults apply UpstreamTypeEvm, but
+	// tests and exotic direct-config callers may skip that pass — historically the
+	// EVM extractor owned those upstreams, so it keeps them.
+	if upstream != nil && upstream.Config() != nil {
+		t := upstream.Config().Type
+		if t != "" && t != common.UpstreamTypeEvm {
+			return nil
+		}
 	}
 	return ExtractJsonRpcError(resp, nr, jr, upstream)
 }
