@@ -11,6 +11,16 @@ module.exports = {
 		},
 	},
 	why: { title: "Why eRPC?" },
+	"inside-erpc": {
+		title: "Inside eRPC",
+		theme: {
+			// Full-width interactive explainer: no TOC / chrome, like the home page.
+			toc: false,
+			layout: "full",
+			breadcrumb: false,
+			pagination: false,
+		},
+	},
 	free: { title: "Free & Public RPCs" },
 	faq: { title: "FAQ" },
 	"-- Config": {

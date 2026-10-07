@@ -1,0 +1,301 @@
+---
+title: "Consensus — agreeing on the truth - Inside eRPC"
+description: "One request, three upstreams, one canonical answer — hash-grouped voting, unassailable-lead short-circuits, disputes that punish no one, and cordons for repeat dissenters."
+---
+
+import { LLMsTxtLink, AISection, SourceLink, PromptExample } from "../../components";
+import { TimelineRace } from "../../components/explainer/TimelineRace";
+import { consensusScenarios } from "../../components/explainer/scenarios/consensus";
+
+<LLMsTxtLink />
+
+# Consensus — agreeing on the truth
+
+Any single RPC provider can be wrong — stale, mid-restart, misconfigured, or
+just buggy — and a wrong answer has exactly the same shape as a right one. The
+only way to know which answer to trust is to ask several providers and compare.
+
+That is what the consensus policy does: it fans one request out to
+`maxParticipants` upstreams simultaneously, groups the answers by canonical
+hash, and declares a winner only when `agreementThreshold` distinct upstreams
+agree. Upstreams that return *different data* than the majority are tracked as
+misbehaving — and, if you enable it, cordoned out of selection until they cool
+off.
+
+The three timelines below each run the same fan-out (`maxParticipants: 3`,
+`agreementThreshold: 2`) to a different ending: a majority no straggler can
+catch, a three-way split that provably punishes no one, and a repeat dissenter
+crossing the cordon threshold.
+
+<TimelineRace scenarios={consensusScenarios} caption="One request, three upstreams: an uncatchable majority ends the race early — a three-way split is a dispute, not a guess — and a repeat dissenter earns a cordon." />
+
+## The workflow
+
+Shared machinery (all three tabs):
+
+1. **Fan-out.** `executor.Run` spawns `maxParticipants` participant goroutines
+   (3 in the animation), each with its own cancellable slot context. Every slot
+   runs the inner stack `retry(hedge(one upstream))` and draws a *distinct*
+   upstream; the whole round sits inside the network-scope timeout:
+   `timeout(consensus(retry(hedge(one upstream))))`.
+2. **Classify + hash on arrival.** Each response is typed (`non_empty`,
+   `empty`, `consensus_error`, `infrastructure_error`) and hashed — results by
+   canonical JSON hash (per-method `ignoreFields` stripped out), errors by
+   normalized JSON-RPC code. Infrastructure errors (timeouts, 5xx, connection
+   resets) carry no data signal and **never vote**.
+3. **One upstream, one vote.** Responses are deduplicated by upstream ID —
+   hedge/retry can reselect the same node for another slot, and it must not
+   double-vote. The best-ranked response wins; on equal rank the *latest*
+   arrival counts, because a node answering twice at the tip may have advanced.
+4. **Re-analyze after every arrival.** The analyzer goroutine rebuilds the
+   groups, walks the winner rule table in priority order, then walks the
+   short-circuit table: can this winner still change with the responses still
+   outstanding?
+
+Tab · Unassailable lead (runs with `preferLargerResponses: false`):
+
+5. **A replies data-1.** `group{h1}=1` < threshold 2 — keep collecting.
+6. **B replies data-1.** `group{h1}=2` ≥ 2, and the lead over the runner-up
+   (2 − 0) exceeds the responses still outstanding (3 − 2 = 1): the
+   `unassailable_lead` short-circuit fires. The winner is released to the
+   caller *first* — then the remaining slot is cancelled.
+7. **C is cancelled mid-flight.** The caller got its answer at ~37ms and never
+   paid for the slowest upstream. The analyzer keeps collecting in the
+   background so misbehavior tracking sees every vote (here: none — C never
+   answered).
+8. **Why the caveat.** With the default `preferLargerResponses: true` this
+   short-circuit is disabled — a *larger* response could still arrive — and the
+   wait caps (`maxWaitOnResult` / `maxWaitOnEmpty`) bound the tail instead.
+
+Tab · Dispute (defaults: `disputeBehavior: returnError`):
+
+9. **A replies empty, B replies data-1, C replies data-2.** Three valid
+   groups, one vote each. Empty and non-empty are both *data* — they disagree
+   about the truth, not about transport.
+10. **No rule resolves.** No group reaches threshold 2, and under
+    `returnError` no preference may promote a minority, so the table falls
+    through to the dispute rule: `ErrConsensusDispute` → the caller gets
+    **409 Conflict** with the full participant table attached.
+11. **Suspicion recorded, nobody punished.** The groups that disagree with the
+    plurality group are counted as misbehavior and fed to the scoring
+    tracker — but a cordon requires one group holding **>50%** of valid
+    participants, and 1 of 3 proves nothing. A three-way split is noise, not
+    guilt.
+
+Tab · Punishment (`punishMisbehavior: {disputeThreshold: 2, disputeWindow: 5m, sitOutPenalty: 10m}`):
+
+12. **Every round has the same shape.** A and B agree on data-1, C answers
+    data-2. The majority wins each round, and each round C's dissent is
+    provable: different data than a >50% data majority.
+13. **Each dissent burns a token.** C's per-upstream token bucket
+    (`disputeThreshold` per `disputeWindow`) drains 2 → 1 → 0 across two rapid
+    rounds; the scoring tracker records every misbehavior regardless of
+    punishment.
+14. **The third Allow() fails** → C is cordoned for all methods
+    (`Cordon("*", "misbehaving in consensus")`) and excluded from selection; a
+    timer uncordons it after `sitOutPenalty`. One strike is noise; a pattern is
+    a cordon.
+
+## In the source
+
+### Entry point & composition — `erpc/network_executor.go`
+
+- `networkExecutor.Run` (`:164`) wraps everything in the lifecycle timeout,
+  then branches: consensus configured → `consensus.Run(ctx, req, slotInner)`,
+  where each slot is `retry(hedge(tryOneUpstream))` (`:205-210`). Call site:
+  `erpc/networks.go:2357`.
+- Skipped when the request carries `X-ERPC-Skip-Consensus: true` (or
+  `?skip-consensus=true`, or `directiveDefaults.skipConsensus`), and for
+  single-dispatch writes like Solana `requestAirdrop` — one client call must
+  not mint N airdrops across participant slots (`:189-204`).
+- Built per (matchMethod, matchFinality, requestKind) by
+  `getFailsafeExecutor` (`erpc/networks.go:1708`), so consensus settings can
+  differ per method pattern and finality.
+
+### The executor and the analyzer — `consensus/executor.go`
+
+- `Run` (`:120`) optionally front-loads tag-quota participants
+  (`requiredParticipants`, `:139`), then `executeConsensus` (`:182`) spawns one
+  goroutine per slot, each with a per-slot cancellable context marked
+  `WithConsensusSlot` (`:243-251`) — that is why attempts in the
+  `X-ERPC-Upstreams` trace read `consensus_slot`.
+- `runAnalyzer` (`:359`) owns collection, analysis, winner release, and
+  misbehavior tracking. Its invariant: **exactly one outcome** is ever sent —
+  even on panic (`:386-403`). Caller latency and analysis completeness are
+  decoupled through a size-1 buffered `outcomeCh` (`:258`): the caller can
+  abandon, the analyzer still finishes so tracking sees every response
+  (`:641-644`).
+- Short-circuit order matters: `sendOutcomeOnce` (caller released) runs
+  *before* `cancelRemaining` and the per-slot cancels (`:554-568`).
+- Wait caps arm off real attempts only: `maxWaitOnEmpty` from the first
+  upstream-attempted response, `maxWaitOnResult` from the first non-empty one
+  (`considerWaitCap`, `:455-504`). Defaults are adaptive: p50 clamped to
+  [5ms, 1s] and p90 clamped to [50ms, 2s] (`common/defaults.go:2957-2970`).
+
+### Classify, hash, dedupe — `consensus/analysis.go`
+
+- `newConsensusAnalysis` (`:68`) classifies every response, dedupes by
+  upstream, then groups by hash. Four response types (`executor.go:61-66`);
+  only infrastructure errors are excluded from `validParticipants` (`:102`).
+- `classifyAndHashResponse` (`:469`): emptiness via `IsResultEmptyish`
+  (method-aware — e.g. an empty logs array), execution exceptions and
+  agreed-upon errors (client-side / unsupported / missing data) become
+  `consensus_error`; everything else is infrastructure.
+- Hashes: results via `CanonicalHash`, or `CanonicalHashWithIgnoredFields` when
+  the method has `ignoreFields` (`:539-548`); errors via normalized JSON-RPC
+  code (`errorToConsensusHash`, `:443`). The default `ignoreFields` strip
+  `blockTimestamp` from log/receipt methods and `context.slot` /
+  `context.apiVersion` from SVM envelopes (`common/defaults.go:2899-2943`) —
+  fields that legitimately differ between honest nodes.
+- `dedupeByUpstream` (`:201`) enforces one vote per node: best response-type
+  rank wins (`responseTypeVoteRank`, `:176`), ties go to the *latest* arrival.
+
+### The rule tables — `consensus/rules.go`
+
+- `consensusRules` (`:42`) run most-specific → most-generic: tx broadcasts
+  return the first valid hash (`:47`), `preferHighestValueFor` regroups by
+  numeric value, block-head-leader behaviors, preference rules
+  (non-empty / larger), tie → dispute, the plain threshold winner (`:748`),
+  and finally the explicit fallthroughs — "dispute when multiple valid groups
+  exist and none meet the agreement threshold" (`:780`), then low-participants.
+  No rule ever flips a coin.
+- `shortCircuitRules` (`:858`): `sendrawtx_first_success`,
+  `consensus_error_threshold`, and `unassailable_lead` (`:910`) — winner
+  non-empty, count ≥ threshold, lead over the runner-up ≥ responses still
+  outstanding (`maxParticipants − collectedResponses`, the raw count,
+  `:949-951`). Disabled while outstanding responses could still change the
+  outcome: `preferHighestValueFor`, `preferLargerResponses`, or an empty
+  leader under `preferNonEmpty` (`:917-935`).
+- Composition quotas (`requiredParticipants[].minAgreement`) are enforced at a
+  single choke point, `enforceWinnerComposition` (`executor.go:924`) — a
+  count-majority that fails the quota becomes
+  `ErrConsensusCompositionDispute`, which no dispute behavior may bypass.
+
+### Misbehavior & punishment — `consensus/executor.go:1017`
+
+- Errors are **not** misbehavior: errored dissent is counted via
+  `MetricConsensusUpstreamErrors` and explicitly skipped (`:1158-1200`). Only
+  *data* dissent — empty vs non-empty, or two different non-empty answers —
+  counts (`:1205-1207`), and only when the consensus group is itself data.
+  Each strike records `MetricConsensusMisbehaviorDetected` plus
+  `Tracker.RecordUpstreamMisbehavior` (`:1230`, `health/tracker.go:1047`),
+  which feeds the selection score.
+- `shouldPunishUpstream` (`:1429`): off unless `punishMisbehavior` is set (it
+  is disabled by default), off when `disputeWindow ≤ 0`, and requires a clear
+  majority — `consensusGroup.Count > validParticipants/2` (`:1442`). No
+  majority, no cordon (the Dispute tab).
+- `createRateLimiter` (`:1477`) is a per-upstream token bucket:
+  `disputeThreshold` tokens per `disputeWindow`. When `Allow()` fails,
+  `handleMisbehavingUpstream` (`:1445`) cordons the upstream for all methods,
+  increments `MetricConsensusUpstreamPunished`, and arms a
+  `time.AfterFunc(sitOutPenalty)` that uncordons it (`:1468-1471`). A
+  `LoadOrStore` guard makes re-entry during sit-out a no-op (`:1450`).
+- Forensics: at `disputeLogLevel` (default `warn`) the full round — every
+  participant's hash, size, and body — is logged; `misbehaviorsDestination`
+  exports the same as JSONL to a file or S3.
+
+### Headers that explain the round
+
+`st.ConsensusSlots.Add(maxToSpawn)` (`executor.go:235`) surfaces as
+`X-ERPC-Consensus-Slots` (`erpc/http_server.go:1243`); every upstream attempt
+whose response landed in the winning group is marked `:won` in the
+`X-ERPC-Upstreams` trace (`markWinningParticipants`, `executor.go:849`). The
+full header table lives on the
+[Inside eRPC landing page](/inside-erpc#talk-to-erpc).
+
+## First principles
+
+> **🗳 Unknown inputs abstain; they don't get guessed.** Timeouts, 5xx, and
+> connection resets carry no information about the truth, so infrastructure
+> errors never vote — and when no group can prove agreement, the rule table
+> falls through to an explicit `ErrConsensusDispute` /
+> `ErrConsensusLowParticipants`, never to a random pick. The fallthrough is the
+> designed path, not an accident.
+
+> **⚖️ Only provable dissent is punished.** An error is never misbehavior. An
+> upstream is flagged only when it returns *different data* than a data
+> majority, and it is cordoned only while that majority holds more than half of
+> the valid participants. A 1-1-1 split records suspicion — and punishes no
+> one.
+
+> **⏱ The caller leaves when the answer is final; the bookkeeping stays.**
+> Short-circuit releases the caller the instant the winner can no longer
+> change; the analyzer keeps collecting stragglers so misbehavior tracking,
+> metrics, and forensics see every vote — paid for with background time, not
+> caller latency.
+
+## Agent reference
+
+<PromptExample
+  n={1}
+  title="Enable consensus without cordoning honest nodes"
+  prompt="Using my eRPC config, enable consensus for my busiest read methods with sensible maxParticipants/agreementThreshold, keep the default preferences, and tell me which short-circuit and wait-cap behavior that implies. Then show me the metrics to watch before I dare enable punishMisbehavior."
+  defaultOpen={false}
+/>
+
+Reference URL for agents: `https://docs.erpc.cloud/inside-erpc/consensus.llms.txt`
+
+<AISection title="Consensus — full agent reference" hint="Fan-out mechanics, rule tables, misbehavior punishment, metrics, and source entry points.">
+
+### How it works
+
+`networkExecutor.Run` branches to `consensus(retry(hedge(one upstream)))` when a
+consensus policy matches (per method/finality/kind), skipped by the
+`X-ERPC-Skip-Consensus` directive and single-dispatch writes. The executor
+spawns `maxParticipants` (default 5) slot goroutines with per-slot cancellable
+contexts; each response is classified (`non_empty` / `empty` /
+`consensus_error` / `infrastructure_error`), hashed (canonical JSON with
+per-method `ignoreFields`; errors by normalized code), deduplicated by upstream
+ID (best rank, latest arrival wins ties), and grouped by hash. After every
+arrival the analyzer re-walks `consensusRules` in priority order for a winner,
+then `shortCircuitRules`: `unassailable_lead` (non-empty, ≥ `agreementThreshold`
+default 2, lead ≥ outstanding) releases the caller and cancels the rest —
+disabled while `preferLargerResponses` (default true) or
+`preferHighestValueFor` could still flip the winner, in which case
+`maxWaitOnResult` (adaptive p50, clamped [5ms, 1s]) / `maxWaitOnEmpty` (p90,
+[50ms, 2s]) bound the tail. Unresolved rounds end in explicit
+`ErrConsensusDispute` (HTTP 409, participant table attached; default
+`disputeBehavior: returnError`) or `ErrConsensusLowParticipants` (default
+`lowParticipantsBehavior: acceptMostCommonValidResult`). Misbehavior tracking
+counts only data-vs-data dissent, requires a >50% majority to punish, and uses
+a per-upstream token bucket (`disputeThreshold` per `disputeWindow`) before
+cordoning for `sitOutPenalty`; punishment is disabled unless
+`punishMisbehavior` is set. Tx broadcasts (`eth_sendRawTransaction`, SVM
+`sendTransaction`) short-circuit on the first valid hash, and
+`fireAndForget: true` lets the remaining broadcasts finish in the background.
+
+### Observability
+
+| Metric | Type | Labels | When it fires |
+|---|---|---|---|
+| `erpc_consensus_total` | counter | `project`, `network`, `category`, `outcome`, `finality`, `user`, `agent_name` | Once per round; outcome ∈ `success`, `dispute`, `dispute_composition`, `consensus_on_error`, `low_participants`, `generic_error`, `caller_abandoned` |
+| `erpc_consensus_duration_seconds` | histogram | `project`, `network`, `category`, `outcome`, `finality`, `user`, `agent_name` | Wall time of the round |
+| `erpc_consensus_short_circuit_total` | counter | `project`, `network`, `category`, `reason`, `finality`, `user`, `agent_name` | Early exit; reason ∈ `unassailable_lead`, `consensus_error_threshold`, `sendrawtx_first_success` |
+| `erpc_consensus_responses_collected` | histogram | `project`, `network`, `category`, `vendors`, `short_circuited`, `finality`, `user`, `agent_name` | Responses collected per round |
+| `erpc_consensus_agreement_count` | histogram | `project`, `network`, `category`, `finality`, `user`, `agent_name` | Size of the largest agreement group |
+| `erpc_consensus_misbehavior_detected_total` | counter | `project`, `network`, `upstream`, `category`, `finality`, `response_type`, `larger_than_consensus`, `user`, `agent_name` | Data dissent vs the consensus group |
+| `erpc_consensus_upstream_errors_total` | counter | `project`, `network`, `upstream`, `category`, `finality`, `response_type`, `error_code`, `user`, `agent_name` | Errored dissent — tracked separately, never misbehavior |
+| `erpc_consensus_upstream_punished_total` | counter | `project`, `network`, `upstream`, `user`, `agent_name` | Cordon applied after the dispute limiter is exhausted |
+| `erpc_consensus_wait_capped_total` | counter | `project`, `network`, `category`, `trigger`, `finality`, `user`, `agent_name` | Round resolved by a wait cap; `trigger="result"` (maxWaitOnResult) or `"empty"` (maxWaitOnEmpty) |
+| `erpc_consensus_cancellations_total` | counter | `project`, `network`, `category`, `reason`, `finality`, `user`, `agent_name` | Participant cancellations: `before_execution` / `after_execution` / `caller_abandoned` |
+
+### Source code entry points
+
+- Executor: Run, fan-out, analyzer, wait caps — [<SourceLink file="consensus/executor.go" lines="120-168" />], [<SourceLink file="consensus/executor.go" lines="182-297" />], [<SourceLink file="consensus/executor.go" lines="359-648" />]
+- Misbehavior tracking & punishment — [<SourceLink file="consensus/executor.go" lines="1017-1314" />], [<SourceLink file="consensus/executor.go" lines="1429-1505" />]
+- Classification, hashing, dedupe, grouping — [<SourceLink file="consensus/analysis.go" lines="68-175" />], [<SourceLink file="consensus/analysis.go" lines="429-549" />]
+- Winner & short-circuit rule tables — [<SourceLink file="consensus/rules.go" lines="42-856" />], [<SourceLink file="consensus/rules.go" lines="858-958" />]
+- Composition & consensus branch — [<SourceLink file="erpc/network_executor.go" lines="151-214" />]
+- Defaults (5/2, behaviors, wait caps, ignoreFields) — [<SourceLink file="common/defaults.go" lines="2883-2970" />]
+- Dispute error (HTTP 409) — [<SourceLink file="common/errors.go" lines="2779-2811" />]
+- Cordon / uncordon mechanics — [<SourceLink file="upstream/upstream.go" lines="1504-1519" />]
+
+### Related pages
+
+- [Consensus](/config/failsafe/consensus) — the config reference: every field, default, and behavior
+- [Integrity checks](/config/failsafe/integrity) — the sibling safety net for stale or structurally broken responses
+- [Failsafe, in depth](/inside-erpc/failsafe-in-depth) — the retry/hedge layers running inside each consensus slot
+- [Request lifecycle](/inside-erpc/request-lifecycle) — where consensus sits in the wider pipeline
+- [Inside eRPC](/inside-erpc) — the animated pipeline overview
+
+</AISection>
