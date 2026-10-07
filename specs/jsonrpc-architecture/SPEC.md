@@ -142,6 +142,15 @@ not exist. Rules:
 9. `evm:`/`svm:` block on a `type: jsonrpc` upstream → rejected.
 10. failsafe `consensus` policy on a `type: jsonrpc` upstream → rejected.
 
+**ProjectConfig.Validate**
+11. `validateJsonRpcUpstreamNetworkPairing`: a `type: jsonrpc` upstream whose
+    slug no declared jsonrpc network serves → rejected (mirrors the svm
+    cluster-declared rule; only enforced when at least one jsonrpc network
+    is declared, so upstreams-only lazy configs stay untouched). The
+    reverse direction — a non-jsonrpc upstream under a jsonrpc network — is
+    structurally impossible (evm/svm networkIds are never `jsonrpc:<slug>`)
+    and rule 8 already rejects the only mis-binding vector.
+
 ## Defaults
 - `NetworkConfig.SetDefaults`: `networkDefaults.evm` must NOT inject an evm
   block into jsonrpc networks (guard mirrors the existing svm guard — the
@@ -195,8 +204,12 @@ not exist. Rules:
 ## Design-conflict notes (conservative choices)
 - Upstream pairing via `jsonRpc.slug` on the shared transport block instead
   of a new colliding top-level key (see Config shape).
-- No project-level pairing validator: single-dimensional slug pairing is
-  fully enforced by type-level rules (see Validation).
+- A project-level pairing validator IS included
+  (`validateJsonRpcUpstreamNetworkPairing`), mirroring svm's
+  cluster-declared rule: it flags type:jsonrpc upstreams whose slug no
+  declared network serves (they would bootstrap healthy and serve nothing).
+  It only fires when at least one jsonrpc network is declared, keeping
+  upstreams-only lazy configs working.
 - Lazy network creation supports `jsonrpc:<slug>` (mirrors svm) so
   upstreams-only configs keep working; the always-explicit rule applies to
   `architecture:` on declared networks and to upstream `type:`, not to the
