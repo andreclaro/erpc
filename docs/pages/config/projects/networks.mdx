@@ -111,9 +111,9 @@ https://docs.erpc.cloud/config/projects/networks.llms.txt`}
 
 ### How it works
 
-**Architecture concept.** `NetworkArchitecture` is a string enum with two valid values: `"evm"` and `"svm"` (<SourceLink file="common/network.go" lines="14-17" />). The canonical id is `evm:<chainId>` from `util.EvmNetworkId`, or `svm:<cluster>` / `svm:<chain>:<cluster>` from `util.SvmNetworkId` (<SourceLink file="util/ids.go" lines="1-30" />). The `network` Prometheus label equals the alias when set, otherwise the raw id.
+**Architecture concept.** `NetworkArchitecture` is a string enum with three valid values: `"evm"`, `"svm"`, and `"jsonrpc"` (<SourceLink file="common/network.go" lines="14-17" />). The canonical id is `evm:<chainId>` from `util.EvmNetworkId`, `svm:<cluster>` / `svm:<chain>:<cluster>` from `util.SvmNetworkId`, or `jsonrpc:<slug>` from `util.JsonRpcNetworkId` (<SourceLink file="util/ids.go" lines="1-30" />). The `network` Prometheus label equals the alias when set, otherwise the raw id.
 
-`architecture` is inferred when omitted: a network carrying an `svm` block derives `architecture: svm`, one carrying `evm` (or neither) derives `evm` (<SourceLink file="common/defaults.go" lines="2010-2028" />). Declaring `architecture: svm` auto-creates an empty `svm` block, and `networkDefaults.evm` is never injected into an SVM network. See [SvmNetworkConfig](#projectsnetworkssvm--svmnetworkconfig) below and the [SVM reference pages](/reference/svm/commitment).
+`architecture` is inferred when omitted: a network carrying an `svm` block derives `architecture: svm`, one carrying `evm` (or neither) derives `evm` (<SourceLink file="common/defaults.go" lines="2010-2028" />). Declaring `architecture: svm` auto-creates an empty `svm` block, and `networkDefaults.evm` is never injected into an SVM or jsonrpc network. See [SvmNetworkConfig](#projectsnetworkssvm--svmnetworkconfig) below and the [SVM reference pages](/reference/svm/commitment).
 
 **Lazy creation.** `NetworksRegistry.GetNetwork` fast-paths a `sync.Map` lookup; on miss it validates the id format and schedules a bootstrap task. The task: (1) resolves or synthesizes a `NetworkConfig` and runs `SetDefaults` so it inherits `networkDefaults` exactly like static networks; (2) calls `PrepareUpstreamsForNetwork` — fans out to every configured provider, polls 200 ms for up to 30 s until ≥1 upstream is ready; (3) wires the cache DAL; (4) registers with the selection-policy engine. Statically-declared networks bootstrap in background at startup through the same machinery; a failed eager bootstrap is retried when the first request arrives.
 
@@ -141,9 +141,10 @@ https://docs.erpc.cloud/config/projects/networks.llms.txt`}
 
 | Field | Type | Default | Behavior / footguns |
 |---|---|---|---|
-| `architecture` | `string` (`evm` \| `svm`) | Inferred from the sub-block: `svm` present → `"svm"`, otherwise `"evm"` (<SourceLink file="common/defaults.go" lines="2010-2028" />) | Both `evm` and `svm` are valid (<SourceLink file="common/network.go" lines="82-88" />). Required by validation. |
-| `evm` | `EvmNetworkConfig` | Auto-created empty struct for EVM networks (<SourceLink file="common/defaults.go" lines="1914-1916" />); never injected into an SVM network | See EvmNetworkConfig table below. |
+| `architecture` | `string` (`evm` \| `svm` \| `jsonrpc`) | Inferred from the sub-block: `svm` present → `"svm"`, otherwise `"evm"` (<SourceLink file="common/defaults.go" lines="2010-2028" />) | All three architectures are valid (<SourceLink file="common/network.go" lines="82-88" />). Required by validation. |
+| `evm` | `EvmNetworkConfig` | Auto-created empty struct for EVM networks (<SourceLink file="common/defaults.go" lines="1914-1916" />); never injected into an SVM or jsonrpc network | See EvmNetworkConfig table below. |
 | `svm` | `SvmNetworkConfig` | Auto-created empty struct when `architecture: svm` (<SourceLink file="common/defaults.go" lines="2026-2028" />) | Required for SVM networks — `network.*.svm is required for svm networks` otherwise. See SvmNetworkConfig table below. |
+| `jsonrpc` | `JsonRpcNetworkConfig` | Auto-created empty struct when `architecture: jsonrpc` | Required for jsonrpc networks — `slug` must be non-empty. See JsonRpcNetworkConfig table below. |
 | `alias` | `string` | `""` | Charset `[a-zA-Z0-9_-]+` (<SourceLink file="common/validation.go" lines="1264-1269" />); unique per project (<SourceLink file="common/validation.go" lines="622-627" />). Used as the `network` metric label via `Network.Label()` (<SourceLink file="erpc/networks.go" lines="278-286" />). Aliases work in URL path only — not in body `networkId`. |
 | `cacheKeySuffix` | `string` | `""`; inherits `networkDefaults.cacheKeySuffix` when empty (<SourceLink file="common/defaults.go" lines="2107-2109" />) | Inserted into the JSON-RPC cache partition key as `{networkId}:{suffix}:{blockRef}` so two networks that share a chainId and a Redis do not collide. Empty keeps `{networkId}:{blockRef}`. Charset `[a-zA-Z0-9_-]+` (same as alias); `:` is rejected. Not unique — many networks may share `systx`. Reverse-index wildcard is `{networkId}:{suffix}:*` (same helper as the main key), so hash-keyed / tag reads are isolated even when the block ref contains `:`. |
 | `rateLimitBudget` | `string` | `""` (none); inherits `networkDefaults.rateLimitBudget` when empty (<SourceLink file="common/defaults.go" lines="1783-1785" />) | Must reference an existing budget. Enforced per-request before upstream contact → `ErrNetworkRateLimitRuleExceeded`. |
@@ -212,6 +213,22 @@ https://docs.erpc.cloud/config/projects/networks.llms.txt`}
 Not present on `SvmNetworkConfig`: there is no `maxSlotsPerSignaturesQuery`. An early design proposed one as an analogue of EVM's `getLogs` range cap, but `getSignaturesForAddress` is bounded by signature cursors (`before`/`until`), not by a slot range, so the key described semantics Solana does not have and was removed. `minContextSlot` is a node-freshness floor — the minimum bank slot at which a request may be *evaluated* — not a lower bound on returned history, so it cannot serve as a range cap either.
 
 **Cluster and genesis-hash validation.** Known `(chain, cluster)` pairs — currently Solana `mainnet-beta`, `devnet`, and `testnet` — have their genesis hash validated at bootstrap by a single `getGenesisHash` call compared against a hardcoded table. Both a mismatch and a *fetch failure* fail the upstream, so a node mis-pointed at the wrong cluster never joins the pool. For unknown clusters (forks, private clusters) the same check runs only when the upstream sets `svm.checkGenesisHash: true`. `getGenesisHash` itself is then answered from the table with no upstream round-trip, mirroring EVM's `eth_chainId` short-circuit.
+
+#### `projects[].networks[].jsonrpc` — JsonRpcNetworkConfig
+
+The generic `jsonrpc` architecture hosts any JSON-RPC 2.0 chain that is not EVM or SVM — Starknet, NEAR, Cosmos, Aptos, custom rollups. No chain-specific state poller, block-availability gate, or finality tracker runs: routing, caching, failover, and batching use the generic JSON-RPC pipeline.
+
+| Field | Type | Default | Behavior / footguns |
+|---|---|---|---|
+| `slug` | `string` | `""` (required) | Human-readable identifier that forms the network id `jsonrpc:<slug>`. **This is network identity** — two jsonrpc networks in the same project must have distinct slugs. The slug appears in URL paths (`/main/jsonrpc/<slug>`) and metric labels. |
+
+**Upstream pairing.** A `type: jsonrpc` upstream joins a jsonrpc network when `jsonrpc.slug` on the upstream matches the network's `slug` (<SourceLink file="common/validation.go" lines="1-10" />). Unlike EVM (which probes `eth_chainId`) or SVM (which validates genesis hash), identity is asserted purely by configuration — no RPC calls are made at bootstrap. Upstreams with a mismatched or missing slug are rejected with a validation error.
+
+**Error taxonomy.** The jsonrpc error extractor classifies upstream errors by their JSON-RPC code: `-32700` (parse), `-32600` (invalid request), `-32601` (method not found), and `-32602` (invalid params) are client-side errors that short-circuit retry across upstreams — every node answers identically, so failover is wasteful. Application-defined codes (outside the `-32768`..`-32000` reserved range) pass through verbatim to the caller. HTTP status codes participate: `401`/`403` map to auth errors, `429` to rate-limit, `5xx` to server-side (retryable), other `4xx` to client-side (not retryable).
+
+**No block-awareness.** The jsonrpc architecture does not parse params for block references, track head/finalized state, or enforce block availability. Methods are treated as opaque strings; caching keys on `method + params` hash. If your chain needs block-aware routing, use the EVM or SVM architecture.
+
+**Batching.** Client-side batch coalescing works identically to EVM: set `jsonrpc.supportsBatch: true` on the upstream, then concurrent requests with distinct params are coalesced into a single JSON-RPC array body. The batch response is demultiplexed by request ID.
 
 #### `projects[].networks[].directiveDefaults` — DirectiveDefaultsConfig
 
