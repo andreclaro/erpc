@@ -58,62 +58,21 @@ A slot can carry more than one candidate bank (equivocation today; fast leader h
 - **WebSocket fan-out becomes the bottleneck**: polling for finality stops making sense at 150ms; finality via push channels = hundreds of thousands of concurrent sockets instead of millions of tiny HTTP polls.
 - **Cache freshness**: any cache holding account data longer than ~250ms can serve stale state. Edge caches / L7 proxies need sub-second TTLs or certificate-aware purges.
 
-## 3. Impact on eRPC specifically
+## 3. Impact on eRPC — summary
 
-Verified against `andreclaro/erpc` **main @ `14c268f0`** (2026-10-08).
+Full engineering detail — per-file source changes, configuration changes, decisions, phased checklist — lives in **[erpc-alpenglow-required-change.md](erpc-alpenglow-required-change.md)** (same verification: main @ `14c268f0`). Headlines:
 
-### 3.1 On main today — finality-classified caching, state poller, failsafe matching
+- **State poller** — keep dual `getSlot(processed)`/`getSlot(finalized)` tracks; make poll cadence and the time-flavored thresholds (shred-insert lag, finalized-slot lag) follow *measured slot duration*, since 400→200ms slots silently halves the wall-clock meaning of every slots-expressed constant.
+- **finality.go cache classes** — classifications stay correct; re-scale the ~400ms staleness math; `slotPinnedMethods` promotion arrives ~150ms post-block instead of ~12.8s — widen cache use only when per-upstream `getAgGenesisCert` says Alpenglow is live, never on a date.
+- **Failsafe `matchCommitment` (#1181)** — unchanged; post-activation `confirmed`≈`finalized` is a simplification opportunity, runtime-gated.
+- **`getAgGenesisCert`** — allowlist with three-state handling (`-32601` / `null` / certificate); never fail over on `-32601` for this method.
+- **Metrics** — `getRecentPerformanceSamples` tx counts re-baseline (votes leave the block, ~−75%); `getVoteAccounts` says less about live participation over time.
+- **Ops** — SVM cache TTLs below slot time; WS fan-out capacity-planning for push finality; no misbehavior scoring penalties for upstream version skew.
+- **What does NOT change** — tx execution/fees/account model, `processed` commitment, JSON-RPC/WS schemas, genesis hash, signatures. Geyser is the only breaking-schema surface.
 
-**`architecture/svm/finality.go` — cache policy classification.**
-- `neverCacheMethods` justifies realtime treatment as "go stale in under one slot (~400ms)". Slot time halves to 200ms (SIMD-0525), and post-activation confirmed==finalized at ~150ms — the classification stays correct (conservative), but every numeric TTL/staleness assumption built on ~400ms slots must be re-scaled.
-- `slotPinnedMethods` (getBlock/getTransaction/…) promote to immutable-cacheable at `commitment == finalized`. Today that promotion waits ~12.8s after block production; post-activation it arrives ~150ms later. Recent-block reads become cacheable almost immediately — a real cache-hit win — but only *after* `getAgGenesisCert` says Alpenglow is live on that upstream (pre-activation, finalized still means 12.8s).
-- `alwaysFinalizedMethods` (`getInflationReward`, `getBlockTime`): remain stable-once-exists and cacheable. Caveat: `getBlockTime`'s value gets a new producer (leader-set, bounded by 2× elapsed slot time) — stability unaffected, trust model changes; re-check any consumer tuned to stake-median drift.
+## 4. Action checklist
 
-**`architecture/svm/svm_state_poller.go` — dual slot tracking.**
-- Polls `getSlot(processed)` and `getSlot(finalized)` per upstream; the finalized tip doubles as the getBlock guard bound at finalized commitment.
-- Post-activation the two tracks converge (finalized lag drops from ~12.8s to ~150ms) — the poller keeps working, but cadence/tolerance tuning assumes TowerBFT: the traffic-gate windows and large-rollback tolerances should be revisited. Slot rate doubling (400→200ms) also means a per-second rollback allowance covers half the slot depth it used to.
-
-**Failsafe commitment matching (merged as #1181).**
-- Requests are matched on the caller's commitment. Post-activation, `confirmed` and `finalized` requests become equivalent for matching/caching — a simplification opportunity, not a break. Gate it on per-upstream `getAgGenesisCert`, not a date.
-
-**Metrics/diagnostics on main.**
-- `getRecentPerformanceSamples` (in neverCache): performance sample tx counts re-baseline — votes gone, counts drop ~75% without any real activity change.
-- `getVoteAccounts` keeps working (vote *accounts* still exist on-chain) but says less about live participation over time — that evidence moves to footer certificates.
-
-### 3.2 Request routing and method support
-- **`getAgGenesisCert`**: add to allowed-method lists for SVM networks. During the 4.2→4.3 rollout, upstreams will disagree: `null` (upgraded, TowerBFT), certificate (upgraded, migrated), or `-32601` (not upgraded). eRPC should treat these as valid, distinct outcomes — do **not** fail over on `-32601` for this method; it is node-version signal, not upstream failure.
-- **Mixed-version upstream pools**: expect heterogeneous behavior around commitment handling and new methods for several weeks. eRPC's upstream scoring/misbehavior tracking must not penalize nodes for version skew on Alpenglow-adjacent methods.
-- **Cache layer**: response caching keyed on commitment can simplify post-activation (`confirmed` ≈ `finalized`), but TTLs must shrink below slot time (heading to 200ms) or cached reads go stale relative to finality. Certificate-aware purge hooks are the clean long-term answer; short-term, drop cache TTLs for SVM networks.
-
-### 3.3 Streaming / WebSocket proxying
-If eRPC proxies WS subscriptions: finality polling gives way to long-lived push streams. Plan for connection-count scaling (hundreds of thousands of sockets per cluster), and note `bank_id` does **not** appear in JSON-RPC/WS — WS consumers see no schema change, only faster `finalized` notifications.
-
-### 3.4 What does NOT change
-- Transaction execution, fee mechanics, account model, program semantics.
-- `processed` commitment semantics.
-- JSON-RPC and WebSocket schemas (except the additive `getAgGenesisCert`).
-- Genesis hash, blockhash format, ed25519 transaction signatures.
-- Geyser is the only surface with breaking schema changes (callbacks + `bank_id`).
-
-## 4. Action checklist for eRPC
-
-**Before mainnet activation (now → Agave 4.3 window):**
-1. Add `getAgGenesisCert` to SVM method allowlists; handle `-32601` (node not upgraded) vs `null` (TowerBFT) vs certificate (migrated) as three distinct valid outcomes — never fail over on `-32601` for this method.
-2. **(main)** Re-scale slot-time assumptions: `finality.go` staleness math ("under one slot ~400ms") and state-poller cadence/rollback tolerances — 400→200ms slots means a per-second rollback allowance covers half the slot depth it used to.
-3. **(main)** Prepare `slotPinnedMethods` for near-instant promotion: post-activation, getBlock/getTransaction at `finalized` become immutable ~150ms after production instead of ~12.8s — widen cache utilization then, gated on per-upstream `getAgGenesisCert`, never on a date.
-4. **(main)** Re-baseline anything derived from `getRecentPerformanceSamples` tx counts — votes gone is an accounting change, not an activity collapse.
-5. **(main/ops)** Re-check the `getBlockTime` trust model in consumers (`alwaysFinalizedMethods`): still stable-once-exists and cacheable, but leader-set with a drift envelope that grows with skipped slots.
-6. Shrink SVM cache TTLs below slot time (heading to 200ms); certificate-aware purges are the clean long-term answer.
-7. Keep chain-safety invariant everywhere: Alpenglow-only fields (footer, certificates, `bank_id`) → Skipped, never Reject, until modelled.
-
-**During rollout:**
-8. Treat upstream version skew as normal — no misbehavior scoring penalties for Alpenglow-adjacent method differences (`getAgGenesisCert` presence/absence, commitment quirks).
-9. Monitor `getAgGenesisCert` per upstream — it is the authoritative per-node migration signal; drive all behavior switches off it.
-10. Expect WS fan-out growth if proxying subscriptions (finality polling → push); capacity-plan connection counts.
-
-**Post-activation:**
-11. Migrate read paths to `finalized` — now ~150ms and strictly stronger than `confirmed`; plan for `confirmed`'s later removal.
-12. If Geyser consumers exist downstream: Yellowstone ≥ `v16.0.0-rc10+solana.4.3.0`, buffer per `(slot, bank_id)`, reconcile multi-provider merges on blockhash only.
+Moved to [erpc-alpenglow-required-change.md](erpc-alpenglow-required-change.md) §3 (phased: pre-activation / during rollout / post-activation) to keep this doc protocol-focused.
 
 ## 5. Sources
 - Solana upgrades hub: https://solana.com/upgrades (Agave 4.2 shipped Aug 2026; 4.3 planned Oct 2026)
