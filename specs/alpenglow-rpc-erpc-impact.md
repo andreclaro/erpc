@@ -72,7 +72,7 @@ Full engineering detail — per-file source changes, configuration changes, deci
 
 ## 4. Action checklist
 
-Moved to [erpc-alpenglow-required-change.md](erpc-alpenglow-required-change.md) §3 (post-activation checklist) to keep this doc protocol-focused.
+Moved to [erpc-alpenglow-required-change.md](erpc-alpenglow-required-change.md) §3 (checklist: before / during / after activation) to keep this doc protocol-focused.
 
 ## 5. Sources
 - Solana upgrades hub: https://solana.com/upgrades (Agave 4.2 shipped Aug 2026; 4.3 planned Oct 2026)

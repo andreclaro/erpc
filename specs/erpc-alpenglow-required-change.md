@@ -48,18 +48,28 @@
   - Capacity-plan WS connections if proxying subscriptions — finality polling stops making sense at ~150ms; push fan-out moves the bottleneck from request rate to connection count.
   - `getRecentPerformanceSamples` tx counts drop ~75% post-activation (votes leave the block) — do not alarm on "activity collapse".
 
-## 3. Post-activation checklist
+## 3. Checklist — before, during, and after activation
 
-1. Per-upstream `getAgGenesisCert` state verified — it is the switch that activates everything below.
-2. Poll cadence following measured slot time (½ slot).
-3. Duration-derived thresholds live: shred-insert lag and finalized-slot lag no longer halve their wall-clock meaning at 200ms slots.
-4. `slotPinnedMethods` promotion window widened — getBlock/getTransaction cacheable ~150ms post-block; cache utilization re-measured.
-5. Finalized-lag default tightened (era-appropriate; ~40s intent no longer means ~200 slots).
-6. Metrics re-baselined: `getRecentPerformanceSamples` tx counts (~−75% is expected, not an outage), `getVoteAccounts` participation semantics, `LatestFinalizedGap` health metric with era expectation.
-7. Read paths migrated to `finalized`; `confirmed`-removal handling on the radar for Anza's deprecation timeline.
-8. Optional: `confirmed`→`finalized` upstream normalization in failsafe matching.
-9. Geyser consumers (if any downstream): Yellowstone ≥ `v16.0.0-rc10+solana.4.3.0`, `(slot, bank_id)` buffering, blockhash-only merge reconciliation.
-10. Dual-era test fixtures green in CI.
+**Before activation** (land the code — inert on TowerBFT, §0 D2):
+1. `getAgGenesisCert` allowlisted with three-state handling (§1.7).
+2. Slot-duration measurement in the poller + duration-following cadence (§1.1).
+3. Time-flavored thresholds converted to duration-internal (§1.2, §1.3).
+4. Dual-era test fixtures green in CI (§1.8).
+5. Chain-safety invariant held everywhere: Alpenglow-only fields (footer, certificates, `bank_id`) → Skipped, never Reject, until modelled.
+
+**During rollout:**
+6. Version skew is normal — no misbehavior scoring penalties for Alpenglow-adjacent method differences.
+7. `getAgGenesisCert` per upstream drives all behavior switches (§0 D2).
+8. Watch WS fan-out growth if proxying subscriptions.
+
+**After activation:**
+9. Poll cadence confirmed following measured 200ms slot time; duration-derived thresholds live.
+10. `slotPinnedMethods` promotion window widened — getBlock/getTransaction cacheable ~150ms post-block; cache utilization re-measured.
+11. Finalized-lag default tightened (era-appropriate; §1.2).
+12. Metrics re-baselined: `getRecentPerformanceSamples` (~−75% expected), `getVoteAccounts` semantics, `LatestFinalizedGap` health metric.
+13. Read paths migrated to `finalized`; `confirmed`-removal on the radar for Anza's deprecation timeline.
+14. Optional: `confirmed`→`finalized` upstream normalization in failsafe matching (§1.6).
+15. Geyser consumers (if any downstream): Yellowstone ≥ `v16.0.0-rc10+solana.4.3.0`, `(slot, bank_id)` buffering, blockhash-only merge reconciliation.
 
 ## 4. Explicitly deferred
 - Modelling block footers / certificates in JSON-RPC paths (Geyser-only today; Skip per chain-safety invariant until they appear on RPC).
