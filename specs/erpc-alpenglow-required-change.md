@@ -3,11 +3,10 @@
 > Engineering companion to [alpenglow-rpc-erpc-impact.md](alpenglow-rpc-erpc-impact.md) — protocol context and the "why" lives there; required code/config changes live here.
 > Verified against `andreclaro/erpc` **main @ `14c268f0`** (2026-10-08). Line references are that tree.
 
-## 0. Decisions (agreed before any code changes)
+## 0. Decisions
 
 - **D1 — Keep both poller tracks.** `getSlot(processed)` and `getSlot(finalized)` both stay (see impact doc §3 for reasoning: one can't be derived from the other; distinct consumers; the gap is a free health metric; per-track rollback tripwires; trivial cost). The change is in the *thresholds around the tracks*, not the tracks.
-- **D2 — All era detection is runtime.** Slot duration and Alpenglow state are measured/probed per upstream (`getAgGenesisCert`, observed slot cadence) — never a date, version string, or compiled-in constant. Same philosophy as the integrity work's chain-safety invariant.
-- **D3 — Everything defaults-inert on TowerBFT.** No behavior change pre-activation; no new required config. Operators upgrade eRPC before Agave 4.3 and nothing moves until the chain does.
+- **D2 — All changes activate off runtime signals.** Alpenglow state is probed per upstream (`getAgGenesisCert`); slot duration is measured from the chain. Land the code any time — every behavior switch flips only when the upstream actually migrates. Never a date, version string, or compiled-in constant (same philosophy as the integrity work's chain-safety invariant). No new required config.
 
 ## 1. Source code changes
 
@@ -41,7 +40,7 @@
 
 ## 2. Configuration changes
 
-- **No new required knobs (D3).** All changes default to auto-derived behavior.
+- **No new required knobs (D2).** All changes default to auto-derived behavior.
 - **`slotDuration`** (new optional, network scope): `auto` (default — measured per D2) or an explicit duration for private/unknown clusters. Mirrors the integrity work's per-check `expected` override pattern.
 - **Duration-valued thresholds:** `maxFinalizedSlotLag` and the shred-insert threshold accept either a plain integer (slots, today's meaning, backwards-compatible) or a duration string (`"40s"`) meaning wall-clock intent converted at runtime. Documented in config reference with the era-dependence called out.
 - **Operator guidance (docs, not code):**
@@ -49,25 +48,18 @@
   - Capacity-plan WS connections if proxying subscriptions — finality polling stops making sense at ~150ms; push fan-out moves the bottleneck from request rate to connection count.
   - `getRecentPerformanceSamples` tx counts drop ~75% post-activation (votes leave the block) — do not alarm on "activity collapse".
 
-## 3. Phased checklist (moved from the impact doc)
+## 3. Post-activation checklist
 
-**Before mainnet activation (now → Agave 4.3 window):**
-1. `getAgGenesisCert` allowlisted with three-state handling (§1.7).
-2. Slot-duration measurement in the poller + duration-following cadence (§1.1).
-3. Time-flavored thresholds converted to duration-internal (§1.2, §1.3).
-4. Dual-era test fixtures green (§1.8).
-5. Chain-safety invariant held everywhere: Alpenglow-only fields (footer, certificates, `bank_id`) → Skipped, never Reject, until modelled.
-
-**During rollout:**
-6. Version skew is normal — no misbehavior scoring penalties for Alpenglow-adjacent method differences.
-7. `getAgGenesisCert` per upstream drives all behavior switches (D2).
-8. Watch WS fan-out growth if proxying subscriptions.
-
-**Post-activation:**
-9. Migrate read paths to `finalized` (~150ms, strictly stronger); plan for `confirmed`'s later removal.
-10. Tighten finalized-lag default (~200 slots of slack → era-appropriate) behind the runtime gate (§1.2).
-11. Optional: `confirmed`→`finalized` upstream normalization in failsafe matching (§1.6).
-12. If Geyser consumers exist downstream: Yellowstone ≥ `v16.0.0-rc10+solana.4.3.0`, buffer per `(slot, bank_id)`, reconcile multi-provider merges on blockhash only.
+1. Per-upstream `getAgGenesisCert` state verified — it is the switch that activates everything below.
+2. Poll cadence following measured slot time (½ slot).
+3. Duration-derived thresholds live: shred-insert lag and finalized-slot lag no longer halve their wall-clock meaning at 200ms slots.
+4. `slotPinnedMethods` promotion window widened — getBlock/getTransaction cacheable ~150ms post-block; cache utilization re-measured.
+5. Finalized-lag default tightened (era-appropriate; ~40s intent no longer means ~200 slots).
+6. Metrics re-baselined: `getRecentPerformanceSamples` tx counts (~−75% is expected, not an outage), `getVoteAccounts` participation semantics, `LatestFinalizedGap` health metric with era expectation.
+7. Read paths migrated to `finalized`; `confirmed`-removal handling on the radar for Anza's deprecation timeline.
+8. Optional: `confirmed`→`finalized` upstream normalization in failsafe matching.
+9. Geyser consumers (if any downstream): Yellowstone ≥ `v16.0.0-rc10+solana.4.3.0`, `(slot, bank_id)` buffering, blockhash-only merge reconciliation.
+10. Dual-era test fixtures green in CI.
 
 ## 4. Explicitly deferred
 - Modelling block footers / certificates in JSON-RPC paths (Geyser-only today; Skip per chain-safety invariant until they appear on RPC).
