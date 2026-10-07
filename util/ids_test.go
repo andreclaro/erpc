@@ -26,6 +26,57 @@ func TestSvmNetworkId_BackwardCompat(t *testing.T) {
 	}
 }
 
+func TestJsonRpcNetworkId(t *testing.T) {
+	cases := []struct {
+		slug string
+		want string
+	}{
+		{"starknet", "jsonrpc:starknet"},
+		{"stellar-mainnet", "jsonrpc:stellar-mainnet"},
+		{"near_testnet", "jsonrpc:near_testnet"},
+		{"myChain123", "jsonrpc:myChain123"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.slug, func(t *testing.T) {
+			t.Parallel()
+			if got := JsonRpcNetworkId(tc.slug); got != tc.want {
+				t.Fatalf("JsonRpcNetworkId(%q) = %q, want %q", tc.slug, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsValidNetworkId_JsonRpc(t *testing.T) {
+	cases := []struct {
+		id   string
+		want bool
+	}{
+		// Valid two-part IDs.
+		{"jsonrpc:starknet", true},
+		{"jsonrpc:stellar-mainnet", true},
+		{"jsonrpc:near_testnet", true},
+		{"jsonrpc:myChain123", true},
+
+		// Rejections.
+		{"jsonrpc:", false},              // empty slug
+		{"jsonrpc:stark net", false},     // space not allowed
+		{"jsonrpc:stark/net", false},     // slash not allowed
+		{"jsonrpc:stark.net", false},     // dot not allowed (must survive as a single URL path segment)
+		{"jsonrpc:stark:net", false},     // colon not allowed (would make it three-part)
+		{"jsonrpc:starknet!", false},     // punctuation not allowed
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.id, func(t *testing.T) {
+			t.Parallel()
+			if got := IsValidNetworkId(tc.id); got != tc.want {
+				t.Fatalf("IsValidNetworkId(%q) = %v, want %v", tc.id, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsValidNetworkId_SvmWithChain(t *testing.T) {
 	cases := []struct {
 		id   string
