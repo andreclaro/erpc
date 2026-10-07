@@ -1398,6 +1398,26 @@ func (u *Upstream) detectFeatures(ctx context.Context) error {
 		// Genesis-hash validation runs in Bootstrap (svmVerifyGenesisHash) once
 		// the client and networkId are in place, so it can go through the
 		// upstream's normal Forward path.
+	} else if cfg.Type == common.UpstreamTypeJsonRpc {
+		// Generic JSON-RPC: identity is asserted by configuration, never
+		// probed (no eth_chainId, no feature detection). The slug binds this
+		// upstream to network jsonrpc:<slug>.
+		if cfg.JsonRpc == nil {
+			return common.NewErrUpstreamClientInitialization(
+				fmt.Errorf("jsonrpc upstream %q is missing jsonRpc config", cfg.Id), u,
+			)
+		}
+		if cfg.JsonRpc.Slug == "" {
+			return common.NewErrUpstreamClientInitialization(
+				fmt.Errorf("jsonrpc upstream %q is missing jsonRpc.slug", cfg.Id), u,
+			)
+		}
+		if !util.IsValidIdentifier(cfg.JsonRpc.Slug) {
+			return common.NewErrUpstreamClientInitialization(
+				fmt.Errorf("jsonrpc upstream %q has invalid jsonRpc.slug %q", cfg.Id, cfg.JsonRpc.Slug), u,
+			)
+		}
+		u.networkId.Store(util.JsonRpcNetworkId(cfg.JsonRpc.Slug))
 	} else {
 		return fmt.Errorf("upstream type not supported: %s", cfg.Type)
 	}

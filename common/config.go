@@ -1266,6 +1266,12 @@ type JsonRpcUpstreamConfig struct {
 	EnableGzip    *bool             `yaml:"enableGzip,omitempty" json:"enableGzip"`
 	Headers       map[string]string `yaml:"headers,omitempty" json:"headers"`
 	ProxyPool     string            `yaml:"proxyPool,omitempty" json:"proxyPool"`
+
+	// Slug pairs a type: jsonrpc upstream to its network: the upstream serves
+	// network jsonrpc:<slug>. Required for jsonrpc upstreams, inert (and
+	// rejected by validation) on evm/svm upstreams. Identity is asserted by
+	// configuration — the jsonrpc architecture performs no RPC probing.
+	Slug string `yaml:"slug,omitempty" json:"slug" tstype:"string"`
 }
 
 func (c *JsonRpcUpstreamConfig) Copy() *JsonRpcUpstreamConfig {
@@ -2261,6 +2267,7 @@ type NetworkConfig struct {
 	Failsafe          []*FailsafeConfig        `yaml:"failsafe,omitempty" json:"failsafe"`
 	Evm               *EvmNetworkConfig        `yaml:"evm,omitempty" json:"evm"`
 	Svm               *SvmNetworkConfig        `yaml:"svm,omitempty" json:"svm"`
+	JsonRpc           *JsonRpcNetworkConfig    `yaml:"jsonRpc,omitempty" json:"jsonRpc"`
 	SelectionPolicy   *SelectionPolicyConfig   `yaml:"selectionPolicy,omitempty" json:"selectionPolicy"`
 	DirectiveDefaults *DirectiveDefaultsConfig `yaml:"directiveDefaults,omitempty" json:"directiveDefaults"`
 	Alias             string                   `yaml:"alias,omitempty" json:"alias"`
@@ -3190,6 +3197,11 @@ func (c *NetworkConfig) NetworkId() string {
 			return ""
 		}
 		return util.SvmNetworkId(c.Svm.Chain, c.Svm.Cluster)
+	case ArchitectureJsonRpc:
+		if c.JsonRpc == nil || c.JsonRpc.Slug == "" {
+			return ""
+		}
+		return util.JsonRpcNetworkId(c.JsonRpc.Slug)
 	default:
 		return ""
 	}

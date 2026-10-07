@@ -2622,6 +2622,18 @@ func (n *Network) prepareRequest(ctx context.Context, nr *common.NormalizedReque
 				nil,
 			)
 		}
+	case common.ArchitectureJsonRpc:
+		// Generic JSON-RPC: no protocol logic, no normalization. Validate the
+		// envelope parses and pass everything through untouched.
+		if _, err := nr.JsonRpcRequest(ctx); err != nil {
+			return common.NewErrJsonRpcExceptionInternal(
+				0,
+				common.JsonRpcErrorParseException,
+				"failed to unmarshal json-rpc request",
+				err,
+				nil,
+			)
+		}
 	default:
 		return common.NewErrJsonRpcExceptionInternal(
 			0,
@@ -2675,6 +2687,13 @@ func (n *Network) GetFinality(ctx context.Context, req *common.NormalizedRequest
 	// plumbing Network's internal upstreams registry through the generic interface.
 	if n.cfg.Architecture == common.ArchitectureSvm {
 		return svm.GetFinality(ctx, n, req, resp)
+	}
+	if n.cfg.Architecture == common.ArchitectureJsonRpc {
+		// Generic JSON-RPC has no protocol logic and no state poller, so
+		// finality is always "unknown" unless the per-method methods: config
+		// above explicitly declared the method finalized/realtime. That keeps
+		// opt-in cache TTLs keyed DataFinalityStateUnknown only.
+		return finality
 	}
 
 	blockRef, blockNumber, _ := evm.ExtractBlockReferenceFromRequest(ctx, req)

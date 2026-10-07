@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/erpc/erpc/architecture/evm"
+	// jsonrpc registers itself on the architecture registry via init().
+	_ "github.com/erpc/erpc/architecture/jsonrpc"
 	"github.com/erpc/erpc/architecture/svm"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"

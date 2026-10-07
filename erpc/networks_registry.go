@@ -390,6 +390,13 @@ func (nr *NetworksRegistry) resolveNetworkConfig(networkId string) (*common.Netw
 				return nil, common.NewErrInvalidEvmChainId(networkId)
 			}
 			nwCfg.Svm = &common.SvmNetworkConfig{Chain: chain, Cluster: cluster}
+		case common.ArchitectureJsonRpc:
+			// Generic JSON-RPC networks are two-part (jsonrpc:<slug>) and carry
+			// no protocol state — the slug IS the identity.
+			if s[1] == "" {
+				return nil, common.NewErrInvalidEvmChainId(networkId)
+			}
+			nwCfg.JsonRpc = &common.JsonRpcNetworkConfig{Slug: s[1]}
 		default:
 			return nil, common.NewErrInvalidEvmChainId(networkId)
 		}

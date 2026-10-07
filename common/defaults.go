@@ -2232,10 +2232,10 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 			if n.Evm.EmptyResultConfidence == 0 && defaults.Evm.EmptyResultConfidence != 0 {
 				n.Evm.EmptyResultConfidence = defaults.Evm.EmptyResultConfidence
 			}
-		} else if n.Evm == nil && defaults.Evm != nil && n.Svm == nil && n.Architecture != ArchitectureSvm {
+		} else if n.Evm == nil && defaults.Evm != nil && n.Svm == nil && n.Architecture != ArchitectureSvm && n.Architecture != ArchitectureJsonRpc {
 			// Copy EVM defaults only onto networks that are (or can become) EVM.
-			// Without the SVM guard, a mixed project with networkDefaults.evm
-			// would inject an evm block into every svm network — and the
+			// Without the SVM/jsonrpc guards, a mixed project with networkDefaults.evm
+			// would inject an evm block into every svm/jsonrpc network — and the
 			// architecture derivation below checks n.Evm BEFORE n.Svm, silently
 			// flipping an `svm:`-authored network to architecture=evm.
 			n.Evm = &EvmNetworkConfig{}
@@ -2271,6 +2271,10 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 	}
 	if n.Architecture == ArchitectureSvm && n.Svm == nil {
 		n.Svm = &SvmNetworkConfig{}
+	}
+	if n.Architecture == ArchitectureJsonRpc && n.JsonRpc == nil {
+		// Nil-safety only — validation still requires an explicit slug.
+		n.JsonRpc = &JsonRpcNetworkConfig{}
 	}
 
 	// Apply methods defaults

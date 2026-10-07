@@ -788,6 +788,9 @@ func (p *ProjectConfig) Validate(c *Config) error {
 	if err := validateSvmUpstreamNetworkPairing(p.Upstreams, p.Networks); err != nil {
 		return err
 	}
+	if err := validateJsonRpcUpstreamNetworkPairing(p.Upstreams, p.Networks); err != nil {
+		return err
+	}
 	if p.Auth != nil {
 		if err := p.Auth.Validate(); err != nil {
 			return err
@@ -1031,6 +1034,23 @@ func (u *UpstreamConfig) Validate(c *Config, skipEndpointCheck bool) error {
 		if err := u.JsonRpc.Validate(c); err != nil {
 			return err
 		}
+	}
+	// jsonrpc upstreams: type must be explicit and the slug binds the upstream
+	// to its network. For evm/svm upstreams a slug is meaningless — catch the
+	// "forgot to set type: jsonrpc" misconfiguration here instead of at
+	// bootstrap.
+	if u.Type == UpstreamTypeJsonRpc {
+		if u.Evm != nil || u.Svm != nil {
+			return fmt.Errorf("upstream.*.evm/svm blocks are not allowed on a jsonrpc upstream (type is 'jsonrpc')")
+		}
+		if u.JsonRpc == nil || u.JsonRpc.Slug == "" {
+			return fmt.Errorf("upstream.*.jsonRpc.slug is required for jsonrpc upstreams (it binds the upstream to network jsonrpc:<slug>)")
+		}
+		if !isValidJsonRpcSlug(u.JsonRpc.Slug) {
+			return fmt.Errorf("upstream.*.jsonRpc.slug '%s' is invalid, must contain only alphanumeric characters, dash, or underscore", u.JsonRpc.Slug)
+		}
+	} else if u.JsonRpc != nil && u.JsonRpc.Slug != "" {
+		return fmt.Errorf("upstream.*.jsonRpc.slug is only allowed when type is 'jsonrpc' (add 'type: jsonrpc' or remove the slug)")
 	}
 	if u.Grpc != nil {
 		if err := u.Grpc.Validate(); err != nil {
@@ -1476,6 +1496,27 @@ func (n *NetworkConfig) Validate(c *Config) error {
 	if n.Architecture == ArchitectureSvm && n.Svm == nil {
 		return fmt.Errorf("network.*.svm is required for svm networks")
 	}
+	if n.Architecture == ArchitectureJsonRpc && n.JsonRpc == nil {
+		return fmt.Errorf("network.*.jsonRpc is required for jsonrpc networks")
+	}
+	// Architecture blocks are mutually exclusive: a jsonrpc network carries no
+	// protocol logic, so evm/svm blocks on it are a misconfiguration, not an
+	// inert extra. Same in reverse.
+	if n.Architecture == ArchitectureJsonRpc && (n.Evm != nil || n.Svm != nil) {
+		return fmt.Errorf("network.*.evm/svm blocks are not allowed on a jsonrpc network (architecture is '%s')", n.Architecture)
+	}
+	if n.Architecture != ArchitectureJsonRpc && n.JsonRpc != nil {
+		return fmt.Errorf("network.*.jsonRpc block is only allowed on jsonrpc networks (architecture is '%s')", n.Architecture)
+	}
+	// The jsonrpc architecture has no consensus machinery — a consensus
+	// failsafe policy would either no-op or misbehave, so reject it loudly.
+	if n.Architecture == ArchitectureJsonRpc && n.Failsafe != nil {
+		for _, fs := range n.Failsafe {
+			if fs.Consensus != nil {
+				return fmt.Errorf("network.*.failsafe.consensus is not supported on jsonrpc networks (no consensus machinery in the generic jsonrpc architecture)")
+			}
+		}
+	}
 	if n.Evm != nil {
 		if err := n.Evm.Validate(); err != nil {
 			return err
@@ -1483,6 +1524,11 @@ func (n *NetworkConfig) Validate(c *Config) error {
 	}
 	if n.Svm != nil {
 		if err := n.Svm.Validate(); err != nil {
+			return err
+		}
+	}
+	if n.JsonRpc != nil {
+		if err := n.JsonRpc.Validate(); err != nil {
 			return err
 		}
 	}
@@ -1668,6 +1714,27 @@ func (s *SvmNetworkConfig) Validate() error {
 	return nil
 }
 
+// Validate checks the generic jsonrpc network block. The slug IS the network
+// identity (jsonrpc:<slug>), so a missing or malformed one is a hard error —
+// unlike svm there's no bootstrap probe that could catch it later.
+func (c *JsonRpcNetworkConfig) Validate() error {
+	if c.Slug == "" {
+		return fmt.Errorf("network.*.jsonRpc.slug is required for jsonrpc networks (e.g. starknet, stellar-mainnet, near)")
+	}
+	if !isValidJsonRpcSlug(c.Slug) {
+		return fmt.Errorf("network.*.jsonRpc.slug '%s' is invalid, must contain only alphanumeric characters, dash, or underscore", c.Slug)
+	}
+	return nil
+}
+
+// isValidJsonRpcSlug reports whether a slug is usable as the single segment of
+// a jsonrpc:<slug> network id. No dots: the slug appears as a single URL path
+// segment at /<project>/jsonrpc/<slug>, and the network-id validator already
+// rejects anything that isn't a bare identifier.
+func isValidJsonRpcSlug(slug string) bool {
+	return util.IsValidIdentifier(slug)
+}
+
 // Validate checks the per-upstream SVM block. Cluster is what upstream.go turns
 // into the upstream's networkId, so a missing one currently fails at bootstrap
 // ("svm upstream %q is missing svm.cluster") long after startup reported success.
@@ -1718,6 +1785,31 @@ func validateSvmUpstreamNetworkPairing(upstreams []*UpstreamConfig, networks []*
 		}
 		if clusterDeclared && !matched {
 			return fmt.Errorf("upstream.*.svm.chain '%s' (upstream '%s') matches no network.*.svm.chain for cluster '%s'; the upstream would never be selected", upChain, u.Id, u.Svm.Cluster)
+		}
+	}
+	return nil
+}
+
+// validateJsonRpcUpstreamNetworkPairing flags a type: jsonrpc upstream whose
+// slug no declared jsonrpc network serves — mirroring the svm
+// cluster-declared rule, since such an upstream would bootstrap healthy and
+// serve nothing. (The other direction — a non-jsonrpc upstream under a
+// jsonrpc network — is structurally impossible: an evm/svm upstream's
+// networkId is evm:<chainId>/svm:…, never jsonrpc:<slug>, and the
+// per-upstream rule already rejects jsonRpc.slug on non-jsonrpc types.)
+func validateJsonRpcUpstreamNetworkPairing(upstreams []*UpstreamConfig, networks []*NetworkConfig) error {
+	declared := make(map[string]bool)
+	for _, n := range networks {
+		if n != nil && n.Architecture == ArchitectureJsonRpc && n.JsonRpc != nil {
+			declared[n.JsonRpc.Slug] = true
+		}
+	}
+	for _, u := range upstreams {
+		if u == nil || u.Type != UpstreamTypeJsonRpc || u.JsonRpc == nil || u.JsonRpc.Slug == "" {
+			continue
+		}
+		if len(declared) > 0 && !declared[u.JsonRpc.Slug] {
+			return fmt.Errorf("upstream '%s' has jsonRpc.slug '%s' but no jsonrpc network declares that slug; the upstream would never be selected", u.Id, u.JsonRpc.Slug)
 		}
 	}
 	return nil

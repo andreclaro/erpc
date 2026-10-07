@@ -6,14 +6,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 )
 
 type NetworkArchitecture string
 
 const (
-	ArchitectureEvm NetworkArchitecture = "evm"
-	ArchitectureSvm NetworkArchitecture = "svm"
+	ArchitectureEvm    NetworkArchitecture = "evm"
+	ArchitectureSvm    NetworkArchitecture = "svm"
+	ArchitectureJsonRpc NetworkArchitecture = "jsonrpc"
 )
 
 type Network interface {
@@ -87,7 +89,7 @@ func EvmLeaderUpstream(n Network, ctx context.Context) Upstream {
 
 func IsValidArchitecture(architecture string) bool {
 	switch NetworkArchitecture(architecture) {
-	case ArchitectureEvm, ArchitectureSvm:
+	case ArchitectureEvm, ArchitectureSvm, ArchitectureJsonRpc:
 		return true
 	}
 	return false
@@ -142,6 +144,12 @@ func IsValidNetwork(network string) bool {
 			return true
 		}
 		return isIdentifier(chain) && isIdentifier(cluster)
+	}
+
+	if strings.HasPrefix(network, "jsonrpc:") {
+		// jsonrpc IDs are always two-part: jsonrpc:<slug>, where the slug is a
+		// single identifier segment (starknet, stellar-mainnet, near, …).
+		return util.IsValidIdentifier(strings.TrimPrefix(network, "jsonrpc:"))
 	}
 
 	return false

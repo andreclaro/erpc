@@ -12,6 +12,10 @@ func EvmNetworkId(chainId interface{}) string {
 	return fmt.Sprintf("evm:%d", chainId)
 }
 
+func JsonRpcNetworkId(slug string) string {
+	return "jsonrpc:" + slug
+}
+
 // SvmNetworkId derives the canonical "svm:..." network ID. When chain is
 // empty or "solana", the format stays "svm:<cluster>" — preserving every
 // pre-multi-chain config's network ID and cache key. For any other chain
@@ -34,6 +38,16 @@ func IsValidNetworkId(s string) bool {
 	if strings.HasPrefix(s, "evm:") {
 		_, err := strconv.Atoi(s[4:])
 		return err == nil
+	}
+	if strings.HasPrefix(s, "jsonrpc:") {
+		rest := s[8:]
+		if rest == "" {
+			return false
+		}
+		// The slug is a single identifier segment (no colons) so the ID is
+		// always two-part and URL-routing at /<project>/jsonrpc/<slug> stays
+		// unambiguous.
+		return IsValidIdentifier(rest)
 	}
 	if strings.HasPrefix(s, "svm:") {
 		// Two accepted shapes: "svm:<cluster>" (implicit solana, back-compat)
