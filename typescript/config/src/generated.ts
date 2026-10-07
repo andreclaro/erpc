@@ -133,6 +133,14 @@ export interface EvmProbeEarliestInfo {
 }
 
 //////////
+// source: architecture_jsonrpc.go
+
+export const UpstreamTypeJsonRpc: UpstreamType = "jsonrpc";
+export interface JsonRpcNetworkConfig {
+  slug: string;
+}
+
+//////////
 // source: architecture_svm.go
 
 export const UpstreamTypeSvm: UpstreamType = "svm";
@@ -936,6 +944,7 @@ export interface JsonRpcUpstreamConfig {
   enableGzip?: boolean;
   headers?: { [key: string]: string};
   proxyPool?: string;
+  slug?: string;
 }
 /**
  * GrpcUpstreamConfig tunes a gRPC (grpc:// / grpc+bds://) upstream. It is the
@@ -1356,6 +1365,7 @@ export interface NetworkConfig {
   failsafe?: (FailsafeConfig | undefined)[];
   evm?: EvmNetworkConfig;
   svm?: SvmNetworkConfig;
+  jsonRpc?: JsonRpcNetworkConfig;
   selectionPolicy?: SelectionPolicyConfig;
   directiveDefaults?: DirectiveDefaultsConfig;
   alias?: string;
@@ -2489,6 +2499,7 @@ export interface ExecStateSnapshot {
 export type NetworkArchitecture = string;
 export const ArchitectureEvm: NetworkArchitecture = "evm";
 export const ArchitectureSvm: NetworkArchitecture = "svm";
+export const ArchitectureJsonRpc: NetworkArchitecture = "jsonrpc";
 export type Network = any;
 /**
  * EvmNetwork is the EVM-specific view of a Network. Callers that need
