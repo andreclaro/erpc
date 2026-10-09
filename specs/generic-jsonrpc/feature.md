@@ -2,7 +2,7 @@
 
 **Status**: Draft — v1 ready for implementation
 **Owner**: TBD
-**Last revised**: 2026-10-01
+**Last revised**: 2026-10-06
 **Reference**: <https://erpc.featurebase.app/p/support-for-generic-json-rpc-protocols>
 
 ---
@@ -23,6 +23,23 @@ by default and available only as an explicit per-method TTL opt-in (§7).
 Design razor: the unknown-input fallthrough is the *only* path. No method
 lists, no chain enums, no vendor special-cases — a generic network knows
 nothing about the protocol it proxies.
+
+### Validated example targets
+
+Verified against official documentation (2026-10-06); each is JSON-RPC 2.0
+over HTTP POST and needs zero protocol logic to proxy:
+
+| Chain | Fit | Tip method (for the future §7 hint) | Notes |
+|---|---|---|---|
+| **Starknet** | Clean | `starknet_blockNumber` → `$.result` (plain integer) | Versioned `starknet_*` API; finality tags `latest`/`pre_confirmed`/`l1_accepted`; batching supported; custom error codes are small positive ints |
+| **Stellar** | Clean | `getLatestLedger` → `$.result.sequence` | Stellar RPC (ex-Soroban-RPC) is the recommended API; Horizon (REST) is being deprecated in favor of it; ledgers are final on close — no finality tags; some failures arrive inside `result` (`status: "FAILED"`) |
+| **NEAR** | Yes, with quirks | `status` → `$.result.sync_info.latest_block_height` (nested) | `finality` request tag (`optimistic`/`near-final`/`final`); `query` is polymorphic via `params.request_type`, so per-method routing/caching granularity is coarse and params-hashed keys matter; batching executes `query` items only |
+
+Evaluated and **not** onboardable (would need separate `rest`/`grpc`
+architectures, out of scope here): **Sui** (JSON-RPC deprecated and already
+disabled on official endpoints, removed from node code; replacements are
+gRPC/GraphQL) and **Aptos** (fullnode API is REST + GraphQL + gRPC — never
+had JSON-RPC).
 
 ---
 
@@ -126,7 +143,7 @@ architecture is a new registration; pipeline files do not change.
 | Capability | Behavior on `jsonrpc` networks |
 |---|---|
 | Block/slot tracking, finality | No poller; `GetFinality` always `Unknown` |
-| Consensus | **Rejected at config load** (§8) — dispute/missing-data semantics are block-shaped; silent half-behavior is worse than a clear error |
+| Consensus | **v1**: rejected at config load (§8) — dispute/missing-data semantics are block-shaped; silent half-behavior is worse than a clear error. **v2**: consensus configuration supported on `jsonrpc` networks (§7 v2) |
 | Data-integrity checks | EVM-only subsystem (`architecture/evm/integrity/`); not wired |
 | Block-availability gates, served-tip floors, leader election | EVM/SVM hook logic; generic hooks are no-ops |
 | Feature detection / vendor probing | Skipped (`upstream/upstream.go:1324`) |
@@ -141,6 +158,10 @@ architecture is a new registration; pipeline files do not change.
 
 The generic extractor maps only the JSON-RPC 2.0 spec envelope
 (`error.code/message/data`). No vendor mapping, no message-text heuristics.
+Chain error taxonomies are too divergent to normalize generically — Starknet
+uses small positive custom codes, NEAR funnels handler errors through
+`-32000` with a structured `cause`, Stellar sticks to spec codes but embeds
+some failures inside `result` (`status: "FAILED"`):
 
 | Shape | Classification | Retryable |
 |---|---|---|
@@ -195,7 +216,23 @@ upstream cost reduction, latency on hot repeats.
 What it does not give: freshness tied to chain state, invalidation, re-org
 awareness.
 
-### v2 — method definitions (deferred)
+### v2 — method definitions + consensus (deferred)
+
+The v2 idea in one line: **pass configuration that enables usage of
+existing machinery — caching, consensus, etc. — on `jsonrpc` networks**,
+without adding protocol logic:
+
+- **Caching** — finality declarations unlock permanent + finality-aware
+  cache policies (below; mechanism verified, no research needed).
+- **Consensus** — failsafe `consensus` configuration on declared methods
+  (below; semantics gated on the open questions).
+- **Param-conditional declarations** — per-call finality signals such as
+  NEAR's `finality` param or Starknet block tags (open question 1).
+- **Result-embedded status classification** — treating result-carried
+  failure states (e.g. Stellar's `NOT_FOUND`) as uncacheable before
+  declaring such methods (open question 2).
+- **State poller** — *future*, not v2 (§7 future); the natural next
+  enabler once v2 lands.
 
 `methods.definitions.<method>.finalized: true` (immutable per params →
 permanent caching of e.g. reference data) and `.realtime: true`
@@ -203,11 +240,55 @@ permanent caching of e.g. reference data) and `.realtime: true`
 before any architecture logic (`erpc/networks.go:2662-2670`), so v2 is a
 config-surface change, not new machinery.
 
+v2 also enables **failsafe `consensus` configuration on `jsonrpc`
+networks**: with explicit per-method finality declarations in place,
+consensus gains enough signal to compare responses meaningfully
+(response-equality on `finalized` methods, bounded-staleness comparison on
+`realtime` ones). The v1 config-load rejection (§8) is lifted only where the
+method set it applies to carries a finality declaration.
+
+The flag mechanism above reuses existing machinery and needs no research;
+the surrounding semantics do. Open questions to resolve before v2 is
+implementable:
+
+1. **Param-conditional finality.** NEAR's `finality` param and Starknet's
+   block tags make one method name volatile *or* immutable per call. Whether
+   config can (or should) express param-conditional declarations — rather
+   than the weakest safe answer of "don't declare polymorphic methods" — is
+   undecided.
+2. **Result-embedded failure semantics.** Stellar's `getTransaction` returns
+   pending/not-found as a *result* (`status: NOT_FOUND`), not an error.
+   Caching and consensus both need a classification story before `finalized`
+   declarations are safe on such methods.
+3. **Per-chain finality mapping.** `finalized`/`realtime` map differently
+   per chain (Stellar: ledger close = final; NEAR: three commitment levels).
+   The declarations' meaning must be validated against each target chain's
+   finality model before consensus trusts them.
+4. **Scope of consensus.** Whether bounded-staleness comparison on
+   `realtime` methods is meaningful, or consensus should be restricted to
+   `finalized`-declared methods only.
+
 ### Future — tip-method hint (exploration only)
 
 Optional `tipMethod` + JSON path (`tipMethod: getBlockHeight`,
 `tipPath: "$.result"`) giving generic networks a minimal poller and
 height-bucketed keys. Real protocol logic; not committed.
+
+Extraction-path examples from the validated targets show why the path must
+be configurable: `starknet_blockNumber` → `$.result` (plain integer),
+`getLatestLedger` → `$.result.sequence`, `status` (NEAR) →
+`$.result.sync_info.latest_block_height`. Parsing must tolerate
+string-encoded integers (several chains serialize u64s as decimal strings).
+
+The tip hint is the seed of a broader **generic state poller** idea: a
+per-network tracker (analogous to the EVM state poller) polling the
+configured tip method on an interval. It would unlock lag-based upstream
+scoring and health, tip-bucketed cache keys for tip-relative ("latest")
+reads, and concrete staleness bounds for v2 consensus on `realtime`
+methods. Reorg detection stays out of reach — it needs block-hash chains,
+i.e. real protocol logic. Exploration only: poll lifecycle, interval and
+failure handling, and per-chain extraction variance are machinery that must
+be designed, not inherited.
 
 ---
 
@@ -219,8 +300,9 @@ Config load rejects, with direct errors:
    `jsonrpc` block on `evm`/`svm` networks).
 2. Upstreams under a `jsonrpc` network whose `type` is not `jsonrpc`
    (including omitted — no defaulting).
-3. Failsafe policies with `consensus` on a `jsonrpc` network
-   (`failsafeExecutor.HasConsensus()`, `erpc/networks.go:2297`).
+3. Failsafe policies with `consensus` on a `jsonrpc` network in v1
+   (`failsafeExecutor.HasConsensus()`, `erpc/networks.go:2297`); v2 lifts
+   this for methods carrying a finality declaration (§7 v2).
 4. Empty or invalid-character `jsonrpc.networkId` (§3 charset).
 5. Duplicate `jsonrpc.networkId` within a project (same as any network ID).
 
@@ -239,8 +321,8 @@ hit/miss metrics (`data/cache_executor.go`) apply once policies exist.
 | Version | Scope |
 |---|---|
 | **v1** | `jsonrpc` architecture + upstream type, no-op handler, generic error extractor (§6), validation (§8), TTL-only opt-in cache (§7 v1), docs page + TS config |
-| **v2** | `methods.definitions` `finalized`/`realtime` flags → permanent + finality-aware caching (§7 v2) |
-| **Future** | tip-method hint (§7 future); consensus revisited only if a real use case appears |
+| **v2** | `methods.definitions` `finalized`/`realtime` flags → finality for cache (permanent + finality-aware policies) and failsafe `consensus` configuration on `jsonrpc` networks (§7 v2) |
+| **Future** | tip-method hint → generic state poller (§7 future) |
 
 Docs ride along with each implementation PR per `AGENTS.md` (new page under
 `docs/pages/` for generic networks; `.llms.txt`/`_meta.js` generated, never
