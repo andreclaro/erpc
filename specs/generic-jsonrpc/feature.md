@@ -2,7 +2,7 @@
 
 **Status**: Draft — v1 ready for implementation
 **Owner**: TBD
-**Last revised**: 2026-10-06
+**Last revised**: 2026-10-09
 **Reference**: <https://erpc.featurebase.app/p/support-for-generic-json-rpc-protocols>
 
 ---
@@ -216,23 +216,28 @@ upstream cost reduction, latency on hot repeats.
 What it does not give: freshness tied to chain state, invalidation, re-org
 awareness.
 
-### v2 — method definitions + consensus (deferred)
+### v2 — config-declared protocol behaviors
 
-The v2 idea in one line: **pass configuration that enables usage of
-existing machinery — caching, consensus, etc. — on `jsonrpc` networks**,
-without adding protocol logic:
+**Full design: [`feature-v2.md`](feature-v2.md).** The v2 idea in one line:
+**pass configuration that enables usage of existing machinery — caching,
+consensus, etc. — on `jsonrpc` networks**, without adding protocol logic.
+The v2 spec covers, grounded in per-chain research (Starknet, Stellar, NEAR,
+Noble/CometBFT, Polkadot Asset Hub, XRPL):
 
 - **Caching** — finality declarations unlock permanent + finality-aware
   cache policies (below; mechanism verified, no research needed).
 - **Consensus** — failsafe `consensus` configuration on declared methods
   (below; semantics gated on the open questions).
 - **Param-conditional declarations** — per-call finality signals such as
-  NEAR's `finality` param or Starknet block tags (open question 1).
+  NEAR's `finality` param or Starknet block tags (resolved in
+  feature-v2 §4.2 as `finalityFromParam`).
 - **Result-embedded status classification** — treating result-carried
-  failure states (e.g. Stellar's `NOT_FOUND`) as uncacheable before
-  declaring such methods (open question 2).
-- **State poller** — *future*, not v2 (§7 future); the natural next
-  enabler once v2 lands.
+  failure states (e.g. Stellar's `NOT_FOUND`, XRPL's `result.error`) as
+  uncacheable errors before declaring such methods (resolved in
+  feature-v2 §4.3).
+- **State poller** — promoted into v2 scope as config-declared
+  tip/finalized-tip/floor/health probes (feature-v2 §4.4); the §7-future
+  exploration below remains the design notes for it.
 
 `methods.definitions.<method>.finalized: true` (immutable per params →
 permanent caching of e.g. reference data) and `.realtime: true`
@@ -321,8 +326,8 @@ hit/miss metrics (`data/cache_executor.go`) apply once policies exist.
 | Version | Scope |
 |---|---|
 | **v1** | `jsonrpc` architecture + upstream type, no-op handler, generic error extractor (§6), validation (§8), TTL-only opt-in cache (§7 v1), docs page + TS config |
-| **v2** | `methods.definitions` `finalized`/`realtime` flags → finality for cache (permanent + finality-aware policies) and failsafe `consensus` configuration on `jsonrpc` networks (§7 v2) |
-| **Future** | tip-method hint → generic state poller (§7 future) |
+| **v2** | Config-declared protocol behaviors ([`feature-v2.md`](feature-v2.md)): `methods.definitions` `finalized`/`realtime` flags, param-conditional finality (`finalityFromParam`), result-embedded failure classification, generic state poller (tip/finalized-tip/floor/health), tip-bucketed caching, and failsafe `consensus` on `jsonrpc` networks |
+| **Future** | Dynamic finality promotion from poller state (feature-v2 §8.1–8.2), traffic-harvested floors (§8.3) |
 
 Docs ride along with each implementation PR per `AGENTS.md` (new page under
 `docs/pages/` for generic networks; `.llms.txt`/`_meta.js` generated, never
