@@ -2,11 +2,18 @@
 
 **Status**: Draft — design for review
 **Owner**: TBD
-**Last revised**: 2026-10-09
+**Last revised**: 2026-10-11
 **Builds on**: [`feature.md`](feature.md) (v1 spec) — v1 ships the architecture,
 routing, error envelope, and TTL-only caching; v2 adds no new protocol logic,
 only **config surfaces that let operators declare protocol facts** which the
 existing machinery then consumes.
+**Research**: every wire-format claim below was verified against official
+documentation and, where marked, live probes (2026-10-09/11) by a 7-agent
+research pass: Starknet (starknet-specs OpenRPC 0.10.x), Stellar RPC
+(docs + OpenRPC + SDF testnet live), NEAR (docs.near.org + openapi.json +
+nearcore source), Noble/CometBFT (v0.38 spec + Noble mainnet live), Polkadot
+Asset Hub (polkadot-sdk docs + public endpoint live), XRPL (xrpl.org +
+s1.ripple.com live), Tron (developers.tron.network + TronGrid live).
 **Reference**: <https://erpc.featurebase.app/p/support-for-generic-json-rpc-protocols>
 
 ---
@@ -18,13 +25,14 @@ signal, no cache beyond TTL opt-in, no consensus, no tip tracking. v2 unlocks
 the existing protocol-agnostic machinery on generic networks by letting the
 **operator declare, per network and per method, the facts eRPC cannot derive**:
 
-- which methods are immutable per params (`finalized`) or moving-head
-  (`realtime`) — already-existing config flags, zero new code (§4.1);
+- which methods are immutable per params (`finalized`), pinned-but-fork-
+  droppable (`unfinalized`), or moving-head (`realtime`) (§4.1);
 - which request **param carries finality** and how its values map to eRPC's
   finality enum — NEAR's `finality` param, Starknet's block tags, XRPL's
   `ledger_index` (§4.2);
 - which **result-embedded shapes are failures** — Stellar's `status:
-  "NOT_FOUND"`, XRPL's `result.error` envelope (§4.3);
+  "NOT_FOUND"`, XRPL's `result.error` envelope, CometBFT/Substrate null-body
+  not-founds (§4.3);
 - how to **poll the chain tip** (and optionally the finalized tip, the
   availability floor, and a health probe) — unlocking lag-based scoring,
   tip-bucketed cache keys, and staleness bounds (§4.4);
@@ -41,22 +49,29 @@ undeclared method behaves exactly as in v1.
 
 usdc.cool lists every chain with native USDC. Most are EVM (served by the
 `evm` architecture) or Solana (`svm`). The remaining roster, re-verified
-against official docs on 2026-10-09:
+against official docs and live endpoints (2026-10-09/11):
 
 | Chain | Transport | Tip method → path (encoding) | Finality expression | Failure shape |
 |---|---|---|---|---|
-| **Starknet** | JSON-RPC 2.0 POST | `starknet_blockNumber` → `$.result` (number) | `block_id` tag param: `latest` / `pre_confirmed` / `l1_accepted` | standard error envelope, custom **positive** codes |
-| **Stellar RPC** | JSON-RPC 2.0 POST | `getLatestLedger` → `$.result.sequence` (number) | ledgers final on close (SCP); no finality params | `result.status: "NOT_FOUND"` on `getTransaction`/`getTransactions` |
-| **NEAR** | JSON-RPC 2.0 POST | `status` → `$.result.sync_info.latest_block_height` (number) | `finality` param: `optimistic` / `near-final` / `final` | `-32000` with structured `cause` object |
-| **Noble / CometBFT** | JSON-RPC 2.0 POST (+ GET) | `status` → `$.result.sync_info.latest_block_height` (**decimal string**) | instant single-block BFT finality; no tags | spec codes + app codes nested in `data` |
-| **Polkadot Asset Hub (Substrate)** | JSON-RPC 2.0 POST (legacy API) | `chain_getHeader` → `$.result.number` (**hex string**); finalized tip is **two-hop**: `chain_getFinalizedHead` → `$.result` (hash) → `chain_getHeader(hash)` → `$.result.number` | best vs GRANDPA-finalized heads; block-hash params pin | spec codes + client errors |
-| **XRP Ledger** | JSON-RPC 2.0 POST (params = array with one object) | `server_info` → `$.result.info.validated_ledger.seq` (number); floor: `$.result.info.complete_ledgers` (`"32570-8812345"` range string) | `ledger_index` param: `validated` / `current` / `closed` / number | **every** error is result-embedded: HTTP 200, `result.status: "error"`, `result.error: <code>` |
+| **Starknet** | JSON-RPC 2.0 POST | `starknet_blockNumber` → `$.result` (number) | `block_id` tag: `latest` / `pre_confirmed` / `l1_accepted` (**required** param) | standard error envelope, custom **positive** codes; receipts/statuses also embed finality fields |
+| **Stellar RPC** | JSON-RPC 2.0 POST (by-name params) | `getLatestLedger` → `$.result.sequence` (number) | none — ledgers final on close (SCP); no finality params | `result.status: "NOT_FOUND"` on `getTransaction`; `-32600` carries out-of-range |
+| **NEAR** | JSON-RPC 2.0 POST | `status` → `$.result.sync_info.latest_block_height` (number) | `finality` param (**required**): `optimistic` / `near-final` / `final` | structured `error.cause.name` (verror); failed txs inside `result.status.Failure` |
+| **Noble / CometBFT** | JSON-RPC 2.0 POST (+ GET) | `status` → `$.result.sync_info.latest_block_height` (**decimal string**) | instant single-block BFT finality; no tags | spec codes + `result.code` / `result.response.code` embedded; null-body `result.block` |
+| **Polkadot Asset Hub (Substrate)** | JSON-RPC 2.0 POST (legacy API) | `chain_getHeader` → `$.result.number` (**hex string**); finalized tip is **two-hop**: `chain_getFinalizedHead` → `$.result` (hash) → `chain_getHeader(hash)` → `$.result.number` | best vs GRANDPA-finalized heads; block-hash params pin | spec codes + module codes (`4003` UnknownBlock); `result: null` not-found |
+| **XRP Ledger** | **JSON-RPC-flavored** POST — *not* spec-2.0 (no `jsonrpc` field; params = one-item array; **no batching**) | `server_info` → `$.result.info.validated_ledger.seq` (number); floor: `$.result.info.complete_ledgers` (disjoint range string) | `ledger_index` param: `validated` / `current` / `closed` / number; **default differs xrpld (`current`) vs Clio (`validated`)** | **every** error is result-embedded: HTTP 200, `result.status: "error"`, `result.error: <string code>` |
 
 Excluded, with reasons:
 
-- **Tron** — `/wallet/*` is REST-style POST without a JSON-RPC envelope (a
-  future `rest` architecture); `/jsonrpc` is Ethereum-compatible and belongs
-  to the `evm` architecture ([Tron API docs](https://developers.tron.network/docs/api)).
+- **Tron** — two disjoint surfaces. `/wallet/*` is REST-style POST without a
+  JSON-RPC envelope (a future `rest` architecture; finality is selected by the
+  `/wallet/` vs `/walletsolidity/` path prefix, not-found is HTTP 200 `{}`).
+  `/jsonrpc` is genuine JSON-RPC 2.0 `eth_*` — but read-mostly (no
+  `eth_sendRawTransaction`; broadcast stays on the REST surface) — so it is
+  fronted by the `evm` architecture, not `jsonrpc`
+  ([Tron API docs](https://developers.tron.network/docs/api)). Tron's
+  `{}`-as-not-found, `result.result` boolean wrappers, and capital-`E`
+  `{"Error": …}` rate-limit bodies are the motivating case for the REST
+  profile's own classification config, out of scope here.
 - **Algorand, Aleo** — REST APIs, no JSON-RPC surface.
 - **Aptos, Sui** — already excluded in v1 (REST/GraphQL/gRPC; Sui's JSON-RPC
   deprecated and removed).
@@ -64,89 +79,205 @@ Excluded, with reasons:
 
 ### 2.1 Starknet
 
-- Block tags are `latest`, `pre_confirmed`, and `l1_accepted`
-  ([starknet_getStorageAt](https://www.quicknode.com/docs/starknet/starknet_getStorageAt),
-  [starknet_estimateFee](https://www.quicknode.com/docs/starknet/starknet_estimateFee));
-  `block_id` may also be `{block_number}` or `{block_hash}` objects. Only
-  `l1_accepted` is immutable; a pinned `block_number`/`block_hash` is accepted
-  on L2 but still replaceable in principle → `unfinalized`, not `finalized`.
-- Block responses carry `status: PRE_CONFIRMED | ACCEPTED_ON_L2 |
-  ACCEPTED_ON_L1` ([starknet_getBlockWithTxs](https://www.quicknode.com/docs/starknet/starknet_getBlockWithTxs))
-  — a result-embedded finality signal if response-side classification is ever
-  wanted; v2 does not consume it.
-- Errors use small positive custom codes (e.g. `24` BlockNotFound, `32` "no
-  blocks", [dwellir](https://www.dwellir.com/docs/starknet/starknet_blockNumber)).
-  Mapping those to missing-data is an operator decision → §4.3.
+- Current full-node spec is **0.10.x** ([starknet-specs](https://github.com/starkware-libs/starknet-specs));
+  nodes multiplex spec versions by URL path (`/rpc/v0_8`, `/rpc/v0_9`,
+  `/rpc/v0_10` — [Juno docs](https://juno.nethermind.io/json-rpc)), and tag
+  semantics shifted across versions (`pending` → `pre_confirmed` in 0.9). A
+  proxy must forward the path verbatim; version-mixed upstream pools are a
+  consensus hazard.
+- `BLOCK_TAG` enum, verbatim from the spec: `l1_accepted` = "included in a
+  state update on L1 and finalized by the consensus on L1"; `latest` =
+  "finalized by the consensus on L2" (per-block Tendermint finality since
+  SN 0.14, but the protocol formally admits reorgs — `starknet_subscriptionReorg`
+  exists); `pre_confirmed` = "the block currently being built … `latest` + 1"
+  (a node-local view — "accuracy depends on its polling interval").
+  `block_id` is **required** on every state-scoped read; there is no node
+  default ([spec BLOCK_TAG](https://raw.githubusercontent.com/starkware-libs/starknet-specs/master/api/starknet_api_openrpc.json)).
+  Mapping: `l1_accepted → finalized`, `latest → realtime` (L2-final but
+  formally reorg-admissible), `pre_confirmed → realtime`, object block
+  refs → `unfinalized`.
+- **Result-embedded statuses** ([spec](https://raw.githubusercontent.com/starkware-libs/starknet-specs/master/api/starknet_api_openrpc.json)):
+  `starknet_getTransactionReceipt` → `$.result.finality_status`
+  (`PRE_CONFIRMED|ACCEPTED_ON_L2|ACCEPTED_ON_L1`) + `execution_status`
+  (`SUCCEEDED|REVERTED`) — a REVERTED receipt is a *successful JSON-RPC
+  response describing a failed transaction*; `starknet_getTransactionStatus`
+  → the wider enum incl. `RECEIVED` (node-local mempool state — responses
+  legitimately differ across upstreams); block results embed `$.result.status`.
+  Not-founds are proper errors: `TXN_HASH_NOT_FOUND` (29), `BLOCK_NOT_FOUND` (24).
+- Writes: `starknet_addInvokeTransaction` etc. are **idempotent for the
+  identical signed payload** — resubmission yields `59 DUPLICATE_TX` (proof of
+  prior acceptance, no double-execution); a *different* payload with the same
+  nonce is a replacement requiring bumped fees (`64 REPLACEMENT_TRANSACTION_UNDERPRICED`).
+- Batching: supported by implementations (Juno default-on), **not mentioned in
+  the spec** — per-provider variance.
 
 ### 2.2 Stellar RPC
 
 - `getLatestLedger` result: `{ id: <hex>, protocolVersion: <number>,
-  sequence: <number> }` ([docs](https://developers.stellar.org/docs/data/apis/rpc/api-reference/methods/getLatestLedger)).
-- `getTransaction` never errors for a pending/unknown hash: it returns
-  `result.status: "SUCCESS" | "FAILED" | "NOT_FOUND"`, plus `latestLedger` and
-  `oldestLedger` — the node's retention window, inline in every response
+  sequence: <number>, closeTime: <string> }` ([docs](https://developers.stellar.org/docs/data/apis/rpc/api-reference/methods/getLatestLedger));
+  params are **by-name objects only** (positional arrays are deprecated).
+- **One tip counter; no finality params anywhere.** SCP never reorganizes
+  served data ("there is no branching in SCP" — [SDF](https://stellar.org/blog/developers/issuer-enforced-finality-explained));
+  ledgers close ~every 5 s and are final at close. `latest == finalized`.
+- `getHealth` returns `latestLedger`, **`oldestLedger`**, and
+  `ledgerRetentionWindow` ([docs](https://developers.stellar.org/docs/data/apis/rpc/api-reference/methods/getHealth))
+  — the node's retention floor in the same call, resolving the floor problem
+  noted in earlier drafts.
+- `getTransaction` never errors for a pending/unknown hash: `result.status ∈
+  {SUCCESS, FAILED, NOT_FOUND}` + inline `latestLedger`/`oldestLedger`
   ([docs](https://developers.stellar.org/docs/data/apis/rpc/api-reference/methods/getTransaction)).
-  A `FAILED` transaction **is** a final, cacheable result; `NOT_FOUND` is
-  transient (pending) or permanent (pruned) and must never be cached. This
-  asymmetry is the motivating case for §4.3.
-- Retention: RPC nodes keep a sliding window of ledgers (default ~7 days);
-  `oldestLedger` exposes the floor → §4.4 floor extraction.
+  Live-verified quirk: the NOT_FOUND shape carries **zero-value junk fields**
+  (`ledger: 0`, `createdAt: "0"`) — gate field reads on `status`. A `FAILED`
+  transaction **is** a final, cacheable result; `NOT_FOUND` is transient
+  (pending) or permanent (pruned) and must never be cached.
+- Retention: `HISTORY_RETENTION_WINDOW = 120960` ledgers (~7 days), **operator-
+  configurable per node** ([config](https://developers.stellar.org/docs/data/apis/rpc/admin-guide/configuring));
+  out-of-range → `-32600` with the node's live window in the message —
+  the identical request succeeds on one upstream and errors on another, so
+  range errors are per-upstream state, not deterministic client faults.
+- Parse errors break the envelope entirely: HTTP 500 body `[-32700] invalid
+request value` (not a JSON-RPC object) — live-verified.
+- `sendTransaction` results embed `status: PENDING | DUPLICATE |
+  TRY_AGAIN_LATER | ERROR` — identical-payload resubmission returns
+  `DUPLICATE` (no double-apply); `TRY_AGAIN_LATER` is a per-account sequencing
+  retry signal.
+- Batch: undocumented but live-verified working on SDF endpoints; third-party
+  variance likely.
 
 ### 2.3 NEAR
 
-- Finality is a per-request param `finality: "optimistic" | "near-final" |
-  "final"` (`optimistic` may be skipped; `near-final` = DoomSlug, irreversible
-  unless a block producer is slashed; `final` = irreversible —
-  [docs.near.org](https://docs.near.org/data-infrastructure/tutorials/listen-to-realtime-events)),
-  or an explicit `block_id`. Documented default for `query` is `final`.
-- Handler errors funnel through `-32000` with a structured `cause` (e.g.
-  `UNKNOWN_BLOCK`), so "not found" classification needs sub-error matching →
-  §4.3 `dataPath`.
-- Non-archival nodes garbage-collect state after ~5 epochs — pruned reads are
-  a missing-data signal, retryable against archival peers.
-- `query` is polymorphic via `params.request_type` — params-hashed cache keys
-  (v1) already keep variants apart; per-method declarations apply to `query`
-  as a whole, so declare it `realtime` or leave undeclared.
+- Finality is a **required** per-request param `finality: "optimistic" |
+  "near-final" | "final"` (mutually exclusive with `block_id`; omitting both is
+  a request-validation error, not a default — [block-chunk](https://docs.near.org/api/rpc/block-chunk)).
+  Semantics: `optimistic` may be skipped; `near-final` = DoomSlug, irreversible
+  unless a block producer is slashed; `final` = irreversible
+  ([setup](https://docs.near.org/api/rpc/setup)); ~1.2–3 s to final.
+- Tip: `status` → `$.result.sync_info.latest_block_height` (plain number);
+  sibling fields `syncing` (bool), `earliest_block_height` (nullable GC
+  watermark) — [network API](https://docs.near.org/api/rpc/network).
+  **Finalized tip:** `block` with `{"finality":"final"}` →
+  `$.result.header.height` ([block-chunk](https://docs.near.org/api/rpc/block-chunk)).
+- Errors are a structured **verror envelope**: `error.name`
+  (`HANDLER_ERROR|REQUEST_VALIDATION_ERROR|INTERNAL_ERROR`) + actionable
+  `error.cause.name` in SCREAMING_SNAKE (`UNKNOWN_BLOCK`, `GARBAGE_COLLECTED_BLOCK`,
+  `UNAVAILABLE_SHARD`, `NOT_SYNCED_YET`, `NODE_IS_SYNCING`, …) with structured
+  `cause.info`; numeric `code`/`data`/`message` are documented as legacy —
+  match on paths, not codes ([errors](https://docs.near.org/api/rpc/errors)).
+  Node-local causes (`UNAVAILABLE_SHARD`, `NO_SYNCED_BLOCKS`, …) mean "this
+  node, not this chain" — retryable elsewhere and score against the upstream.
+- Failed transactions return in a successful envelope: `$.result.status =
+  {"Failure": …}` vs `{"SuccessValue": …}`; `wait_until` defaults to
+  `EXECUTED_OPTIMISTIC`, and `SuccessValue` below `FINAL` is not yet final —
+  caching a `Failure` outcome as success is the classic poisoning trap.
+- Batching: **query-only** — only the exact `query` method executes inside a
+  batch; anything else gets `-32601`; disabled servers answer a single
+  non-array `-32005` ([batching](https://docs.near.org/api/rpc/batching)).
+- Retention: non-archival nodes GC after **5 epochs (~1.5 days)** →
+  `UNKNOWN_BLOCK`; `status.sync_info.earliest_block_height` exposes the
+  watermark. `query` is polymorphic via `params.request_type`;
+  `changes` via `changes_type` — params-hashed keys keep variants apart.
+- Writes: `send_tx` / `broadcast_tx_*` — identical signed tx resubmission is
+  safe ("unique transactions apply exactly once"); `TIMEOUT_ERROR` resolution
+  is literally "resubmit the identical transaction". Tx expiry bounds the
+  retry window.
 
 ### 2.4 Noble / CometBFT
 
-- `status` returns `sync_info.latest_block_height` as a **string-encoded**
-  integer ([CometBFT RPC](https://docs.cosmos.network/cometbft/latest/api-reference/rpc))
-  — the §4.4 parser must accept decimal strings, not just JSON numbers.
-- Instant single-slot BFT finality: latest tip **is** the finalized tip. A
-  one-counter poller is sufficient; `finalizedTip` can alias `tip`.
-- Application reads go through the polymorphic `abci_query(path, data)` —
-  same coarse-granularity story as NEAR `query`.
-- `health` (empty 200 result) is a ready-made health probe for §4.4.
+- `status` → `$.result.sync_info.latest_block_height` as a **decimal string**
+  (all int64 fields are strings; uint32 `code` fields are numbers — mixed
+  encodings inside one response) + `catching_up` (bool) +
+  `earliest_block_height` ([schema](https://github.com/cometbft/cometbft/blob/v0.38.x/rpc/openapi/openapi.yaml);
+  live-verified on Noble). Instant single-block BFT finality; one tip counter
+  suffices. `health` returns `{"result":{}}` — content-free; liveness is
+  `catching_up == false` + tip progress, not the probe body.
+- **Result-embedded failures** (live-verified): `broadcast_tx_sync` →
+  `result.code != 0` (+ `codespace`, `log`); `broadcast_tx_commit` →
+  `result.check_tx.code` / `result.deliver_tx.code`; `abci_query` →
+  `result.response.code` (6 = unknown path, 18 = pruned state);
+  `block_results` → `result.txs_results[].code`; **`block`/`header` not-found
+  is a null body** (`result.block: null`), not an error; `tx_search`
+  not-found is an empty array + `total_count: "0"`. App codes are
+  application-defined and open-ended — never enumerated.
+- Errors collapse into `-32603` with a text `data` payload: future height,
+  pruned height ("height N is not available, lowest height is M" — live),
+  tx not found, indexing disabled. `subscribe` is WS-only → `-32601` over HTTP.
+- `abci_query` is the polymorphic mega-method (path + opaque protobuf `data`).
+- Byte-array params are **base64** in JSON-RPC POST mode (`0x…` hex is
+  rejected with `-32602`), uppercase hex without `0x` in responses.
+- Writes: `broadcast_tx_*` — duplicate of an in-mempool tx → `-32603 "tx
+  already exists in cache"`; committed-and-evicted re-broadcast fails at app
+  layer (sequence mismatch), not a double side effect.
 
 ### 2.5 Polkadot Asset Hub (Substrate legacy JSON-RPC)
 
 - Best tip: `chain_getHeader` (no params) → `$.result.number`, a **hex**
-  string. Finalized tip is two hops: `chain_getFinalizedHead` → `$.result`
-  (block hash), then `chain_getHeader(hash)` → `$.result.number`
-  ([PSP-6](https://github.com/w3f/PSPs/blob/master/PSPs/drafts/psp-6.md)).
-  The §4.4 poller config must express an optional resolve hop.
-- GRANDPA finality lags the best head; hash-pinned reads (`chain_getBlock`,
-  `state_getStorage` with a hash) are immutable once finalized →
-  `unfinalized` declarations.
-- The newer `chainHead_*` API is websocket-first; the legacy HTTP JSON-RPC
-  remains the deployable target for a POST-only proxy.
+  string [live]. Finalized tip is two hops: `chain_getFinalizedHead` →
+  `$.result` (hash), then `chain_getHeader(hash)` → `$.result.number`
+  ([PSP-6](https://github.com/w3f/PSPs/blob/master/PSPs/drafts/psp-6.md)) —
+  the §4.4 `thenCall` resolve hop. (Archive nodes expose
+  `archive_v1_finalizedHeight`, a plain-integer monotonic finalized height —
+  an alternative when all upstreams support it.)
+- GRANDPA: best-head blocks **can** be reorganized; finalized blocks cannot
+  ([wiki](https://wiki.polkadot.network/learn/learn-consensus/)). Live on
+  Asset Hub (2026-10): finalized lagged best by **18–24 blocks** (~35–50 s at
+  ~2 s blocks). No finality params/tags in the legacy API — levels are
+  selected by method choice; node default with no `at` param = **best
+  (unfinalized)**. Hash-pinned reads → `unfinalized`.
+- **Result-embedded failures** [live]: `chain_getHeader`/`chain_getBlock`/
+  `chain_getBlockHash` at unknown or future positions → **`result: null`**
+  (never cache as permanent absence); `state_getStorage` unset key →
+  `result: null`; pruned state → error **`4003` "Client error: UnknownBlock:
+  State already discarded"** — retriable elsewhere, never cacheable as
+  absence. Default full nodes keep ~256 blocks of state (~8 min) but
+  full block history.
+- Error modules: STATE base 4000 (`4003` = client catch-all), AUTHOR base
+  1000 (`1013` "Transaction Already Imported" = duplicate submission,
+  hash-deduped), rate-limit `-32999`. `rpc_methods` is a live introspection
+  method — usable for upstream capability detection. Subscriptions
+  (`chain_subscribe*`) are WS-only → `-32603` over HTTP.
+- Writes: `author_submitExtrinsic` — resubmitting the identical extrinsic
+  returns `1013` (no second side effect); only one instance can ever be
+  included.
 
 ### 2.6 XRP Ledger
 
-- JSON-RPC requests use method names like `ledger`, `tx`, `account_info`,
-  `server_info` with params as an **array containing one object**.
-- Errors are result-embedded: HTTP 200, `result.status: "error"`,
-  `result.error: "<code>"` ([error formatting](https://xrpl.org/docs/references/http-websocket-apis/api-conventions/error-formatting)).
-  Codes are strings: `txnNotFound`, `lgrNotFound`, `actNotFound`
-  (missing-data), `tooBusy` (server/busy), `noCurrent`/`noClosed`/`noNetwork`
-  (node not synced), `unknownCmd` (client). This is the motivating case for
-  network-level §4.3 rules.
-- `ledger_index: "validated"` is the final level; `current`/`closed` are not;
-  defaults vary per method, so explicit pinning is the recommended config.
-- `server_info.result.info.complete_ledgers` is a `"start-end"` range string
-  exposing the availability floor ("empty" when unsynced) → §4.4 floor
-  extraction.
+- **Not JSON-RPC 2.0-compliant** ([request formatting](https://xrpl.org/docs/references/http-websocket-apis/api-conventions/request-formatting)):
+  no `jsonrpc` field; `params` is a **one-item array** wrapping a single
+  object; `api_version` (default v1) changes wire shapes (e.g. inner
+  `ledger.ledger_index` is a decimal **string** in v1, a number in v2).
+  **Batching is not supported** — an array payload gets HTTP 400 with a
+  plain-text body. A spec-strict JSON-RPC layer mis-parses all of this; the
+  proxy must tolerate the dialect.
+- **Every error is result-embedded** at HTTP 200: `result.status: "error"` +
+  `result.error: <string code>` ([error formatting](https://xrpl.org/docs/references/http-websocket-apis/api-conventions/error-formatting);
+  live-verified `txnNotFound` code 29, `lgrNotFound` code 21). String codes are
+  canonical. Universal: `tooBusy`, `noCurrent`, `noClosed`, `noNetwork`,
+  `unknownCmd`, `failedToForward` (Clio).
+- Finality: `ledger_index: "validated"` = final (no depth ladder; ~3–5 s);
+  `"current"`/`"closed"` are not; numeric indexes are per-request pinning.
+  **`$.result.validated` (bool)** is a response-embedded finality flag on
+  `ledger`, `tx`, `account_info`. **The default differs by server software:**
+  xrpld defaults to `current` (non-final), Clio to `validated` — "Do not rely
+  on the default behavior… Always specify a ledger version in the request if
+  you can." Identical unpinned requests to different upstreams therefore
+  return different finality — a consensus and caching hazard that only
+  explicit pinning (config injection or `finalityFromParam`) removes.
+- Tip: `server_info` → `$.result.info.validated_ledger.seq` (number) +
+  `complete_ledgers` (range string, may be **disjoint** `"a-b,c-d"` or
+  `"empty"`) + `server_state` (`disconnected|connected|syncing|tracking|full|
+  validating|proposing`) ([server_info](https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/server-info-methods/server_info);
+  live-verified). Clio's `server_info` omits `server_state` and exposes
+  `cache.latest_ledger_seq` instead — poller health rules must handle both.
+- Retention: online deletion defaults to the **most recent 2000 ledgers**
+  (~2.5 h; min 256); pruned → `lgrNotFound`/`txnNotFound` (live-verified);
+  `complete_ledgers` exposes the per-node window. Full-history servers exist
+  (s2.ripple.com).
+- Rate limiting is **transport-level**: HTTP 503 plain-text `Server is
+  overloaded` (not JSON), plus top-level `"warning": "load"` on responses —
+  the generic extractor must handle non-envelope bodies.
+- Writes: `submit` — identical `tx_blob` resubmission is safe (account
+  sequence dedup); the response's `engine_result` (e.g. `tesSUCCESS`) is
+  **provisional** — finality only via `tx` against a validated ledger.
 
 ---
 
@@ -183,23 +314,30 @@ All v2 fields are optional; absence = v1 behavior. Everything lives under the
 existing `jsonrpc` network block or `methods.definitions` — no new top-level
 blocks.
 
-### 4.1 Method finality declarations (recap — existing fields)
+### 4.1 Method finality declarations
 
 ```yaml
 methods:
   definitions:
     getLedgerEntry:            # Stellar: immutable once answered
       finalized: true
+    starknet_getBlockWithTxs:  # pinned to an id, fork-droppable below final
+      unfinalized: true
     getHealth:                 # moving-head liveness
       realtime: true
 ```
 
-`finalized` = response uniquely determined by the params, immutable once it
-exists → permanent-cache eligible via `finality: finalized` policies.
-`realtime` = moving-head → TTL policies keyed on `finality: realtime`.
-Neither = v1 `unknown`. These flags work on any architecture today
-(`erpc/networks.go:2662-2670`); v2 adds the validation rules (§6) and the
-param-conditional refinement below.
+| Flag | Semantics | Status |
+|---|---|---|
+| `finalized` | Response uniquely determined by the params, immutable once it exists → permanent-cache eligible via `finality: finalized` policies. | **Exists today** (`erpc/networks.go:2662-2670`) |
+| `realtime` | Moving-head read; TTL policies keyed on `finality: realtime`. | **Exists today** |
+| `unfinalized` | Pinned to a slot/height/hash/signature but fork-droppable until the chain's finality catches up → TTL policies keyed on `finality: unfinalized` (a `finalized` policy's Get-matching already covers unfinalized responses, `data/cache_policy.go:155-159`). | **v2 addition** — extends the same config-flag short-circuit; no new machinery |
+
+The three flags are mutually exclusive per method (§6). Neither flag set =
+v1 `unknown`. The existing two flags work on any architecture today; v2 adds
+the `unfinalized` flag, the missing member of the quartet the finality enum
+already has (`common/data.go:20-27`) — Substrate hash-pinned reads and
+Starknet object `block_id`s are the motivating cases.
 
 ### 4.2 Param-conditional finality
 
@@ -208,14 +346,14 @@ One method name, per-call finality. Declared on the method definition:
 ```yaml
 methods:
   definitions:
-    block:                          # NEAR
-      finalityFromParam:
+    block:                          # NEAR (param is required by nearcore;
+      finalityFromParam:            # `default` covers unmapped values only)
         key: finality               # find any object param holding this key
         map:
           final: finalized
           near-final: unfinalized
           optimistic: realtime
-        default: realtime           # param absent or value unmapped
+        default: realtime
     starknet_getBlockWithTxs:       # Starknet: positional, value may be a tag
       finalityFromParam:            # string or an object
         index: 0
@@ -231,7 +369,7 @@ methods:
           validated: finalized
           current: realtime
           closed: realtime
-        default: realtime           # numeric indexes land here; see §8.2
+        default: realtime           # numeric indexes land here; see §8.1
 ```
 
 | Field | Type | Description |
@@ -244,16 +382,14 @@ methods:
 Semantics:
 
 - Evaluated inside `GetFinality`'s config-driven section (before the EVM
-  fallthrough), so it applies exactly where `finalized`/`realtime` flags are
-  honored today.
+  fallthrough), so it applies exactly where the config flags are honored today.
 - `finalityFromParam` is mutually exclusive with the static `finalized` /
-  `realtime` flags on the same method (§6).
+  `unfinalized` / `realtime` flags on the same method (§6).
 - The mapping table is the operator's assertion about the chain's finality
   model; eRPC never validates values against a chain enum (none exists).
 - Weakest-design note: `unfinalized` (not `finalized`) is the right landing
-  spot for pinned-but-maybe-replaceable refs (Starknet object block ids,
-  XRPL numeric indexes) — a wrong promotion is a permanent wrong cache entry,
-  a wrong demotion costs one re-fetch.
+  spot for pinned-but-maybe-replaceable refs — a wrong promotion is a
+  permanent wrong cache entry, a wrong demotion costs one re-fetch.
 
 ### 4.3 Result-embedded failure classification
 
@@ -283,13 +419,18 @@ networks:
           resultClassifications:
             - match: { resultPath: "$.result.status", in: ["NOT_FOUND"] }
               classifyAs: missingData
+        block:                          # CometBFT example: null-body not-found
+          resultClassifications:
+            - match: { resultPath: "$.result.block", isNull: true }
+              classifyAs: missingData
 ```
 
 | Field | Type | Description |
 |---|---|---|
 | `match.resultPath` | `string` | JSON path into the result object. |
-| `match.errorPath` / `match.dataPath` | `string` | Paths into the JSON-RPC `error` object instead — covers NEAR's `-32000` + structured `cause` (`errorPath: "$.error.data.cause.name", in: ["UNKNOWN_BLOCK"]`). |
-| `match.equals` / `match.in` | `string` / `[]string` | Value match. |
+| `match.errorPath` | `string` | Path into the JSON-RPC `error` object — covers NEAR's verror (`errorPath: "$.error.cause.name", in: ["UNKNOWN_BLOCK", "GARBAGE_COLLECTED_BLOCK", "UNAVAILABLE_SHARD", "NOT_SYNCED_YET"]`) and Substrate's module codes (`in: ["4003"]`). |
+| `match.equals` / `match.in` | `string` / `[]string` | Value match. **Values are stringified on both sides before comparison** — chain codes arrive as numbers (Starknet `24`) or strings (Substrate `"4003"`) depending on the wire. |
+| `match.isNull` | `bool` | Matches a JSON `null` value — the CometBFT/Substrate/Tron not-found shape (`result.block: null`, `result: null`). |
 | `codePath` + `codeMap` | `string` + `map[string]string` | Two-stage matching: rule matches the envelope, then the extracted sub-code picks the class (XRPL). |
 | `classifyAs` / `default` | `string` | One of `missingData`, `clientError`, `serverError` — the three actionable classes in the existing taxonomy (`common/errors.go`); everything else stays the v1 fallthrough. |
 
@@ -306,6 +447,10 @@ Semantics:
 - Rules are evaluated in order, first match wins; no match → v1 behavior.
 - A matched rule converts the response into an error *before* the cache layer
   sees it — so cacheability never needs a separate override.
+- Retention-range errors that embed per-node live state (Stellar `-32600`,
+  CometBFT `-32603` "lowest height is M") are per-upstream state: classify as
+  `missingData`, never as client faults — the identical request can succeed on
+  a fuller upstream.
 
 ### 4.4 Generic state poller
 
@@ -320,6 +465,9 @@ jsonrpc:
       method: starknet_blockNumber
       path: "$.result"                 # JSON path to the height
       encoding: auto                   # auto | number | string | hex
+      # unhealthyWhen:                 # optional sync-flag extraction from the
+      #   path: "$.result.sync_info.catching_up"   # same response (CometBFT)
+      #   equals: true
     finalizedTip:                      # optional second counter
       method: chain_getFinalizedHead   # Substrate example — two-hop:
       path: "$.result"                 #   ... a block hash
@@ -329,19 +477,22 @@ jsonrpc:
         path: "$.result.number"
         encoding: hex
     floor:                             # optional availability floor
-      method: server_info              # XRPL example
-      path: "$.result.info.complete_ledgers"
-      rangeStart: true                 # value "32570-8812345" → floor 32570
+      method: getHealth                # Stellar example — oldestLedger lives here
+      path: "$.result.oldestLedger"
+      # rangeStart: true               # XRPL: value "32570-8812345" → floor 32570
     health:                            # optional liveness probe
-      method: health                   # CometBFT example (empty result = ok)
+      method: status                   # NEAR example; CometBFT `health` is
+      # unhealthyWhen: { path: "$.result.sync_info.syncing", equals: true }
+      #                                  # content-free — prefer catching_up via tip
 ```
 
 | Field | Description |
 |---|---|
-| `tip.method` / `tip.path` / `tip.encoding` | The tip probe. `encoding: auto` accepts a JSON number, a decimal string (CometBFT), or a `0x` hex string (Substrate) — all three appear in §2. |
-| `finalizedTip` | Optional second counter. Optional `thenCall` expresses the Substrate-style hash→header resolve hop; `passValueAsParam` sends the first value as the sole param. |
-| `floor` | Optional lower availability bound (Stellar `oldestLedger`, XRPL `complete_ledgers`). `rangeStart` parses the head of a `"a-b"` range string. |
-| `health` | Optional probe method; a JSON-RPC error (or transport error) marks the upstream unhealthy. Without it, liveness is inferred from tip progress. |
+| `tip.method` / `tip.path` / `tip.encoding` | The tip probe. `encoding: auto` accepts a JSON number, a decimal string (CometBFT), or a `0x` hex string (Substrate) — all three appear in §2. Never apply EVM-style "QUANTITY is hex" decoding blindly: Starknet heights are plain integers, and mixed encodings exist inside single responses (CometBFT strings for int64, numbers for uint32). |
+| `tip.unhealthyWhen` | Optional matcher on the tip response (e.g. `catching_up`, `syncing`, XRPL `server_state in [connected, syncing, disconnected]`) — when it matches, the upstream is treated unhealthy for this tick exactly like a failed probe. |
+| `finalizedTip` | Optional second counter (NEAR `block{finality:final}` → `$.result.header.height`; XRPL `server_info.validated_ledger.seq`). Optional `thenCall` expresses the Substrate-style hash→header resolve hop; `passValueAsParam` sends the first value as the sole param. (Archive-only alternatives like `archive_v1_finalizedHeight` work too when all upstreams support them.) |
+| `floor` | Optional lower availability bound. Stellar: `getHealth.oldestLedger`; XRPL: `server_info.complete_ledgers` with `rangeStart` parsing the head of a (possibly disjoint) `"a-b,c-d"` range string; NEAR: `status.sync_info.earliest_block_height` (nullable — absent means unknown, never 0); CometBFT: `status...earliest_block_height` (live anomaly observed reporting `"0"` while enforcing a higher floor — treat 0/absent as "unknown", never as a real floor). |
+| `health` | Optional probe method; a JSON-RPC/transport error marks the upstream unhealthy for the tick. Probes with content-free success bodies (CometBFT `health` → `{"result":{}}`) still work as up/down checks; sync judgment belongs in `tip.unhealthyWhen`. |
 
 What the poller feeds — all existing consumers, no new scoring code:
 
@@ -351,8 +502,8 @@ What the poller feeds — all existing consumers, no new scoring code:
 - The selection-policy engine already reads those atomics
   (`internal/policy/eval.go:67-99`) → lag-aware scoring (`maxBlockHeadLag`,
   `blockHeadLagBelow`, …) starts working on generic networks.
-- Tip progress doubles as a liveness signal; a stalled tip cordons exactly
-  like the SVM poller's health verdict.
+- Tip progress doubles as a liveness signal; a stalled tip (or a matching
+  `unhealthyWhen`) cordons exactly like the SVM poller's health verdict.
 
 Explicitly not fed: EVM leader election, tip ballots, and
 `EvmEffective*`/served-tip machinery read the poller *interfaces*, not the
@@ -397,6 +548,10 @@ declared conditions:
 
 - **`finalized`-declared methods** — consensus compares immutable responses;
   meaningful without any poller. No further requirement.
+- **`unfinalized`-declared methods** — meaningful with a poller (staleness
+  bound) or without (pure response equality, degraded);
+  `preferNonEmpty`/`preferLargerResponses`/`preferHighestValueFor` do the
+  heavy lifting.
 - **`realtime`-declared methods** — meaningful only within a tip bucket, so
   validation requires a configured `statePoller`; responses are compared only
   among upstreams whose tracked tip agrees within the policy's lag bounds
@@ -407,6 +562,11 @@ declared conditions:
   (`consensus/analysis.go:114-117`) and would silently degrade.
 - Result-embedded failure rules (§4.3) run *before* consensus comparison, so
   a `NOT_FOUND` never counts as a valid response in the agreement set.
+- **Per-upstream divergence is expected and declared, not anomalous:**
+  Starknet `pre_confirmed`/`RECEIVED` are node-local views; Stellar retention
+  is operator-configurable; XRPL xrpld vs Clio default to different ledgers.
+  Declarations + rules make these cases classify correctly instead of
+  dissenting.
 
 ---
 
@@ -422,7 +582,7 @@ networks:
       statePoller:
         tip: { method: starknet_blockNumber, path: "$.result" }
       errorRules:
-        - match: { errorPath: "$.error.code", in: ["24", "20"] }   # BlockNotFound, ContractNotFound
+        - match: { errorPath: "$.error.code", in: ["24", "29"] }   # BlockNotFound, TxnHashNotFound
           classifyAs: missingData
     methods:
       definitions:
@@ -431,9 +591,14 @@ networks:
             index: 0
             map: { l1_accepted: finalized, latest: realtime, pre_confirmed: realtime }
             default: unfinalized
-        starknet_getTransactionReceipt: { finalized: true }   # hash-pinned
+        starknet_getTransactionReceipt: { finalized: true }   # hash-pinned; REVERTED is a cacheable result
         starknet_blockNumber: { realtime: true }
 ```
+
+Note: `starknet_blockNumber` reports the L2-finalized `latest` head — one
+counter is enough unless L1-finality bounds are wanted (then add a
+`finalizedTip` via `starknet_getBlockWithTxHashes` at `block_id: l1_accepted`
+→ `$.result.block_number`).
 
 ### Stellar
 
@@ -443,8 +608,9 @@ networks:
     jsonrpc:
       networkId: stellar
       statePoller:
-        tip:  { method: getLatestLedger, path: "$.result.sequence" }
-        floor: { method: getLatestLedger, path: "$.result.sequence" }  # see note
+        tip:   { method: getLatestLedger, path: "$.result.sequence" }
+        floor: { method: getHealth, path: "$.result.oldestLedger" }
+        health: { method: getHealth }
     methods:
       definitions:
         getLedgerEntries: { finalized: true }     # hash/seq-pinned entries
@@ -456,11 +622,6 @@ networks:
         getLatestLedger: { realtime: true, cacheTipBucket: 1 }
 ```
 
-Note: Stellar's floor (`oldestLedger`) is returned on `getTransaction`, not
-`getLatestLedger` — floor extraction from a *tip* method that doesn't carry
-it is open question §8.3; a stub config like the above is invalid until
-resolved.
-
 ### NEAR
 
 ```yaml
@@ -469,9 +630,16 @@ networks:
     jsonrpc:
       networkId: near
       statePoller:
-        tip: { method: status, path: "$.result.sync_info.latest_block_height" }
+        tip:
+          method: status
+          path: "$.result.sync_info.latest_block_height"
+          unhealthyWhen: { path: "$.result.sync_info.syncing", equals: true }
+        finalizedTip:
+          method: block
+          path: "$.result.header.height"          # params: {"finality":"final"} — see §8.4
+        floor: { method: status, path: "$.result.sync_info.earliest_block_height" }
       errorRules:
-        - match: { errorPath: "$.error.data.cause.name", in: ["UNKNOWN_BLOCK", "GARBAGE_COLLECTED_BLOCK"] }
+        - match: { errorPath: "$.error.cause.name", in: ["UNKNOWN_BLOCK", "GARBAGE_COLLECTED_BLOCK", "UNAVAILABLE_SHARD", "NO_SYNCED_BLOCKS", "NOT_SYNCED_YET", "NODE_IS_SYNCING"] }
           classifyAs: missingData
     methods:
       definitions:
@@ -492,14 +660,21 @@ networks:
     jsonrpc:
       networkId: noble
       statePoller:
-        tip:       { method: status, path: "$.result.sync_info.latest_block_height", encoding: string }
-        health:    { method: health }
+        tip:
+          method: status
+          path: "$.result.sync_info.latest_block_height"
+          encoding: string
+          unhealthyWhen: { path: "$.result.sync_info.catching_up", equals: true }
     methods:
       definitions:
         block:  { finalized: true }    # height-pinned, instantly final
         tx:     { finalized: true }
         status: { realtime: true }
-        abci_query: { realtime: true } # polymorphic; coarse granularity
+        abci_query:                    # polymorphic; coarse granularity
+          realtime: true
+          resultClassifications:
+            - match: { resultPath: "$.result.response.code", equals: "18" }   # pruned state
+              classifyAs: missingData
 ```
 
 ### Polkadot Asset Hub
@@ -519,6 +694,9 @@ networks:
       definitions:
         chain_getBlock: { unfinalized: true }   # hash-pinned, GRANDPA-lagged
         chain_getFinalizedHead: { realtime: true }
+      errorRules:                                # network level
+        - match: { errorPath: "$.error.code", equals: "4003" }   # UnknownBlock / pruned state
+          classifyAs: missingData
 ```
 
 ### XRP Ledger
@@ -531,6 +709,7 @@ networks:
       statePoller:
         tip:   { method: server_info, path: "$.result.info.validated_ledger.seq" }
         floor: { method: server_info, path: "$.result.info.complete_ledgers", rangeStart: true }
+        # No health probe method carries server_state on Clio — see §9.8.
       errorRules:
         - match: { resultPath: "$.result.status", equals: "error" }
           codePath: "$.result.error"
@@ -561,8 +740,9 @@ Config load rejects, with direct errors (all evaluated in
 `common/validation.go` network/methods validation — new architecture-aware
 rules, same style as v1 §8):
 
-1. `finalityFromParam` combined with `finalized` or `realtime` on the same
-   method definition (contradictory declarations).
+1. More than one of `finalized` / `unfinalized` / `realtime` on the same
+   method definition, or `finalityFromParam` combined with any of them
+   (contradictory declarations).
 2. `finalityFromParam` with both/neither of `key`/`index`, an empty `map`, a
    missing `default`, or a value outside the finality enum.
 3. A failsafe `consensus` policy matching methods with **no** finality
@@ -575,26 +755,35 @@ rules, same style as v1 §8):
    `passValueAsParam` (the only supported parameterization in v2);
    `encoding` outside `auto|number|string|hex`.
 7. `errorRules` / `resultClassifications` with an empty match, an unknown
-   `classifyAs`, or `codeMap` without `codePath`.
-8. A rule whose match path targets `$.error.*` on a network and
-   `$.result.*` per method is allowed — network rules run first, method rules
-   refine.
+   `classifyAs`, `codeMap` without `codePath`, or `isNull` combined with
+   `equals`/`in` on the same matcher.
+8. Floor values that parse to 0 or are absent (XRPL `"empty"`, CometBFT `"0"`
+   anomaly) are treated as "floor unknown" at runtime — never as a real
+   availability bound; validation does not reject them (they are live state).
 
 ---
 
 ## 7. What v2 still does not do
 
-- No block-hash chaining, no reorg detection, no integrity checks — a
-  tip *number* cannot prove ancestry.
+- No block-hash chaining, no reorg detection, no integrity checks — a tip
+  *number* cannot prove ancestry.
 - No served-tip floors or block-availability guards — those are
   architecture-hook features (EVM/SVM) that presume richer per-block
   semantics. The poller's tip feeds *scoring* only.
-- No new write-guard: non-idempotent methods remain the operator's
-  responsibility via per-method failsafe (`matchMethod`) — unchanged from
-  v1 §11.3. (Starknet `starknet_addInvokeTransaction`, XRPL `submit`, NEAR
-  `broadcast_tx_commit` are the examples; XRPL submissions are
-  sequence-idempotent at the ledger level, but eRPC cannot know that.)
+- No new write-guard machinery. Cross-chain research finding: **every
+  researched chain is idempotent under byte-identical resubmission**
+  (Starknet `59 DUPLICATE_TX`, Stellar `DUPLICATE`, NEAR "apply exactly
+  once", CometBFT tx-cache, Substrate `1013`, XRPL account-sequence) — so
+  retry/hedge of the identical signed payload is safe on all validated
+  targets, while *distinct* payloads (replacement, re-signed, same-nonce
+  different-content) can double-apply or silently fail. eRPC still cannot
+  tell which methods are non-idempotent or distinguish payload identity, so
+  the guidance stays v1 §11.3: disable retry/hedge per method via
+  `matchMethod` for non-idempotent traffic. (XRPL `submit` results are
+  provisional — `engine_result` ≠ final.)
 - No EVM-only consensus leader election (rejected, §6.4).
+- No websocket-only method surfaces (Starknet/Substrate/XRPL subscriptions)
+  — eRPC is HTTP POST; those methods stay unroutable.
 
 ---
 
@@ -607,17 +796,25 @@ rules, same style as v1 §8):
    finality depend on mutable poller state, so an identical request changes
    class over time. v2 takes the static answer (`default: unfinalized` /
    `realtime`); dynamic promotion is deferred.
-2. **Response-side finality signals.** Starknet block responses carry
-   `status: ACCEPTED_ON_L1`; Stellar `getTransaction` carries `ledger`. A
+2. **Response-side finality signals.** Starknet block `status` /
+   receipt `finality_status`, Stellar `getTransaction.ledger`, XRPL
+   `result.validated` all declare per-response finality. A
    `finalityFromResult` rule could promote per-response. Same mutable-state
    concern as (1), plus cache writes racing classification; deferred.
-3. **Floor extraction when the tip method doesn't carry it** (Stellar's
-   `oldestLedger` lives on `getTransaction`). Options: allow `floor.method` ≠
-   `tip.method` (already in schema), or harvest floors from live traffic.
-   Schema supports both; harvesting is deferred.
-4. **Per-upstream `statePoller` overrides** (a slow vendor needing a longer
+3. **Floor staleness.** Floors are snapshots at poll time; a fast-pruning
+   upstream can drop below its last-published `oldestLedger` between polls.
+   Acceptable for scoring; a Get-side floor guard (like EVM availability
+   bounds) would need hook machinery v2 does not add. The Stellar `getHealth`
+   case (floor in the probe response) is resolved; CometBFT's
+   `earliest_block_height: "0"` anomaly is handled by the §6.8 rule.
+4. **Static params on poller probes.** NEAR's finalized tip requires
+   `params: {"finality":"final"}` and XRPL's `server_info` takes `[{}]`; the
+   schema above shows only method/path. v2 adds an optional `params` field on
+   `tip`/`finalizedTip`/`floor`/`health` probes (verbatim JSON, sent as-is) —
+   trivial, but must be specced before implementation.
+5. **Per-upstream `statePoller` overrides** (a slow vendor needing a longer
    interval). v2 keeps the block network-level only.
-5. **Consensus on `realtime` methods**: whether tip-bucket agreement bounds
+6. **Consensus on `realtime` methods**: whether tip-bucket agreement bounds
    are sufficient or consensus should be restricted to `finalized`-declared
    methods in practice. The validation gate (§6.3) ships conservative; relax
    only with production evidence.
@@ -627,15 +824,20 @@ rules, same style as v1 §8):
 ## 9. Edge cases & gotchas
 
 1. **Encoding variance in one value.** CometBFT heights are decimal strings,
-   Substrate numbers hex strings, XRPL's `complete_ledgers` a range — all
-   under the same `path` schema. `encoding: auto` must never throw; an
-   unparseable sample is a skipped tick, not a crash (mirrors the SVM
-   poller's per-fetch isolation, `architecture/svm/svm_state_poller.go:340-383`).
+   Substrate numbers hex strings, XRPL's `complete_ledgers` a range, Starknet
+   heights plain integers — all under the same `path` schema. `encoding:
+   auto` must never throw; an unparseable sample is a skipped tick, not a
+   crash (mirrors the SVM poller's per-fetch isolation,
+   `architecture/svm/svm_state_poller.go:340-383`).
 2. **`finalityFromParam` + batching.** Batch elements classify individually,
-   exactly as errors do per element in v1 (§11.5 there).
+   exactly as errors do per element in v1 (§11.5 there) — including NEAR's
+   query-only batches, where non-`query` elements return `-32601`.
 3. **Stellar `FAILED` is a success shape.** The §4.3 rule maps `NOT_FOUND`
    only; `FAILED` must remain a cacheable, finalized result — over-broad `in:`
-   lists (`["NOT_FOUND", "FAILED"]`) would silently never-cache.
+   lists (`["NOT_FOUND", "FAILED"]`) would silently never-cache. Same class
+   of trap: Starknet `execution_status: REVERTED` and NEAR
+   `result.status.Failure` are cacheable outcomes of *failed* transactions,
+   not failures of the request.
 4. **XRPL `params` shape.** Params is an array with a single object —
    `finalityFromParam.key` scanning finds it, but `index: 0` would yield the
    whole object, not the tag. Validation warns when `index` extracts an
@@ -648,5 +850,25 @@ rules, same style as v1 §8):
    pattern from the SVM poller applies unchanged.
 6. **`thenCall` failure isolation.** A failed resolve hop invalidates only
    the finalized counter for that tick; the tip counter still updates.
-7. **Unsynced XRPL nodes** report `complete_ledgers: "empty"` — `rangeStart`
-   parsing must treat non-range values as "no floor", never as floor 0.
+7. **Unsynced XRPL nodes** report `complete_ledgers: "empty"` and Clio omits
+   `server_state` — `rangeStart` parsing must treat non-range values as "no
+   floor", never as floor 0; health rules referencing Clio-absent fields must
+   default to "unknown, not unhealthy".
+8. **Non-envelope error bodies exist on the wire.** Stellar parse errors →
+   HTTP 500 body `[-32700] invalid request value`; XRPL → plain-text 400
+   (`Null method`, `Unable to parse JSON`) and 503 (`Server is overloaded`);
+   CometBFT parse errors → HTTP 500. The v1 transport layer must treat these
+   as server-side retryables without assuming a JSON-RPC envelope — XRPL's
+   503 is its rate-limit signal and TronGrid's REST `{"Error": …}` (future
+   REST profile) arrives HTTP 200.
+9. **Batch support is a spectrum, not a boolean.** CometBFT and Substrate
+   support arrays; Starknet implements but doesn't spec it; Stellar works but
+   is undocumented; NEAR executes only `query` inside batches (`-32601` for
+   others, `-32005`/`-32010`/`-32011` limits); **XRPL rejects arrays
+   outright** (HTTP 400 plain text). Multiplexing config must treat batching
+   as per-upstream capability, exactly as v1's generic path already does for
+   unknown capabilities.
+10. **Error bodies echo secrets and live state.** XRPL error results copy the
+    full request (incl. signing secrets in sign-and-submit mode); Stellar and
+    CometBFT messages embed live ledger windows. Sanitize before logging;
+    never pattern-match on message text — key on codes/paths only.
