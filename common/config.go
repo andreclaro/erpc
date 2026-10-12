@@ -2701,8 +2701,9 @@ type JsonRpcStateProbeConfig struct {
 	// An unparseable sample is a skipped tick, never a crash.
 	Encoding string `yaml:"encoding,omitempty" json:"encoding,omitempty"`
 
-	// Params, when set, is sent verbatim as the JSON-RPC params member.
-	Params []interface{} `yaml:"params,omitempty" json:"params,omitempty"`
+	// Params, when set, is sent verbatim as the JSON-RPC params member —
+	// array form (Starknet/XRPL) or object form (NEAR). Nil sends [].
+	Params interface{} `yaml:"params,omitempty" json:"params,omitempty"`
 
 	// RangeStart parses the value as a (possibly disjoint) ledger range
 	// string ("a-b,c-d", "empty") and keeps only the start — XRPL's

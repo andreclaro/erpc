@@ -256,6 +256,11 @@ export interface ServerConfig {
     costHeaders?: boolean;
 }
 export interface WebSocketServerConfig {
+    /**
+     * Enabled accepts WebSocket upgrades on the HTTP port. Off by default:
+     * with it off an upgrade request is ordinary HTTP.
+     */
+    enabled?: boolean;
     readBufferSize?: number;
     writeBufferSize?: number;
     maxMessageSize?: number;
@@ -1719,9 +1724,10 @@ export interface JsonRpcStateProbeConfig {
      */
     encoding?: string;
     /**
-     * Params, when set, is sent verbatim as the JSON-RPC params member.
+     * Params, when set, is sent verbatim as the JSON-RPC params member —
+     * array form (Starknet/XRPL) or object form (NEAR). Nil sends [].
      */
-    params?: any[];
+    params?: any;
     /**
      * RangeStart parses the value as a (possibly disjoint) ledger range
      * string ("a-b,c-d", "empty") and keeps only the start — XRPL's

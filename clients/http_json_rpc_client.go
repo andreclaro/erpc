@@ -699,12 +699,25 @@ func (c *GenericHttpJsonRpcClient) sendSingleRequest(ctx context.Context, req *c
 
 	jrReq.RLock()
 	span.SetAttributes(attribute.String("request.method", jrReq.Method))
-	requestBody, err := common.SonicCfg.Marshal(common.JsonRpcRequest{
-		JSONRPC: jrReq.JSONRPC,
-		Method:  jrReq.Method,
-		Params:  jrReq.Params,
-		ID:      jrReq.ID,
-	})
+	var requestBody []byte
+	if obj := jrReq.ObjectParams(); obj != nil {
+		// By-name (object-form) params are re-emitted verbatim: the typed
+		// Params view wrapped them for introspection, but by-name services
+		// (NEAR and friends) reject the array form on the wire.
+		requestBody, err = common.SonicCfg.Marshal(map[string]interface{}{
+			"jsonrpc": jrReq.JSONRPC,
+			"method":  jrReq.Method,
+			"params":  obj,
+			"id":      jrReq.ID,
+		})
+	} else {
+		requestBody, err = common.SonicCfg.Marshal(common.JsonRpcRequest{
+			JSONRPC: jrReq.JSONRPC,
+			Method:  jrReq.Method,
+			Params:  jrReq.Params,
+			ID:      jrReq.ID,
+		})
+	}
 	jrReq.RUnlock()
 	if err != nil {
 		common.SetTraceSpanError(span, err)

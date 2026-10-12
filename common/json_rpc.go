@@ -1227,7 +1227,28 @@ type JsonRpcRequest struct {
 	// upstream: the outbound body is rebuilt from the four JSON-RPC members.
 	networkId string
 
+	// paramsObj carries by-name (object-form) params verbatim: the typed
+	// Params view wraps the object as a single-element array for introspection,
+	// but the wire must re-emit the OBJECT unchanged — nearcore and other
+	// by-name services reject the array form. Nil for array-form params.
+	// Never mutated after unmarshal; architecture hooks that mutate params
+	// operate on the wrapped Params view only.
+	paramsObj map[string]interface{}
+
 	cacheHash atomic.Value
+}
+
+// ObjectParams returns the verbatim by-name params object when the request
+// used object-form params (NEAR and other by-name services), or nil when the
+// request used array form. Callers re-emitting the wire body MUST prefer this
+// over Params whenever it is non-nil.
+func (r *JsonRpcRequest) ObjectParams() map[string]interface{} {
+	if r == nil {
+		return nil
+	}
+	r.RLock()
+	defer r.RUnlock()
+	return r.paramsObj
 }
 
 // NetworkIdHint returns the "networkId" member carried in the request body, or
@@ -1319,6 +1340,13 @@ func (r *JsonRpcRequest) Clone() *JsonRpcRequest {
 		Method:   r.Method,
 		Params:   clonedParams,
 		idAbsent: r.idAbsent,
+	}
+	// Keep the by-name params carrier in sync with the deep-copied params so
+	// the clone re-emits the same verbatim object on the wire.
+	if r.paramsObj != nil && len(clonedParams) == 1 {
+		if obj, ok := clonedParams[0].(map[string]interface{}); ok {
+			clone.paramsObj = obj
+		}
 	}
 	// Carry idRaw forward so the cloned request still round-trips its id
 	// byte-for-byte through normalizeResponse. Without this, the clone falls
@@ -1416,13 +1444,31 @@ func (r *JsonRpcRequest) UnmarshalJSON(data []byte) error {
 			Params    json.RawMessage `json:"params"`
 			NetworkID interface{}     `json:"networkId,omitempty"`
 		}{Method: uniqueString{member: "method"}}
-		if SonicCfg.Unmarshal(data, raw) != nil || !strings.HasPrefix(strings.ToLower(raw.Method.value), "eth_query") {
+		if SonicCfg.Unmarshal(data, raw) != nil {
 			return err
 		}
 		if raw.JSONRPC != "" {
 			r.JSONRPC = raw.JSONRPC
 		}
-		r.Params = nil
+		switch {
+		case strings.HasPrefix(strings.ToLower(raw.Method.value), "eth_query"):
+			r.Params = nil
+		case len(raw.Params) > 0 && raw.Params[0] == '{':
+			// JSON-RPC by-name params (NEAR and other by-name services): the
+			// request body is forwarded to upstreams verbatim, so the object
+			// shape is preserved on the wire. The typed view wraps it as a
+			// single-element array so introspection (finalityFromParam key
+			// scans, cache hashing, param indexing) sees a stable shape —
+			// the same convention documented for finalityFromParam lookups.
+			var obj map[string]interface{}
+			if SonicCfg.Unmarshal(raw.Params, &obj) != nil {
+				return err
+			}
+			r.Params = []interface{}{obj}
+			r.paramsObj = obj
+		default:
+			return err
+		}
 		aux.ID, aux.Method, aux.NetworkID = raw.ID, raw.Method, raw.NetworkID
 	}
 

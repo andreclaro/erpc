@@ -528,16 +528,21 @@ func (p *JsonRpcStatePoller) extractFloor(probe *common.JsonRpcStateProbeConfig,
 // poller's call helper: a raw JSON-RPC POST built with the probe method and
 // verbatim configured params, bypassing method exclusion. The returned root
 // materializes both subtrees so configured paths address the whole response.
-func (p *JsonRpcStatePoller) callProbe(ctx context.Context, method string, params []interface{}) (map[string]interface{}, error) {
-	if params == nil {
-		params = []interface{}{}
+func (p *JsonRpcStatePoller) callProbe(ctx context.Context, method string, params interface{}) (map[string]interface{}, error) {
+	payload := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  method,
 	}
-	body, err := json.Marshal(struct {
-		JSONRPC string        `json:"jsonrpc"`
-		ID      int           `json:"id"`
-		Method  string        `json:"method"`
-		Params  []interface{} `json:"params"`
-	}{"2.0", 1, method, params})
+	// Array form (Starknet/XRPL) and object form (NEAR) are both legal
+	// JSON-RPC params members; send the configured shape verbatim, defaulting
+	// to an empty array when unset.
+	if params == nil {
+		payload["params"] = []interface{}{}
+	} else {
+		payload["params"] = params
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal probe request: %w", err)
 	}

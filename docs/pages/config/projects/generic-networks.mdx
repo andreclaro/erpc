@@ -256,8 +256,10 @@ networks:
     jsonrpc:
       networkId: stellar
       statePoller:
-        tip:   { method: getLatestLedger, path: "$.result.sequence" }
-        floor: { method: getHealth, path: "$.result.oldestLedger" }
+        # Stellar RPC params are by-name objects — and it rejects the array
+        # form, so probes that take params must declare the object shape.
+        tip:   { method: getLatestLedger, path: "$.result.sequence", params: {} }
+        floor: { method: getHealth, path: "$.result.oldestLedger", params: {} }
     methods:
       definitions:
         getLedgerEntries: { finalized: true }
@@ -402,8 +404,17 @@ All evaluated at config load (`common/validation.go`), direct errors:
 6. **Retention errors are per-upstream state.** Stellar `-32600` carries the node's live window; identical requests succeed on fuller upstreams. Classify as `missingData`, never `clientError`.
 7. **`finalityFromParam` + batching.** Batch elements classify individually, exactly like per-element errors.
 8. **XRPL `params` shape.** `params` is a one-item array wrapping an object — `key` scanning finds it; `index: 0` extracts the whole object and lands on `default` (validation can't see this; the warning-worthy misconfiguration is documented in the spec).
-9. **Poller cost on paid vendors.** The tip probe fires per upstream per interval; on metered vendors this dominates background cost. Keep `interval` ≥ block time.
-10. **Error bodies echo secrets and live state.** XRPL error results copy the full request (including signing secrets in sign-and-submit mode); Stellar/CometBFT messages embed live ledger windows. Sanitize before logging; key on codes/paths only.
+9. **By-name (object) params are first-class — and sometimes mandatory.**
+   NEAR requires object-form params (`params: {"finality":"final"}`; the array
+   form is rejected with a parse error) and Stellar RPC rejects the array form
+   for its by-name methods (`getLatestLedger` with `[]` → `-32602`). eRPC
+   re-emits object params verbatim on the wire; introspection (cache hashing,
+   `finalityFromParam` key scans) sees them wrapped as a single-element array
+   — a positional `index: 0` on such a method therefore extracts the whole
+   object and lands on `default` (use `key`). Poller probes take the same
+   shapes verbatim (`params: {}` / `params: {finality: final}` / `params: ["l1_accepted"]`).
+10. **Poller cost on paid vendors.** The tip probe fires per upstream per interval; on metered vendors this dominates background cost. Keep `interval` ≥ block time.
+11. **Error bodies echo secrets and live state.** XRPL error results copy the full request (including signing secrets in sign-and-submit mode); Stellar/CometBFT messages embed live ledger windows. Sanitize before logging; key on codes/paths only.
 
 ### Non-goals (deliberately)
 
@@ -420,7 +431,7 @@ methods carry declarations. Relevant families:
 
 - `erpc_network_request_total{network, method, finality="unknown"}` — generic traffic baseline.
 - `erpc_upstream_request_total{upstream, network, method}` + error-rate/latency rollups — per-upstream scoring inputs (`health/tracker.go`).
-- `erpc_network_cache_hits_total` / `erpc_network_cache_misses_total` (labels incl. `finality`, `connector`) — once `database.jsonRpcCache` policies exist (`data/cache_executor.go`).
+- `erpc_cache_get_success_hit_total` / `erpc_cache_get_success_miss_total` + `erpc_cache_set_success_total` / `erpc_cache_set_skipped_total` — once `database.jsonRpcCache` policies exist (`data/cache_executor.go`).
 - `erpc_upstream_block_head_lag` / `erpc_upstream_finalization_lag` — populated by the generic state poller via the standard tracker setters; consumed by selection policies (`internal/policy/eval.go`) and the catch-up panels (see `monitoring/catch-up-metrics.md`).
 - Cordons: poller-driven unhealthy ticks emit the standard cordon logs/metrics (`upstream.Cordon`).
 
