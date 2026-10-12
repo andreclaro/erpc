@@ -1981,20 +1981,15 @@ func validateJsonRpcUpstreamNetworkPairing(upstreams []*UpstreamConfig, networks
 		return nil
 	}
 	for _, ups := range upstreams {
-		if ups == nil {
+		if ups == nil || ups.Type != UpstreamTypeJsonRpc {
 			continue
 		}
-		if ups.Type == UpstreamTypeJsonRpc || (ups.Jsonrpc != nil && ups.Jsonrpc.NetworkId != "") {
-			slug := ""
-			if ups.Jsonrpc != nil {
-				slug = ups.Jsonrpc.NetworkId
-			}
-			if ups.Type != UpstreamTypeJsonRpc {
-				return fmt.Errorf("upstream '%s' declares jsonrpc.networkId '%s' but has type '%s'; jsonrpc upstreams must set type: jsonrpc explicitly (no type inference)", ups.Id, slug, ups.Type)
-			}
-			if slug == "" || !slugs[slug] {
-				return fmt.Errorf("upstream '%s' has type jsonrpc but its jsonrpc.networkId '%s' matches no declared jsonrpc network; the upstream would serve nothing", ups.Id, slug)
-			}
+		slug := ""
+		if ups.Jsonrpc != nil {
+			slug = ups.Jsonrpc.NetworkId
+		}
+		if slug == "" || !slugs[slug] {
+			return fmt.Errorf("upstream '%s' has type jsonrpc but its jsonrpc.networkId '%s' matches no declared jsonrpc network; the upstream would serve nothing", ups.Id, slug)
 		}
 	}
 	return nil
