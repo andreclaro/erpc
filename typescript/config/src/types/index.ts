@@ -10,6 +10,7 @@ export type {
     AuthStrategyConfig,
     EvmNetworkConfigForDefaults,
     SvmNetworkConfigForDefaults,
+    JsonrpcNetworkConfigForDefaults,
     BoolOrString,
   } from "./generic";
   export type {

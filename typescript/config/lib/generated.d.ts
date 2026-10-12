@@ -105,6 +105,19 @@ export interface EvmProbeEarliestInfo {
     earliestBlock: number;
     schedulerRunning?: boolean;
 }
+export declare const UpstreamTypeJsonRpc: UpstreamType;
+/**
+ * JsonRpcUpstream narrows common.Upstream to the surface the generic
+ * JSON-RPC architecture needs to reach into per-upstream state (currently
+ * just the state poller). Parallels the SvmUpstream / EvmUpstream pattern.
+ */
+export type JsonRpcUpstream = Upstream;
+/**
+ * JsonRpcStatePoller is the per-upstream tip/floor/health tracker for generic
+ * JSON-RPC networks. It exists only when the network's jsonrpc.statePoller
+ * config block is present; the concrete type lives in architecture/jsonrpc.
+ */
+export type JsonRpcStatePoller = any;
 export declare const UpstreamTypeSvm: UpstreamType;
 /**
  * SlotSharedVariable mirrors the EVM SharedStateVariable pattern for int64 slot numbers.
@@ -175,8 +188,24 @@ export interface Config {
     projects?: (ProjectConfig | undefined)[];
     rateLimiters?: RateLimiterConfig;
     metrics?: MetricsConfig;
+    indexer?: IndexerConfig;
     proxyPools?: (ProxyPoolConfig | undefined)[];
     tracing?: TracingConfig;
+}
+/**
+ * IndexerConfig tunes the event-stream indexer behind eth_subscribe fan-out.
+ */
+export interface IndexerConfig {
+    /**
+     * Deprecated: ignored; the indexer no longer tracks a canonical chain.
+     * Kept so configs that still set it load under strict decoding.
+     */
+    canonicalChainDepth?: number;
+    /**
+     * DedupWindowSize is the per-filter seen-set capacity for log and
+     * pending-tx fan-out across upstreams. 0 uses the default (8192).
+     */
+    dedupWindowSize?: number;
 }
 export interface ServerConfig {
     listenV4?: boolean;
@@ -208,6 +237,7 @@ export interface ServerConfig {
     responseHeaders?: {
         [key: string]: string;
     };
+    webSocket?: WebSocketServerConfig;
     /**
      * ExecutionHeaders controls the per-request diagnostic headers
      * (X-ERPC-Attempts, X-ERPC-Upstreams-Tried, etc.) that expose how
@@ -224,6 +254,26 @@ export interface ServerConfig {
      * CreditUnitsProvider and UpstreamConfig.CreditUnits.
      */
     costHeaders?: boolean;
+}
+export interface WebSocketServerConfig {
+    readBufferSize?: number;
+    writeBufferSize?: number;
+    maxMessageSize?: number;
+    pingInterval?: Duration;
+    maxSubscriptionsPerConnection?: number;
+    /**
+     * MaxConcurrentRequestsPerConnection bounds the messages a connection has
+     * in flight; further frames wait (backpressure) instead of being rejected.
+     * A batch is one message; its requests run concurrently, as over HTTP.
+     */
+    maxConcurrentRequestsPerConnection?: number;
+    /**
+     * SubscriptionBufferSize is the number of notifications queued per
+     * subscription for a client that is behind. On overflow newHeads and
+     * newPendingTransactions drop their oldest entry; logs close the
+     * connection instead (1013), so the client knows it missed data.
+     */
+    subscriptionBufferSize?: number;
 }
 /**
  * ExecutionHeadersMode controls how much per-request execution detail is
@@ -321,6 +371,7 @@ export interface AliasingRuleConfig {
 export interface DatabaseConfig {
     evmJsonRpcCache?: CacheConfig;
     svmJsonRpcCache?: CacheConfig;
+    jsonRpcCache?: CacheConfig;
     sharedState?: SharedStateConfig;
 }
 export interface SharedStateConfig {
@@ -385,6 +436,30 @@ export interface CacheMethodConfig {
      * are enforced for this method at the network level. When nil or true, enforcement is enabled.
      */
     enforceBlockAvailability?: boolean;
+    /**
+     * Unfinalized (jsonrpc networks) declares the method's responses are pinned
+     * to a slot/height/hash/signature but fork-droppable until the chain's
+     * finality catches up — TTL policies keyed on finality: unfinalized apply.
+     * Mutually exclusive with Finalized, Realtime and FinalityFromParam.
+     */
+    unfinalized?: boolean;
+    /**
+     * FinalityFromParam (jsonrpc networks) declares that one method name has
+     * per-call finality carried by a request param (e.g. NEAR's "finality"
+     * param, Starknet block tags). Mutually exclusive with the static flags.
+     */
+    finalityFromParam?: FinalityFromParamConfig;
+    /**
+     * CacheTipBucket (jsonrpc networks) partitions the cache key by tip/bucketSize
+     * for this method; requires a configured jsonrpc.statePoller. 0 disables.
+     */
+    cacheTipBucket?: number;
+    /**
+     * ResultClassifications (jsonrpc networks) declares result-embedded failure
+     * shapes (e.g. Stellar getTransaction status NOT_FOUND) that must be treated
+     * as errors before caching/consensus see the response.
+     */
+    resultClassifications?: (JsonRpcClassificationRuleConfig | undefined)[];
 }
 export interface CachePolicyConfig {
     connector: string;
@@ -677,6 +752,19 @@ export interface NetworkDefaults {
     svm?: TsSvmNetworkConfigForDefaults;
     multiplexing?: boolean;
     cacheKeySuffix?: string;
+    failover?: FailoverConfig;
+}
+/**
+ * FailoverConfig controls per-request escalation to fallback-tier upstreams,
+ * independent of the selection policy.
+ */
+export interface FailoverConfig {
+    /**
+     * OnDefaultsExhausted tries upstreams not tagged `tier:fallback` first and
+     * advances to the fallback tier within the same request only once every
+     * other upstream failed with an error retryable toward the network.
+     */
+    onDefaultsExhausted?: boolean;
 }
 export interface CORSConfig {
     allowedOrigins: string[];
@@ -700,6 +788,11 @@ export interface ProviderConfig {
         [key: string]: UpstreamConfig | undefined;
     };
 }
+/**
+ * TagTierFallback marks an upstream as part of the fallback tier, used only
+ * when the other upstreams are unavailable.
+ */
+export declare const TagTierFallback = "tier:fallback";
 /**
  * RateLimitCountMode selects the accounting unit an upstream's rate-limit
  * budget charges per call.
@@ -743,6 +836,7 @@ export interface UpstreamConfig {
     endpoint?: string;
     evm?: EvmUpstreamConfig;
     svm?: SvmUpstreamConfig;
+    jsonrpc?: JsonrpcUpstreamConfig;
     jsonRpc?: JsonRpcUpstreamConfig;
     grpc?: GrpcUpstreamConfig;
     ignoreMethods?: string[];
@@ -1360,12 +1454,14 @@ export interface NetworkConfig {
     failsafe?: (FailsafeConfig | undefined)[];
     evm?: EvmNetworkConfig;
     svm?: SvmNetworkConfig;
+    jsonrpc?: JsonrpcNetworkConfig;
     selectionPolicy?: SelectionPolicyConfig;
     directiveDefaults?: DirectiveDefaultsConfig;
     alias?: string;
     methods?: MethodsConfig;
     multiplexing?: boolean;
     staticResponses?: (StaticResponseConfig | undefined)[];
+    failover?: FailoverConfig;
     /**
      * Integrity overrides the project-wide data-integrity configuration for this
      * network. Merges over the project block (network wins).
@@ -1534,6 +1630,223 @@ export interface SvmUpstreamConfig {
      */
     checkGenesisHash?: boolean;
 }
+/**
+ * JsonrpcUpstreamConfig carries per-upstream binding for the generic JSON-RPC
+ * architecture. Unlike EVM (chainId detectable over RPC) and SVM (cluster is a
+ * protocol fact), a generic endpoint exposes nothing eRPC can probe to learn
+ * which jsonrpc network it serves — the operator declares it.
+ */
+export interface JsonrpcUpstreamConfig {
+    /**
+     * NetworkId is the slug of the jsonrpc network this upstream serves;
+     * composes the upstream's network ID "jsonrpc:<slug>". Required for
+     * upstreams with type: jsonrpc. Charset mirrors the network slug rule.
+     */
+    networkId: string;
+}
+/**
+ * JsonrpcNetworkConfig carries the network-level configuration for generic
+ * JSON-RPC networks. The architecture carries no protocol logic: the optional
+ * blocks below are operator-declared facts (probe methods, error shapes) that
+ * the generic machinery consumes, never protocol knowledge baked into eRPC.
+ */
+export interface JsonrpcNetworkConfig {
+    /**
+     * NetworkId is the user-chosen slug composing the full network ID
+     * "jsonrpc:<slug>". Charset: letters, digits, '-', '_', '.'.
+     */
+    networkId: string;
+    /**
+     * StatePoller optionally declares how to poll this network's tip
+     * (and optionally finalized tip, availability floor, and a health
+     * probe). Absent = no poller, no block tracking — the v1 property.
+     */
+    statePoller?: JsonRpcStatePollerConfig;
+    /**
+     * ErrorRules classifies JSON-RPC error shapes that the generic extractor
+     * cannot derive (e.g. NEAR's verror cause names). Evaluated in order,
+     * first match wins; no match = v1 fallthrough behavior.
+     */
+    errorRules?: (JsonRpcClassificationRuleConfig | undefined)[];
+}
+/**
+ * JsonRpcStatePollerConfig declares the generic state poller probes.
+ * All probes are optional except Tip (required when the block is present).
+ */
+export interface JsonRpcStatePollerConfig {
+    /**
+     * Interval between poll ticks. Default 5s when unset.
+     */
+    interval?: Duration;
+    /**
+     * Tip polls the chain's best head. Required when statePoller is present.
+     */
+    tip?: JsonRpcStateProbeConfig;
+    /**
+     * FinalizedTip optionally polls a second, finalized counter (NEAR's
+     * block{finality:final}, XRPL's validated_ledger.seq, Substrate's
+     * two-hop chain_getFinalizedHead -> chain_getHeader).
+     */
+    finalizedTip?: JsonRpcStateProbeConfig;
+    /**
+     * Floor optionally polls the node's availability floor (Stellar
+     * getHealth.oldestLedger, XRPL server_info.complete_ledgers).
+     */
+    floor?: JsonRpcStateProbeConfig;
+    /**
+     * Health optionally declares a liveness probe; a JSON-RPC or transport
+     * error marks the upstream unhealthy for the tick.
+     */
+    health?: JsonRpcStateProbeConfig;
+}
+/**
+ * JsonRpcStateProbeConfig declares one poller probe: a JSON-RPC method, a
+ * dot-path into the response, and how to decode the value at that path.
+ */
+export interface JsonRpcStateProbeConfig {
+    /**
+     * Method is the JSON-RPC method to call (e.g. "status", "getLatestLedger").
+     */
+    method: string;
+    /**
+     * Path is a dot-path from the response root (e.g. "$.result.sync_info.latest_block_height").
+     */
+    path: string;
+    /**
+     * Encoding decodes the value: auto (default) accepts a JSON number, a
+     * decimal string, or a 0x hex string; number|string|hex force one form.
+     * An unparseable sample is a skipped tick, never a crash.
+     */
+    encoding?: string;
+    /**
+     * Params, when set, is sent verbatim as the JSON-RPC params member.
+     */
+    params?: any[];
+    /**
+     * RangeStart parses the value as a (possibly disjoint) ledger range
+     * string ("a-b,c-d", "empty") and keeps only the start — XRPL's
+     * complete_ledgers. Non-range values mean "floor unknown", never 0.
+     */
+    rangeStart?: boolean;
+    /**
+     * UnhealthyWhen, when it matches the probe response, treats the upstream
+     * as unhealthy for this tick exactly like a failed probe (e.g. CometBFT
+     * catching_up, NEAR syncing).
+     */
+    unhealthyWhen?: JsonRpcValueMatcherConfig;
+    /**
+     * ThenCall expresses a two-hop resolve (Substrate: block hash -> header
+     * number): the value at Path becomes the sole param of ThenCall.Method
+     * and the counter is read from ThenCall.Path instead.
+     */
+    thenCall?: JsonRpcThenCallConfig;
+}
+/**
+ * JsonRpcThenCallConfig is the resolve hop of a two-tip probe.
+ */
+export interface JsonRpcThenCallConfig {
+    /**
+     * Method is the second JSON-RPC method to call.
+     */
+    method: string;
+    /**
+     * PassValueAsParam sends the first call's extracted value as the sole
+     * JSON-RPC param. The only supported parameterization in v2; required.
+     */
+    passValueAsParam: boolean;
+    /**
+     * Path is the dot-path into the second response.
+     */
+    path: string;
+    /**
+     * Encoding decodes the second value (same grammar as the probe's).
+     */
+    encoding?: string;
+}
+/**
+ * JsonRpcValueMatcherConfig matches a value extracted from a response by
+ * path. Values are stringified on both sides before comparison, so chain
+ * codes that arrive as numbers (Starknet 24) or strings (Substrate "4003")
+ * both work. At most one of Equals/In may be set.
+ */
+export interface JsonRpcValueMatcherConfig {
+    path: string;
+    equals?: any;
+    in?: any[];
+}
+/**
+ * JsonRpcClassificationRuleConfig declares how to classify a response shape
+ * that the generic extractor cannot derive. Used for network-level errorRules
+ * (JSON-RPC error envelopes and result-embedded failures) and for per-method
+ * resultClassifications (result-embedded failures only).
+ */
+export interface JsonRpcClassificationRuleConfig {
+    /**
+     * Match selects the envelope: ResultPath inspects the JSON-RPC result,
+     * ErrorPath inspects the error object (e.g. NEAR's $.error.cause.name).
+     */
+    match?: JsonRpcClassificationMatchConfig;
+    /**
+     * CodePath + CodeMap implement two-stage matching (XRPL): the rule
+     * matches the envelope, then the sub-code extracted from CodePath picks
+     * the class. CodeMap without CodePath is invalid.
+     */
+    codePath?: string;
+    codeMap?: {
+        [key: string]: string;
+    };
+    /**
+     * ClassifyAs is the class for a matched rule without CodeMap:
+     * missingData | clientError | serverError.
+     */
+    classifyAs?: string;
+    /**
+     * Default is the class for a matched rule whose CodeMap has no entry
+     * for the extracted sub-code.
+     */
+    default?: string;
+}
+/**
+ * JsonRpcClassificationMatchConfig selects a value inside a JSON-RPC
+ * response. Exactly one of ResultPath/ErrorPath must be set; at most one of
+ * Equals/In/IsNull. Values are stringified on both sides before comparison.
+ */
+export interface JsonRpcClassificationMatchConfig {
+    resultPath?: string;
+    errorPath?: string;
+    equals?: any;
+    in?: any[];
+    isNull?: boolean;
+}
+/**
+ * FinalityFromParamConfig declares that a method's finality is carried by a
+ * request param. The mapping table is the operator's assertion about the
+ * chain's finality model; eRPC never validates values against a chain enum.
+ */
+export interface FinalityFromParamConfig {
+    /**
+     * Key matches any object param containing this key (e.g. NEAR's
+     * "finality"). Mutually exclusive with Index.
+     */
+    key?: string;
+    /**
+     * Index selects a positional param (e.g. Starknet's block_id at index 0).
+     * Mutually exclusive with Key.
+     */
+    index?: number;
+    /**
+     * Map converts the stringified param value to a finality enum value
+     * (finalized|unfinalized|realtime|unknown).
+     */
+    map: {
+        [key: string]: string;
+    };
+    /**
+     * Default applies when the param is absent, non-string, or unmapped.
+     * Required — no silent unknown.
+     */
+    default: string;
+}
 export interface EvmNetworkConfig {
     chainId: number;
     fallbackFinalityDepth?: number;
@@ -1600,6 +1913,13 @@ export interface EvmNetworkConfig {
      * Default includes common point-lookup methods like eth_getBlockByNumber, eth_getTransactionByHash, etc.
      */
     markEmptyAsErrorMethods?: string[];
+    /**
+     * StripSubscribeFromBlockZero removes a zero `fromBlock` from eth_subscribe
+     * logs filters before forwarding upstream. fromBlock has no meaning for a
+     * live subscription, and backends that prune history reject it.
+     * DEFAULT: false.
+     */
+    stripSubscribeFromBlockZero?: boolean;
     /**
      * DynamicBlockTimeDebounceMultiplier scales the EMA-estimated block time to derive
      * the debounce interval for block polling. A value of 0.7 means debounce = 70% of
@@ -2490,6 +2810,7 @@ export interface ExecStateSnapshot {
 export type NetworkArchitecture = string;
 export declare const ArchitectureEvm: NetworkArchitecture;
 export declare const ArchitectureSvm: NetworkArchitecture;
+export declare const ArchitectureJsonRpc: NetworkArchitecture;
 export type Network = any;
 /**
  * EvmNetwork is the EVM-specific view of a Network. Callers that need

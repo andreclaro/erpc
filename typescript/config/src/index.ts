@@ -33,6 +33,7 @@ export type {
   IncludeIfTarget,
   EvmNetworkConfigForDefaults,
   SvmNetworkConfigForDefaults,
+  JsonrpcNetworkConfigForDefaults,
 } from "./types";
 export {
   // Data finality const exports
@@ -63,9 +64,11 @@ export {
   // Architecture export
   ArchitectureEvm,
   ArchitectureSvm,
+  ArchitectureJsonRpc,
   // Upstream types const exprots
   UpstreamTypeEvm,
   UpstreamTypeSvm,
+  UpstreamTypeJsonRpc,
   // Auth types
   AuthTypeSecret,
   AuthTypeJwt,

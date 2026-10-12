@@ -27,6 +27,7 @@ packages:
         AuthStrategyConfig as TsAuthStrategyConfig,
         EvmNetworkConfigForDefaults as TsEvmNetworkConfigForDefaults,
         SvmNetworkConfigForDefaults as TsSvmNetworkConfigForDefaults,
+        JsonrpcNetworkConfigForDefaults as TsJsonrpcNetworkConfigForDefaults,
         SelectionPolicyEvalFunction,
         BoolOrString
       } from "./types"

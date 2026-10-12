@@ -1,0 +1,427 @@
+---
+title: Generic JSON-RPC networks
+description: Proxy any JSON-RPC 2.0 endpoint — Starknet, Stellar, NEAR, CometBFT chains, your own services — with eRPC's load balancing, retries, hedging, rate limiting, and monitoring. No protocol logic required.
+---
+
+import { LLMsTxtLink, AISection, ConfigTabs, SourceLink, PromptExample } from "../../../components";
+
+<LLMsTxtLink />
+
+# Generic JSON-RPC networks
+
+Not every JSON-RPC endpoint speaks `eth_*`. The `jsonrpc` architecture proxies **any**
+JSON-RPC 2.0 over HTTP POST endpoint with everything eRPC is good at — upstream scoring,
+retry/hedge/timeout/circuit-breaker, rate limiting, singleflight, auth, batching, aliases,
+static responses, and monitoring — while carrying **zero protocol logic**: no block
+tracking, no finality inference, no method semantics.
+
+Validated targets: **Starknet**, **Stellar RPC**, **NEAR**, **Noble/CometBFT**,
+**Polkadot Asset Hub (Substrate)**, and XRPL-flavored dialects (with classification
+rules). Also custom internal JSON-RPC services.
+
+- Network ID: `jsonrpc:<slug>` (you choose the slug). Routed at `/main/jsonrpc/<slug>`.
+- Upstream `type` is **always explicit** — `jsonrpc` is never inferred.
+- Caching is **off by default**; opt in per method with TTL policies, or declare
+  method finality to unlock finality-aware and permanent caching.
+
+## Quick taste
+
+Proxy two Starknet endpoints with retries and a 5-minute TTL cache for a
+hash-pinned read declared `finalized`:
+
+<ConfigTabs
+  path="projects[].networks[] + database.jsonRpcCache"
+  focusYaml="3-18"
+  focusTs="3-21"
+  yaml={`projects:
+  - id: main
+    networks:
+      - architecture: jsonrpc
+        jsonrpc:
+          networkId: starknet
+        upstreams:
+          - id: starknet-a
+            type: jsonrpc
+            jsonrpc: { networkId: starknet }
+            endpoint: https://starknet-a.example/rpc/v0_8
+          - id: starknet-b
+            type: jsonrpc
+            jsonrpc: { networkId: starknet }
+            endpoint: https://starknet-b.example/rpc/v0_8
+        failsafe:
+          - matchMethod: "*"
+            timeout: { duration: 15s }
+            retry: { maxAttempts: 2 }
+        methods:
+          definitions:
+            starknet_getTransactionReceipt: { finalized: true }
+database:
+  jsonRpcCache:
+    connectors:
+      - { id: memory, driver: memory, memory: { maxItems: 10000 } }
+    policies:
+      - network: "jsonrpc:starknet"
+        method: "starknet_getTransactionReceipt"
+        finality: finalized
+        connector: memory`}
+  ts={`projects: [{
+  id: "main",
+  networks: [{
+    architecture: "jsonrpc",
+    jsonrpc: { networkId: "starknet" },
+    upstreams: [{
+      id: "starknet-a",
+      type: "jsonrpc",
+      jsonrpc: { networkId: "starknet" },
+      endpoint: "https://starknet-a.example/rpc/v0_8",
+    }, {
+      id: "starknet-b",
+      type: "jsonrpc",
+      jsonrpc: { networkId: "starknet" },
+      endpoint: "https://starknet-b.example/rpc/v0_8",
+    }],
+    failsafe: [{
+      matchMethod: "*",
+      timeout: { duration: "15s" },
+      retry: { maxAttempts: 2 },
+    }],
+    methods: {
+      definitions: {
+        starknet_getTransactionReceipt: { finalized: true },
+      },
+    },
+  }],
+}],
+database: {
+  jsonRpcCache: {
+    connectors: [{ id: "memory", driver: "memory", memory: { maxItems: 10000 } }],
+    policies: [{
+      network: "jsonrpc:starknet",
+      method: "starknet_getTransactionReceipt",
+      finality: "finalized",
+      connector: "memory",
+    }],
+  },
+}`}
+/>
+
+## Agent reference
+
+Copy one of these prompts into your AI agent session — each points at this page's
+machine-readable reference so it can do the work correctly:
+
+<PromptExample
+	n={1}
+	title="proxy a non-EVM chain"
+	defaultOpen
+	prompt={`I need eRPC to load-balance and fault-tolerate traffic to <chain name> whose JSON-RPC
+endpoint is <url>. It uses method names like <example methods> and has no eth_* surface. Set up a
+generic jsonrpc network with retry, timeout, and hedge failsafe, plus per-method rate limiting.
+Work with my existing eRPC config. Read the full reference first:
+https://docs.erpc.cloud/config/projects/generic-networks.llms.txt`}
+/>
+
+<PromptExample
+	n={2}
+	title="cache reads safely on a generic chain"
+	prompt={`My eRPC instance proxies <chain> via a jsonrpc network. I want caching for
+<method> but eRPC cannot infer finality there. Show me the safe options: TTL-only policies keyed
+on finality: unknown, or operator-declared finality (finalized/unfinalized/realtime) with the
+matching policy finality, including any result-embedded failure classification the method needs
+(e.g. NOT_FOUND-as-result). Work with my existing eRPC config. Reference:
+https://docs.erpc.cloud/config/projects/generic-networks.llms.txt`}
+/>
+
+<PromptExample
+	n={3}
+	title="track chain tip for scoring"
+	prompt={`Add a generic state poller to my jsonrpc network so upstream selection gets
+lag-aware scoring: poll <tip method> and extract the height from <json path>, with an
+unhealthyWhen rule for the node's syncing flag if one exists. Explain what the poller feeds
+and what it deliberately does not do (no reorg detection, no finality inference).
+Work with my existing eRPC config. Reference:
+https://docs.erpc.cloud/config/projects/generic-networks.llms.txt`}
+/>
+
+<AISection
+	title="Generic JSON-RPC networks — full agent reference"
+	hint="Everything an agent needs to configure generic JSON-RPC networks: schema, validation rules, worked per-chain configs, edge cases, observability."
+>
+
+### How it works
+
+The `jsonrpc` architecture is a registration on the existing `ArchitectureHandler`
+registry (`common/architecture.go`) with **no-op hooks** — the generic machinery
+(scoring, failsafe, rate limiting, singleflight, multiplexing, aliases, static
+responses, auth, metrics) is architecture-agnostic and works unchanged. Design razor:
+the architecture knows **nothing** about the protocol it proxies — every behavior that
+needs protocol facts is **operator-declared configuration** consumed by generic code
+paths. Undeclared methods behave like plain v1 passthrough.
+
+What exists by construction:
+
+- **No protocol probing.** `detectFeatures` stores the declared network ID and returns
+  (`upstream/upstream.go`); zero protocol calls at bootstrap.
+- **No poller unless configured.** The per-upstream poller exists for `type: jsonrpc`
+  but its loop starts only when `jsonrpc.statePoller` is configured
+  (`upstream/upstream.go` SetNetworkConfig → `Configure`). Without the block: no block
+  tracking, finality always `unknown` (`erpc/networks.go` GetFinality).
+- **Generic error taxonomy.** The extractor maps JSON-RPC 2.0 spec codes
+  `-32700`/`-32600`/`-32601`/`-32602` to **non-retryable client-side** errors; every
+  other JSON-RPC error keeps the existing retryable server-side fallthrough
+  (`clients/http_json_rpc_client.go`). Transport errors, timeouts, and HTTP 5xx stay
+  retryable; HTTP 429 follows rate-limit policy.
+
+### Config schema
+
+Network block (struct `JsonrpcNetworkConfig` at <SourceLink file="common/config.go" lines="2648-2663" />):
+
+| Field | Type | Default | Behavior / footguns |
+|---|---|---|---|
+| `networks[].architecture` | `"jsonrpc"` | — | Required. New enum value alongside `evm`/`svm` (`common/network.go`). |
+| `networks[].jsonrpc.networkId` | `string` | **required** | User-chosen slug composing the network ID `jsonrpc:<slug>`. Charset: letters, digits, `-`, `_`, `.` — validated at <SourceLink file="common/validation.go" lines="1877-1890" />. Routed at `/main/jsonrpc/<slug>`. |
+| `networks[].jsonrpc.statePoller.interval` | `Duration` | `5s` | Poll cadence per upstream. Set it ≥ the chain's block time; the probe cost is per-upstream per-interval. |
+| `networks[].jsonrpc.statePoller.tip` | probe | **required when `statePoller` present** | Tip probe: `method` + dot `path` into the response (e.g. `$.result.sync_info.latest_block_height`), `encoding` (`auto`\|`number`\|`string`\|`hex`), optional verbatim `params`, optional `unhealthyWhen`, optional `thenCall`. |
+| `networks[].jsonrpc.statePoller.finalizedTip` | probe | — | Second counter (e.g. NEAR `block` with `params: {"finality":"final"}` → `$.result.header.height`). `thenCall` expresses a two-hop resolve (Substrate `chain_getFinalizedHead` → hash → `chain_getHeader`); `passValueAsParam: true` is required. A failed hop invalidates only this counter for the tick. |
+| `networks[].jsonrpc.statePoller.floor` | probe | — | Availability floor, e.g. Stellar `getHealth` → `$.result.oldestLedger`; XRPL `server_info.complete_ledgers` with `rangeStart: true` parses `"a-b,c-d"`/`"empty"` and keeps `a`. Values parsing to 0 or absent mean **floor unknown, never floor 0** (live CometBFT nodes report `"0"`). |
+| `networks[].jsonrpc.statePoller.health` | probe | — | Liveness probe; a JSON-RPC/transport error marks the upstream unhealthy for the tick. Content-free success bodies (CometBFT `{"result":{}}`) still work as up/down checks — sync judgment belongs in `unhealthyWhen`. |
+| `networks[].jsonrpc.errorRules` | rule[] | — | Ordered, first match wins. `match`: exactly one of `resultPath`/`errorPath`, plus one of `equals`/`in`/`isNull` (values **stringified both sides** — chain codes arrive as numbers or strings depending on the wire). `codePath`+`codeMap`+`default` for two-stage sub-code mapping (XRPL). Class: `missingData` (retryable, never cached) \| `clientError` (non-retryable) \| `serverError` (retryable). |
+
+Method declarations (`methods.definitions.<method>`, struct `CacheMethodConfig` at
+<SourceLink file="common/config.go" lines="345-381" />):
+
+| Field | Type | Default | Behavior |
+|---|---|---|---|
+| `finalized` | `bool` | `false` | Response uniquely determined by params, immutable once it exists → permanent-cache eligible via `finality: finalized` policies. |
+| `unfinalized` | `bool` | `false` | Pinned to a slot/height/hash but fork-droppable → TTL policies keyed on `finality: unfinalized`. A `finalized` policy's Get-matching already covers unfinalized responses. |
+| `realtime` | `bool` | `false` | Moving-head read → TTL policies keyed on `finality: realtime`. |
+| `finalityFromParam` | object | — | Per-call finality carried by a request param: `key` (find any object param holding it) XOR `index` (positional), `map` (stringified value → finality), `default` (**required** — absent/non-string/unmapped values land here). Mutually exclusive with the three flags. |
+| `cacheTipBucket` | `int` | `0` (off) | Partition the cache key by `tip / N`; **requires `jsonrpc.statePoller`** (a frozen bucket would cache forever). Compose with a `realtime` TTL policy bounding staleness within a bucket. |
+| `resultClassifications` | rule[] | — | Per-method result-embedded failure shapes (`match` + `classifyAs` only). A matched rule converts the response into an error **before** the cache and consensus see it. |
+
+The four declarations are mutually exclusive per method (validation rejects
+combinations), and generic networks **do not inherit** the EVM/SVM default method
+tables (`common/defaults.go` — `SetDefaultsGeneric`).
+
+Upstream binding:
+
+| Field | Type | Default | Behavior |
+|---|---|---|---|
+| `upstreams[].type` | `"jsonrpc"` | — | **Explicit only.** The empty-type→evm back-compat default does not apply; a `jsonrpc` upstream without the type is rejected at validation (`validateJsonRpcUpstreamNetworkPairing`). |
+| `upstreams[].jsonrpc.networkId` | `string` | **required** | The slug this upstream serves. A generic endpoint exposes nothing probeable to derive this, so the operator declares it (parallel to `svm.cluster`). The composed ID must match a declared jsonrpc network, else the upstream would bootstrap healthy and serve nothing. |
+
+Cache (`database.jsonRpcCache`) — same `CacheConfig` schema as `evmJsonRpcCache`
+(<SourceLink file="common/config.go" lines="306-311" />): connectors, policies
+(`network`, `method`, `params`, `finality`, `ttl`, `empty`, `appliesTo`,
+`minItemSize`/`maxItemSize`), compression. Cache keys are
+`{networkId}:{tipBucket?}:{cacheKeySuffix?}:{method}:{paramsHash}` — no blockRef
+segment. Policies select generic traffic by `finality` exactly as on other
+architectures; with no declaration every request resolves to `finality: unknown`.
+
+### Worked per-chain configurations
+
+Grounded in live-verified wire formats (2026-10). Use as starting points, not gospel —
+the mapping table in `finalityFromParam` is **your assertion** about the chain.
+
+**Starknet** — versioned URL paths must forward verbatim; one tip counter
+(`starknet_blockNumber` reports the L2-finalized `latest` head):
+
+```yaml
+networks:
+  - architecture: jsonrpc
+    jsonrpc:
+      networkId: starknet
+      statePoller:
+        tip: { method: starknet_blockNumber, path: "$.result" }
+      errorRules:
+        - match: { errorPath: "$.error.code", in: ["24", "29"] } # BlockNotFound, TxnHashNotFound
+          classifyAs: missingData
+    methods:
+      definitions:
+        starknet_getBlockWithTxs:
+          finalityFromParam:
+            index: 0
+            map: { l1_accepted: finalized, latest: realtime, pre_confirmed: realtime }
+            default: unfinalized
+        starknet_getTransactionReceipt: { finalized: true } # REVERTED is a cacheable result
+        starknet_blockNumber: { realtime: true }
+```
+
+**Stellar RPC** — ledgers final on close, one counter; `NOT_FOUND` is a result, never
+cache it; `FAILED` **is** a final cacheable result (do not over-broaden `in:` lists):
+
+```yaml
+networks:
+  - architecture: jsonrpc
+    jsonrpc:
+      networkId: stellar
+      statePoller:
+        tip:   { method: getLatestLedger, path: "$.result.sequence" }
+        floor: { method: getHealth, path: "$.result.oldestLedger" }
+    methods:
+      definitions:
+        getLedgerEntries: { finalized: true }
+        getTransaction:
+          finalized: true # safe ONLY with the rule below
+          resultClassifications:
+            - match: { resultPath: "$.result.status", in: ["NOT_FOUND"] }
+              classifyAs: missingData
+        getLatestLedger: { realtime: true, cacheTipBucket: 1 }
+```
+
+**NEAR** — `finality` param is required by nearcore; verror taxonomy keys on
+`error.cause.name`:
+
+```yaml
+networks:
+  - architecture: jsonrpc
+    jsonrpc:
+      networkId: near
+      statePoller:
+        tip:
+          method: status
+          path: "$.result.sync_info.latest_block_height"
+          unhealthyWhen: { path: "$.result.sync_info.syncing", equals: true }
+        finalizedTip:
+          method: block
+          params: { finality: final }
+          path: "$.result.header.height"
+      errorRules:
+        - match: { errorPath: "$.error.cause.name", in: ["UNKNOWN_BLOCK", "GARBAGE_COLLECTED_BLOCK", "UNAVAILABLE_SHARD", "NO_SYNCED_BLOCKS", "NOT_SYNCED_YET", "NODE_IS_SYNCING"] }
+          classifyAs: missingData
+    methods:
+      definitions:
+        block:
+          finalityFromParam:
+            key: finality
+            map: { final: finalized, near-final: unfinalized, optimistic: realtime }
+            default: realtime
+        tx: { finalized: true }
+        query: { realtime: true } # polymorphic; params-hashed keys keep variants apart
+```
+
+**Noble / CometBFT** — heights are decimal strings; `catching_up` is the sync flag;
+null-body not-found:
+
+```yaml
+networks:
+  - architecture: jsonrpc
+    jsonrpc:
+      networkId: noble
+      statePoller:
+        tip:
+          method: status
+          path: "$.result.sync_info.latest_block_height"
+          unhealthyWhen: { path: "$.result.sync_info.catching_up", equals: true }
+    methods:
+      definitions:
+        block: { finalized: true } # instant single-block BFT finality
+        abci_query:
+          realtime: true
+          resultClassifications:
+            - match: { resultPath: "$.result.response.code", equals: "18" } # pruned state
+              classifyAs: missingData
+```
+
+**Polkadot Asset Hub (Substrate)** — hex heights; finalized tip is a two-hop resolve;
+GRANDPA-finalized lags best head by ~18-24 blocks live:
+
+```yaml
+networks:
+  - architecture: jsonrpc
+    jsonrpc:
+      networkId: polkadot-asset-hub
+      statePoller:
+        tip: { method: chain_getHeader, path: "$.result.number", encoding: hex }
+        finalizedTip:
+          method: chain_getFinalizedHead
+          path: "$.result"
+          thenCall: { method: chain_getHeader, passValueAsParam: true, path: "$.result.number", encoding: hex }
+      errorRules:
+        - match: { errorPath: "$.error.code", equals: "4003" } # UnknownBlock / pruned state
+          classifyAs: missingData
+    methods:
+      definitions:
+        chain_getBlock: { unfinalized: true }
+```
+
+**XRP Ledger** — *not* JSON-RPC 2.0 (no `jsonrpc` field, one-item `params` array, no
+batching): every error is result-embedded at HTTP 200; default ledger differs by server
+software (xrpld `current` vs Clio `validated`) — always pin:
+
+```yaml
+networks:
+  - architecture: jsonrpc
+    jsonrpc:
+      networkId: xrpl
+      statePoller:
+        tip:   { method: server_info, path: "$.result.info.validated_ledger.seq" }
+        floor: { method: server_info, path: "$.result.info.complete_ledgers", rangeStart: true }
+      errorRules:
+        - match: { resultPath: "$.result.status", equals: "error" }
+          codePath: "$.result.error"
+          codeMap:
+            txnNotFound: missingData
+            lgrNotFound: missingData
+            actNotFound: missingData
+            noCurrent:   missingData
+            tooBusy:     serverError
+            unknownCmd:  clientError
+          default: serverError
+    methods:
+      definitions:
+        ledger:
+          finalityFromParam:
+            key: ledger_index
+            map: { validated: finalized, current: realtime, closed: realtime }
+            default: realtime
+        tx: { finalized: true }
+```
+
+### Validation (config-load rejections)
+
+All evaluated at config load (`common/validation.go`), direct errors:
+
+1. `evm`/`svm` blocks on a `jsonrpc` network, or a `jsonrpc` block on an `evm`/`svm` network.
+2. Upstreams declaring `jsonrpc.networkId` (or typed `jsonrpc`) without `type: jsonrpc`; a `jsonrpc` upstream whose slug matches no declared network.
+3. Failsafe `consensus` on a `jsonrpc` network unless `matchMethod` is scoped (not `*`) and every matched method carries a finality declaration; `realtime`-matched consensus requires `statePoller`. `preferBlockHeadLeader`/`onlyBlockHeadLeader` behaviors are always rejected (leader election is EVM-gated, `consensus/analysis.go`).
+4. Empty/invalid-character `jsonrpc.networkId`; duplicate network IDs within a project (existing uniqueness rule).
+5. More than one of `finalized`/`unfinalized`/`realtime`/`finalityFromParam` on one method; `finalityFromParam` with both/neither of `key`/`index`, empty `map`, missing/invalid `default` or map values.
+6. `cacheTipBucket` without `statePoller`, or `< 1`.
+7. `statePoller` without `tip`; probes without `method`/`path`; `thenCall` without `passValueAsParam`; `encoding` outside `auto|number|string|hex`.
+8. Classification rules with empty match, unknown `classifyAs`, `codeMap` without `codePath`, or `isNull` combined with `equals`/`in`.
+9. A failsafe `matchFinality` other than `unknown` with no declared methods logs a **warning** (it silently never matches), not an error.
+
+### Edge cases & gotchas
+
+1. **Retries on application errors.** Unknown JSON-RPC error codes are retryable server-side. A service whose business errors must not be retried should use the four spec codes, per-method failsafe scoping (`matchMethod`), or `errorRules`.
+2. **Hedge/retry duplicate side effects.** eRPC cannot detect non-idempotent methods. Cross-chain research finding: every validated target is idempotent under *byte-identical* resubmission (Starknet `59 DUPLICATE_TX`, Stellar `DUPLICATE`, NEAR apply-exactly-once, Substrate `1013`, XRPL account-sequence). Distinct payloads with the same nonce can double-apply — disable hedge/retry per method for that traffic via `matchMethod`.
+3. **Non-envelope error bodies exist on the wire.** Stellar parse errors → HTTP 500 `[-32700] invalid request value`; XRPL → plain-text 400/503 (`Server is overloaded` is its rate-limit signal). The transport layer treats non-JSON bodies as retryable server-side; never pattern-match message text — key on codes/paths only.
+4. **Batching is a spectrum.** CometBFT/Substrate support arrays; Starknet implements but doesn't spec it; Stellar works but undocumented; NEAR executes only `query` inside batches (`-32601` for others); **XRPL rejects arrays outright**. Treat batching as a per-upstream capability; batch element errors classify per element.
+5. **Stellar `NOT_FOUND` vs `FAILED`.** `FAILED` is a final, cacheable result; `NOT_FOUND` is transient (pending) or permanent (pruned) and must never be cached. Over-broad `in:` lists silently never-cache. Same trap: Starknet `REVERTED` and NEAR `result.status.Failure` are cacheable outcomes of failed transactions.
+6. **Retention errors are per-upstream state.** Stellar `-32600` carries the node's live window; identical requests succeed on fuller upstreams. Classify as `missingData`, never `clientError`.
+7. **`finalityFromParam` + batching.** Batch elements classify individually, exactly like per-element errors.
+8. **XRPL `params` shape.** `params` is a one-item array wrapping an object — `key` scanning finds it; `index: 0` extracts the whole object and lands on `default` (validation can't see this; the warning-worthy misconfiguration is documented in the spec).
+9. **Poller cost on paid vendors.** The tip probe fires per upstream per interval; on metered vendors this dominates background cost. Keep `interval` ≥ block time.
+10. **Error bodies echo secrets and live state.** XRPL error results copy the full request (including signing secrets in sign-and-submit mode); Stellar/CometBFT messages embed live ledger windows. Sanitize before logging; key on codes/paths only.
+
+### Non-goals (deliberately)
+
+- No block-hash chaining, reorg detection, or integrity checks — a tip *number* cannot prove ancestry.
+- No served-tip floors or block-availability guards (architecture-hook features that presume per-block semantics).
+- No EVM-style consensus leader election.
+- No websocket-only method surfaces (subscriptions stay unroutable over eRPC's HTTP POST).
+- No third-party vendor integrations — explicit endpoint upstreams only.
+
+### Observability
+
+All existing metric families apply unchanged; the `finality` label reads `unknown` unless
+methods carry declarations. Relevant families:
+
+- `erpc_network_request_total{network, method, finality="unknown"}` — generic traffic baseline.
+- `erpc_upstream_request_total{upstream, network, method}` + error-rate/latency rollups — per-upstream scoring inputs (`health/tracker.go`).
+- `erpc_network_cache_hits_total` / `erpc_network_cache_misses_total` (labels incl. `finality`, `connector`) — once `database.jsonRpcCache` policies exist (`data/cache_executor.go`).
+- `erpc_upstream_block_head_lag` / `erpc_upstream_finalization_lag` — populated by the generic state poller via the standard tracker setters; consumed by selection policies (`internal/policy/eval.go`) and the catch-up panels (see `monitoring/catch-up-metrics.md`).
+- Cordons: poller-driven unhealthy ticks emit the standard cordon logs/metrics (`upstream.Cordon`).
+
+</AISection>
