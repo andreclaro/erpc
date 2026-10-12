@@ -7827,6 +7827,7 @@ func TestNetwork_Forward(t *testing.T) {
 			metricsTracker,
 			nil, // evmJsonRpcCache
 			nil, // svmJsonRpcCache
+			nil, // jsonRpcCache
 			rateLimitersRegistry,
 			prj.policyEngine,
 			&logger,

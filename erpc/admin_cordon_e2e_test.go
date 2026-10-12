@@ -87,7 +87,7 @@ func TestAdminCordon_TwoInstancesConvergeThroughSharedState(t *testing.T) {
 		ssr, err := data.NewSharedStateRegistry(ctx, &logger, ssrCfg)
 		require.NoError(t, err)
 
-		instance, err := NewERPC(ctx, &logger, ssr, nil, nil, cfg)
+		instance, err := NewERPC(ctx, &logger, ssr, nil, nil, nil, cfg)
 		require.NoError(t, err)
 		instance.Bootstrap(ctx)
 

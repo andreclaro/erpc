@@ -539,7 +539,7 @@ func TestSvm_MixedProjectWithEvm(t *testing.T) {
 	reg, err := NewProjectsRegistry(
 		ctx, &log.Logger,
 		[]*common.ProjectConfig{prjCfg},
-		ssr, nil, nil, rateLimiters,
+		ssr, nil, nil, nil, rateLimiters,
 		thirdparty.NewVendorsRegistry(),
 		nil, nil,
 	)

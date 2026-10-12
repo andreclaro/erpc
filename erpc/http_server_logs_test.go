@@ -113,7 +113,7 @@ func TestHttp_EvmGetLogs_SplitOnError_MergedResponse(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	erpcInstance, err := NewERPC(ctx, &logger, ssr, nil, nil, cfg)
+	erpcInstance, err := NewERPC(ctx, &logger, ssr, nil, nil, nil, cfg)
 	require.NoError(t, err)
 	erpcInstance.Bootstrap(ctx)
 	require.NoError(t, err)
@@ -258,7 +258,7 @@ func TestHttp_EvmGetLogs_ProactiveRangeSplit_MergedResponse(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	erpcInstance, err := NewERPC(ctx, &logger, ssr, nil, nil, cfg)
+	erpcInstance, err := NewERPC(ctx, &logger, ssr, nil, nil, nil, cfg)
 	require.NoError(t, err)
 	erpcInstance.Bootstrap(ctx)
 	require.NoError(t, err)
@@ -498,7 +498,7 @@ func TestHttp_EvmGetLogs_SplitOnError_ByAddresses_MergedResponse(t *testing.T) {
 
 	ssr, err := data.NewSharedStateRegistry(ctx, &logger, &common.SharedStateConfig{Connector: &common.ConnectorConfig{Driver: "memory", Memory: &common.MemoryConnectorConfig{MaxItems: 100_000, MaxTotalSize: "1GB"}}})
 	require.NoError(t, err)
-	erpcInstance, err := NewERPC(ctx, &logger, ssr, nil, nil, cfg)
+	erpcInstance, err := NewERPC(ctx, &logger, ssr, nil, nil, nil, cfg)
 	require.NoError(t, err)
 	erpcInstance.Bootstrap(ctx)
 	require.NoError(t, err)
@@ -596,7 +596,7 @@ func TestHttp_EvmGetLogs_SplitOnError_ByTopic0ORList_MergedResponse(t *testing.T
 	}
 	ssr, err := data.NewSharedStateRegistry(ctx, &logger, &common.SharedStateConfig{Connector: &common.ConnectorConfig{Driver: "memory", Memory: &common.MemoryConnectorConfig{MaxItems: 100_000, MaxTotalSize: "1GB"}}})
 	require.NoError(t, err)
-	erpcInstance, err := NewERPC(ctx, &logger, ssr, nil, nil, cfg)
+	erpcInstance, err := NewERPC(ctx, &logger, ssr, nil, nil, nil, cfg)
 	require.NoError(t, err)
 	erpcInstance.Bootstrap(ctx)
 	require.NoError(t, err)
@@ -682,7 +682,7 @@ func TestHttp_EvmGetLogs_SplitOnError_EmptyAndNonEmptyMergedSkipsEmpty(t *testin
 	}
 	ssr, err := data.NewSharedStateRegistry(ctx, &logger, &common.SharedStateConfig{Connector: &common.ConnectorConfig{Driver: "memory", Memory: &common.MemoryConnectorConfig{MaxItems: 100_000, MaxTotalSize: "1GB"}}})
 	require.NoError(t, err)
-	erpcInstance, err := NewERPC(ctx, &logger, ssr, nil, nil, cfg)
+	erpcInstance, err := NewERPC(ctx, &logger, ssr, nil, nil, nil, cfg)
 	require.NoError(t, err)
 	erpcInstance.Bootstrap(ctx)
 	require.NoError(t, err)
@@ -750,7 +750,7 @@ func TestHttp_ConcurrentIdenticalRequests_NoEmptyBodyParse(t *testing.T) {
 
 	ssr, err := data.NewSharedStateRegistry(ctx, &logger, &common.SharedStateConfig{Connector: &common.ConnectorConfig{Driver: "memory", Memory: &common.MemoryConnectorConfig{MaxItems: 100_000, MaxTotalSize: "1GB"}}})
 	require.NoError(t, err)
-	erpcInstance, err := NewERPC(ctx, &logger, ssr, nil, nil, cfg)
+	erpcInstance, err := NewERPC(ctx, &logger, ssr, nil, nil, nil, cfg)
 	require.NoError(t, err)
 	erpcInstance.Bootstrap(ctx)
 	require.NoError(t, err)
