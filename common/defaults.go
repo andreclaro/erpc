@@ -694,10 +694,22 @@ func (c *CacheConfig) SetDefaults() error {
 }
 
 func (m *MethodsConfig) SetDefaults() error {
+	return m.setDefaults(true)
+}
+
+// SetDefaultsGeneric skips the architecture-specific default method tables
+// (EVM/SVM method semantics are meaningless on a generic jsonrpc network and
+// would declare e.g. eth_* methods finalized) while still indexing the
+// operator's own definitions.
+func (m *MethodsConfig) SetDefaultsGeneric() error {
+	return m.setDefaults(false)
+}
+
+func (m *MethodsConfig) setDefaults(mergeDefaultTables bool) error {
 	defs := m.Definitions
 
 	// Defaults apply unless the user supplied definitions and opted out of them.
-	if len(defs) == 0 || m.PreserveDefaultMethods {
+	if mergeDefaultTables && (len(defs) == 0 || m.PreserveDefaultMethods) {
 		mergedMethods := map[string]*CacheMethodConfig{}
 		for name, method := range DefaultStaticCacheMethods {
 			mergedMethods[name] = method
@@ -717,9 +729,12 @@ func (m *MethodsConfig) SetDefaults() error {
 
 	// Stateful markers are enforced LAST, so refining a stateful method's caching
 	// never silently drops the single-upstream guard, whatever key casing the
-	// operator used.
-	for _, mn := range DefaultStatefulMethodNames {
-		markStatefulMethod(defs, mn)
+	// operator used. The markers name EVM methods; generic jsonrpc networks
+	// skip them together with the other default tables.
+	if mergeDefaultTables {
+		for _, mn := range DefaultStatefulMethodNames {
+			markStatefulMethod(defs, mn)
+		}
 	}
 
 	m.Definitions = defs
@@ -2286,7 +2301,7 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 			if n.Evm.StripSubscribeFromBlockZero == nil && defaults.Evm.StripSubscribeFromBlockZero != nil {
 				n.Evm.StripSubscribeFromBlockZero = defaults.Evm.StripSubscribeFromBlockZero
 			}
-		} else if n.Evm == nil && defaults.Evm != nil && n.Svm == nil && n.Architecture != ArchitectureSvm {
+		} else if n.Evm == nil && defaults.Evm != nil && n.Svm == nil && n.Jsonrpc == nil && n.Architecture != ArchitectureSvm && n.Architecture != ArchitectureJsonRpc {
 			// Copy EVM defaults only onto networks that are (or can become) EVM.
 			// Without the SVM guard, a mixed project with networkDefaults.evm
 			// would inject an evm block into every svm network — and the
@@ -2317,6 +2332,8 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 			n.Architecture = "evm"
 		} else if n.Svm != nil {
 			n.Architecture = ArchitectureSvm
+		} else if n.Jsonrpc != nil {
+			n.Architecture = ArchitectureJsonRpc
 		}
 	}
 
@@ -2326,12 +2343,20 @@ func (n *NetworkConfig) SetDefaults(upstreams []*UpstreamConfig, defaults *Netwo
 	if n.Architecture == ArchitectureSvm && n.Svm == nil {
 		n.Svm = &SvmNetworkConfig{}
 	}
+	if n.Architecture == ArchitectureJsonRpc && n.Jsonrpc == nil {
+		n.Jsonrpc = &JsonrpcNetworkConfig{}
+	}
 
 	// Apply methods defaults
 	if n.Methods == nil {
 		n.Methods = &MethodsConfig{}
 	}
-	if err := n.Methods.SetDefaults(); err != nil {
+	if n.Architecture == ArchitectureJsonRpc {
+		// Generic networks must not inherit the EVM/SVM default method tables.
+		if err := n.Methods.SetDefaultsGeneric(); err != nil {
+			return fmt.Errorf("failed to set defaults for methods: %w", err)
+		}
+	} else if err := n.Methods.SetDefaults(); err != nil {
 		return fmt.Errorf("failed to set defaults for methods: %w", err)
 	}
 

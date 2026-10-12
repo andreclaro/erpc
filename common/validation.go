@@ -331,6 +331,12 @@ func (d *DatabaseConfig) Validate() error {
 			return err
 		}
 	}
+	// Generic JSON-RPC cache reuses the same CacheConfig/CachePolicyConfig types.
+	if d.JsonRpcCache != nil {
+		if err := d.JsonRpcCache.Validate(); err != nil {
+			return err
+		}
+	}
 	if d.SharedState != nil {
 		if err := d.SharedState.Validate(); err != nil {
 			return err
@@ -864,6 +870,9 @@ func (p *ProjectConfig) Validate(c *Config) error {
 	if err := validateSvmUpstreamNetworkPairing(p.Upstreams, p.Networks); err != nil {
 		return err
 	}
+	if err := validateJsonRpcUpstreamNetworkPairing(p.Upstreams, p.Networks); err != nil {
+		return err
+	}
 	if p.Auth != nil {
 		if err := p.Auth.Validate(); err != nil {
 			return err
@@ -1093,6 +1102,11 @@ func (u *UpstreamConfig) Validate(c *Config, skipEndpointCheck bool) error {
 	}
 	if u.Svm != nil {
 		if err := u.Svm.Validate(u); err != nil {
+			return err
+		}
+	}
+	if u.Jsonrpc != nil {
+		if err := u.Jsonrpc.Validate(u); err != nil {
 			return err
 		}
 	}
@@ -1568,6 +1582,20 @@ func (n *NetworkConfig) Validate(c *Config) error {
 	if n.Architecture == ArchitectureSvm && n.Svm == nil {
 		return fmt.Errorf("network.*.svm is required for svm networks")
 	}
+	if n.Architecture == ArchitectureJsonRpc {
+		if n.Jsonrpc == nil {
+			return fmt.Errorf("network.*.jsonrpc is required for jsonrpc networks")
+		}
+		if n.Evm != nil {
+			return fmt.Errorf("network.*.evm block is not allowed on jsonrpc networks")
+		}
+		if n.Svm != nil {
+			return fmt.Errorf("network.*.svm block is not allowed on jsonrpc networks")
+		}
+	}
+	if n.Architecture != ArchitectureJsonRpc && n.Jsonrpc != nil {
+		return fmt.Errorf("network.*.jsonrpc block is only allowed on jsonrpc networks")
+	}
 	if n.Evm != nil {
 		if err := n.Evm.Validate(); err != nil {
 			return err
@@ -1575,6 +1603,17 @@ func (n *NetworkConfig) Validate(c *Config) error {
 	}
 	if n.Svm != nil {
 		if err := n.Svm.Validate(); err != nil {
+			return err
+		}
+	}
+	if n.Jsonrpc != nil {
+		if err := n.Jsonrpc.Validate(); err != nil {
+			return err
+		}
+		if err := n.validateJsonRpcMethods(); err != nil {
+			return err
+		}
+		if err := n.validateJsonRpcFailsafe(); err != nil {
 			return err
 		}
 	}
@@ -1611,6 +1650,352 @@ func (n *NetworkConfig) Validate(c *Config) error {
 	}
 	if err := n.Integrity.Validate(); err != nil {
 		return fmt.Errorf("network.*: %w", err)
+	}
+	return nil
+}
+
+// validateJsonRpcMethods enforces the v2 method-declaration rules on a jsonrpc
+// network: finality flags are mutually exclusive, finalityFromParam is
+// well-formed, cacheTipBucket requires a state poller, and
+// resultClassifications carry only match+classifyAs.
+func (n *NetworkConfig) validateJsonRpcMethods() error {
+	if n.Methods == nil {
+		return nil
+	}
+	hasPoller := n.Jsonrpc.StatePoller != nil
+	for method, mc := range n.Methods.Definitions {
+		if mc == nil {
+			continue
+		}
+		declared := 0
+		if mc.Finalized {
+			declared++
+		}
+		if mc.Unfinalized {
+			declared++
+		}
+		if mc.Realtime {
+			declared++
+		}
+		if mc.FinalityFromParam != nil {
+			declared++
+		}
+		if declared > 1 {
+			return fmt.Errorf("network.*.methods.definitions.%s: finalized/unfinalized/realtime/finalityFromParam are mutually exclusive", method)
+		}
+		if ffp := mc.FinalityFromParam; ffp != nil {
+			if (ffp.Key == "") == (ffp.Index == nil) {
+				return fmt.Errorf("network.*.methods.definitions.%s.finalityFromParam: exactly one of key or index is required", method)
+			}
+			if len(ffp.Map) == 0 {
+				return fmt.Errorf("network.*.methods.definitions.%s.finalityFromParam: map is required", method)
+			}
+			for v, f := range ffp.Map {
+				if !isValidFinalityDeclaration(f) {
+					return fmt.Errorf("network.*.methods.definitions.%s.finalityFromParam: map value %q for %q is not a valid finality (finalized|unfinalized|realtime|unknown)", method, f, v)
+				}
+			}
+			if ffp.Default == "" {
+				return fmt.Errorf("network.*.methods.definitions.%s.finalityFromParam: default is required", method)
+			}
+			if !isValidFinalityDeclaration(ffp.Default) {
+				return fmt.Errorf("network.*.methods.definitions.%s.finalityFromParam: default %q is not a valid finality (finalized|unfinalized|realtime|unknown)", method, ffp.Default)
+			}
+		}
+		if mc.CacheTipBucket != 0 {
+			if !hasPoller {
+				return fmt.Errorf("network.*.methods.definitions.%s.cacheTipBucket requires jsonrpc.statePoller to be configured", method)
+			}
+			if mc.CacheTipBucket < 1 {
+				return fmt.Errorf("network.*.methods.definitions.%s.cacheTipBucket must be >= 1", method)
+			}
+		}
+		for i, rule := range mc.ResultClassifications {
+			if err := validateJsonRpcClassificationRule(fmt.Sprintf("network.*.methods.definitions.%s.resultClassifications[%d]", method, i), rule, true); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateJsonRpcFailsafe enforces the consensus gating for jsonrpc networks:
+// leader-election behaviors are EVM-gated and always rejected; consensus is
+// only meaningful on methods carrying a finality declaration (response
+// equality on immutable data, or staleness-bounded comparison on realtime
+// data with a poller).
+func (n *NetworkConfig) validateJsonRpcFailsafe() error {
+	for _, fs := range n.Failsafe {
+		if fs == nil {
+			continue
+		}
+		// matchFinality other than "unknown" silently never matches on jsonrpc
+		// networks whose methods carry no finality declaration — surface it.
+		if len(fs.MatchFinality) > 0 && n.Methods != nil {
+			allUnknown := true
+			for _, f := range fs.MatchFinality {
+				if f != DataFinalityStateUnknown {
+					allUnknown = false
+					break
+				}
+			}
+			if !allUnknown && !n.hasAnyFinalityDeclaration() {
+				log.Warn().Str("networkId", n.NetworkId()).Msg("jsonrpc network failsafe uses matchFinality with a state other than 'unknown', but no method carries a finality declaration — the policy will never match")
+			}
+		}
+		if fs.Consensus == nil {
+			continue
+		}
+		cons := fs.Consensus
+		if cons.DisputeBehavior == ConsensusDisputeBehaviorPreferBlockHeadLeader ||
+			cons.DisputeBehavior == ConsensusDisputeBehaviorOnlyBlockHeadLeader ||
+			cons.LowParticipantsBehavior == ConsensusLowParticipantsBehaviorPreferBlockHeadLeader ||
+			cons.LowParticipantsBehavior == ConsensusLowParticipantsBehaviorOnlyBlockHeadLeader {
+			return fmt.Errorf("network.*.failsafe.consensus: preferBlockHeadLeader/onlyBlockHeadLeader are not supported on jsonrpc networks (leader election is evm-only)")
+		}
+		pattern := fs.MatchMethod
+		if pattern == "" {
+			pattern = "*"
+		}
+		if pattern == "*" {
+			return fmt.Errorf("network.*.failsafe.consensus on jsonrpc networks must scope matchMethod to declared methods (e.g. matchMethod: \"starknet_getBlock*\") — '*' would run consensus on undeclared methods")
+		}
+		matched := false
+		hasPoller := n.Jsonrpc.StatePoller != nil
+		if n.Methods != nil {
+			for method, mc := range n.Methods.Definitions {
+				ok, err := WildcardMatch(pattern, method)
+				if err != nil {
+					return fmt.Errorf("network.*.failsafe.matchMethod is invalid: %w", err)
+				}
+				if !ok {
+					continue
+				}
+				matched = true
+				if mc == nil || (!mc.Finalized && !mc.Unfinalized && !mc.Realtime && mc.FinalityFromParam == nil) {
+					return fmt.Errorf("network.*.failsafe.consensus matches method %q which has no finality declaration (methods.definitions.%s: finalized|unfinalized|realtime|finalityFromParam) — consensus on undeclared methods is not supported on jsonrpc networks", method, method)
+				}
+				if mc.Realtime && !hasPoller {
+					return fmt.Errorf("network.*.failsafe.consensus matches realtime-declared method %q but jsonrpc.statePoller is not configured", method)
+				}
+			}
+		}
+		if !matched {
+			return fmt.Errorf("network.*.failsafe.consensus matchMethod %q does not match any method declaration on this jsonrpc network", pattern)
+		}
+	}
+	return nil
+}
+
+func (n *NetworkConfig) hasAnyFinalityDeclaration() bool {
+	if n.Methods == nil {
+		return false
+	}
+	for _, mc := range n.Methods.Definitions {
+		if mc != nil && (mc.Finalized || mc.Unfinalized || mc.Realtime || mc.FinalityFromParam != nil) {
+			return true
+		}
+	}
+	return false
+}
+
+func isValidFinalityDeclaration(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "finalized", "unfinalized", "realtime", "unknown":
+		return true
+	}
+	return false
+}
+
+// validateJsonRpcClassificationRule checks a network-level errorRule or a
+// per-method resultClassification. Per-method rules only carry match+classifyAs.
+func validateJsonRpcClassificationRule(field string, rule *JsonRpcClassificationRuleConfig, perMethod bool) error {
+	if rule == nil {
+		return fmt.Errorf("%s: rule is nil", field)
+	}
+	m := rule.Match
+	if m == nil {
+		return fmt.Errorf("%s: match is required", field)
+	}
+	if (m.ResultPath == "") == (m.ErrorPath == "") {
+		return fmt.Errorf("%s: exactly one of match.resultPath or match.errorPath is required", field)
+	}
+	matchers := 0
+	if m.Equals != nil {
+		matchers++
+	}
+	if len(m.In) > 0 {
+		matchers++
+	}
+	if m.IsNull {
+		matchers++
+	}
+	if matchers == 0 {
+		return fmt.Errorf("%s: match must set one of equals, in, or isNull", field)
+	}
+	if m.IsNull && matchers > 1 {
+		return fmt.Errorf("%s: isNull cannot be combined with equals/in on the same matcher", field)
+	}
+	if len(rule.CodeMap) > 0 && rule.CodePath == "" {
+		return fmt.Errorf("%s: codeMap requires codePath", field)
+	}
+	if perMethod {
+		if len(rule.CodeMap) > 0 || rule.CodePath != "" || rule.Default != "" {
+			return fmt.Errorf("%s: per-method resultClassifications only support match and classifyAs", field)
+		}
+	}
+	classifyAs := rule.ClassifyAs
+	if len(rule.CodeMap) > 0 {
+		for _, class := range rule.CodeMap {
+			if !isValidJsonRpcErrorClass(class) {
+				return fmt.Errorf("%s: codeMap value %q is not a valid class (missingData|clientError|serverError)", field, class)
+			}
+		}
+		if rule.Default != "" && !isValidJsonRpcErrorClass(rule.Default) {
+			return fmt.Errorf("%s: default %q is not a valid class (missingData|clientError|serverError)", field, rule.Default)
+		}
+	} else {
+		if classifyAs == "" {
+			if len(rule.CodeMap) == 0 && rule.Default == "" {
+				return fmt.Errorf("%s: classifyAs is required", field)
+			}
+		} else if !isValidJsonRpcErrorClass(classifyAs) {
+			return fmt.Errorf("%s: classifyAs %q is not a valid class (missingData|clientError|serverError)", field, classifyAs)
+		}
+	}
+	return nil
+}
+
+func isValidJsonRpcErrorClass(s string) bool {
+	switch s {
+	case "missingData", "clientError", "serverError":
+		return true
+	}
+	return false
+}
+
+func (j *JsonrpcNetworkConfig) Validate() error {
+	if j.NetworkId == "" {
+		return fmt.Errorf("network.*.jsonrpc.networkId is required")
+	}
+	for _, r := range j.NetworkId {
+		if !(r == '-' || r == '_' || r == '.' ||
+			(r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9')) {
+			return fmt.Errorf("network.*.jsonrpc.networkId %q must contain only letters, digits, dash, underscore, or dot", j.NetworkId)
+		}
+	}
+	if sp := j.StatePoller; sp != nil {
+		if sp.Tip == nil {
+			return fmt.Errorf("network.*.jsonrpc.statePoller.tip is required when statePoller is configured")
+		}
+		for field, probe := range map[string]*JsonRpcStateProbeConfig{
+			"tip":          sp.Tip,
+			"finalizedTip": sp.FinalizedTip,
+			"floor":        sp.Floor,
+			"health":       sp.Health,
+		} {
+			if probe == nil {
+				continue
+			}
+			if probe.Method == "" {
+				return fmt.Errorf("network.*.jsonrpc.statePoller.%s.method is required", field)
+			}
+			if probe.Path == "" {
+				return fmt.Errorf("network.*.jsonrpc.statePoller.%s.path is required", field)
+			}
+			switch probe.Encoding {
+			case "", "auto", "number", "string", "hex":
+			default:
+				return fmt.Errorf("network.*.jsonrpc.statePoller.%s.encoding %q is invalid (auto|number|string|hex)", field, probe.Encoding)
+			}
+			if probe.UnhealthyWhen != nil {
+				if probe.UnhealthyWhen.Path == "" {
+					return fmt.Errorf("network.*.jsonrpc.statePoller.%s.unhealthyWhen.path is required", field)
+				}
+				if probe.UnhealthyWhen.Equals == nil && len(probe.UnhealthyWhen.In) == 0 {
+					return fmt.Errorf("network.*.jsonrpc.statePoller.%s.unhealthyWhen must set equals or in", field)
+				}
+				if probe.UnhealthyWhen.Equals != nil && len(probe.UnhealthyWhen.In) > 0 {
+					return fmt.Errorf("network.*.jsonrpc.statePoller.%s.unhealthyWhen cannot combine equals and in", field)
+				}
+			}
+			if tc := probe.ThenCall; tc != nil {
+				if !tc.PassValueAsParam {
+					return fmt.Errorf("network.*.jsonrpc.statePoller.%s.thenCall.passValueAsParam is required (the only supported parameterization)", field)
+				}
+				if tc.Method == "" || tc.Path == "" {
+					return fmt.Errorf("network.*.jsonrpc.statePoller.%s.thenCall requires method and path", field)
+				}
+				switch tc.Encoding {
+				case "", "auto", "number", "string", "hex":
+				default:
+					return fmt.Errorf("network.*.jsonrpc.statePoller.%s.thenCall.encoding %q is invalid (auto|number|string|hex)", field, tc.Encoding)
+				}
+			}
+		}
+	}
+	for i, rule := range j.ErrorRules {
+		if err := validateJsonRpcClassificationRule(fmt.Sprintf("network.*.jsonrpc.errorRules[%d]", i), rule, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Validate checks the upstream-level jsonrpc binding block. The binding is
+// only fatal once the upstream is actually typed jsonrpc — an inherited
+// upstreamDefaults block on an evm upstream is inert, not an error (same
+// precedent as SvmUpstreamConfig.Validate).
+func (j *JsonrpcUpstreamConfig) Validate(u *UpstreamConfig) error {
+	if j.NetworkId == "" {
+		if u.Type == UpstreamTypeJsonRpc {
+			return fmt.Errorf("upstream.*.jsonrpc.networkId is required for jsonrpc upstreams: the slug of the jsonrpc network this upstream serves")
+		}
+		return nil
+	}
+	if !IsValidNetwork("jsonrpc:" + j.NetworkId) {
+		return fmt.Errorf("upstream.*.jsonrpc.networkId '%s' is invalid, must contain only letters, digits, dash, underscore, or dot", j.NetworkId)
+	}
+	return nil
+}
+
+// validateJsonRpcUpstreamNetworkPairing catches the two silent-dead
+// misconfigurations: a jsonrpc upstream whose slug matches no declared
+// jsonrpc network (it would bootstrap healthy and serve nothing), and a
+// jsonrpc upstream whose type was omitted — UpstreamConfig.SetDefaults
+// back-compat-defaults an unset type to evm, which must not silently apply
+// under a jsonrpc network.
+//
+// It only fires when some jsonrpc network is declared, so lazy setups are
+// untouched (mirrors validateSvmUpstreamNetworkPairing).
+func validateJsonRpcUpstreamNetworkPairing(upstreams []*UpstreamConfig, networks []*NetworkConfig) error {
+	slugs := map[string]bool{}
+	for _, nw := range networks {
+		if nw != nil && nw.Architecture == ArchitectureJsonRpc && nw.Jsonrpc != nil {
+			slugs[nw.Jsonrpc.NetworkId] = true
+		}
+	}
+	if len(slugs) == 0 {
+		return nil
+	}
+	for _, ups := range upstreams {
+		if ups == nil {
+			continue
+		}
+		if ups.Type == UpstreamTypeJsonRpc || (ups.Jsonrpc != nil && ups.Jsonrpc.NetworkId != "") {
+			slug := ""
+			if ups.Jsonrpc != nil {
+				slug = ups.Jsonrpc.NetworkId
+			}
+			if ups.Type != UpstreamTypeJsonRpc {
+				return fmt.Errorf("upstream '%s' declares jsonrpc.networkId '%s' but has type '%s'; jsonrpc upstreams must set type: jsonrpc explicitly (no type inference)", ups.Id, slug, ups.Type)
+			}
+			if slug == "" || !slugs[slug] {
+				return fmt.Errorf("upstream '%s' has type jsonrpc but its jsonrpc.networkId '%s' matches no declared jsonrpc network; the upstream would serve nothing", ups.Id, slug)
+			}
+		}
 	}
 	return nil
 }
