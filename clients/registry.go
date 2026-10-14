@@ -173,6 +173,29 @@ func (manager *ClientRegistry) CreateClient(appCtx context.Context, ups common.U
 					clientErr = fmt.Errorf("unsupported endpoint scheme for svm upstream %v: %v (only http/https supported)", cfg.Id, parsedUrl.Scheme)
 				}
 
+			case common.UpstreamTypeJsonRpc:
+				if parsedUrl.Scheme == "http" || parsedUrl.Scheme == "https" {
+					// Generic JSON-RPC passthrough: the same HTTP JSON-RPC client as
+					// EVM/SVM, with the composite extractor dispatching to the
+					// jsonrpc normalizer (spec-code taxonomy + configured
+					// classification rules).
+					newClient, err = NewGenericHttpJsonRpcClient(
+						appCtx,
+						&lg,
+						manager.projectId,
+						ups,
+						parsedUrl,
+						cfg.JsonRpc,
+						proxyPool,
+						manager.evmExtractor,
+					)
+					if err != nil {
+						clientErr = fmt.Errorf("failed to create HTTP client for upstream: %v: %w", cfg.Id, err)
+					}
+				} else {
+					clientErr = fmt.Errorf("unsupported endpoint scheme for jsonrpc upstream %v: %v (only http/https supported)", cfg.Id, parsedUrl.Scheme)
+				}
+
 			default:
 				clientErr = fmt.Errorf("unsupported upstream type: %v for upstream: %v", cfg.Type, cfg.Id)
 			}

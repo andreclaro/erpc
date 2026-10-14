@@ -1,6 +1,7 @@
 import type {
     DynamoDBConnectorConfig,
     EvmNetworkConfig,
+    JsonrpcNetworkConfig,
     SvmNetworkConfig,
     AuthStrategyConfig as GenAuthStrategyConfig,
     JwtStrategyConfig,
@@ -47,7 +48,7 @@ import type {
   /**
    * Suported network architecture
    */
-  export type NetworkArchitecture = "evm" | "svm";
+  export type NetworkArchitecture = "evm" | "svm" | "jsonrpc";
   
   /**
    * Supported connector driver type overide
@@ -110,7 +111,8 @@ import type {
     | "evm+blockpi"
     | "evm+ankr"
     | "evm+routemesh"
-    | "svm";
+    | "svm"
+    | "jsonrpc";
   
   /**
    * Supported auth type
@@ -152,6 +154,11 @@ import type {
    * Network defaults override (cluster isn't needed for defaults config)
    */
   export type SvmNetworkConfigForDefaults = Omit<SvmNetworkConfig, "cluster">;
+
+  /**
+   * Network defaults override (networkId isn't needed for defaults config)
+   */
+  export type JsonrpcNetworkConfigForDefaults = Omit<JsonrpcNetworkConfig, "networkId">;
 
   /**
    * Accepts both boolean (backward compat) and string (connector ID pattern) values.

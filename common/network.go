@@ -12,8 +12,9 @@ import (
 type NetworkArchitecture string
 
 const (
-	ArchitectureEvm NetworkArchitecture = "evm"
-	ArchitectureSvm NetworkArchitecture = "svm"
+	ArchitectureEvm     NetworkArchitecture = "evm"
+	ArchitectureSvm     NetworkArchitecture = "svm"
+	ArchitectureJsonRpc NetworkArchitecture = "jsonrpc"
 )
 
 type Network interface {
@@ -87,7 +88,7 @@ func EvmLeaderUpstream(n Network, ctx context.Context) Upstream {
 
 func IsValidArchitecture(architecture string) bool {
 	switch NetworkArchitecture(architecture) {
-	case ArchitectureEvm, ArchitectureSvm:
+	case ArchitectureEvm, ArchitectureSvm, ArchitectureJsonRpc:
 		return true
 	}
 	return false
@@ -142,6 +143,26 @@ func IsValidNetwork(network string) bool {
 			return true
 		}
 		return isIdentifier(chain) && isIdentifier(cluster)
+	}
+
+	if strings.HasPrefix(network, "jsonrpc:") {
+		slug := strings.TrimPrefix(network, "jsonrpc:")
+		if slug == "" {
+			return false
+		}
+		// User-chosen slug; charset mirrors the SVM identifier rule so
+		// config validation (common/validation.go) and ID parsing here
+		// cannot drift. A single segment only — ":" would be ambiguous
+		// with the network-id prefix separator.
+		for _, r := range slug {
+			if !(r == '-' || r == '_' || r == '.' ||
+				(r >= 'a' && r <= 'z') ||
+				(r >= 'A' && r <= 'Z') ||
+				(r >= '0' && r <= '9')) {
+				return false
+			}
+		}
+		return true
 	}
 
 	return false

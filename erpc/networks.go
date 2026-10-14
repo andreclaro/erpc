@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/erpc/erpc/architecture/evm"
+	"github.com/erpc/erpc/architecture/jsonrpc"
 	"github.com/erpc/erpc/architecture/svm"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"
@@ -1516,6 +1517,26 @@ func (n *Network) SvmEnforceBlockAvailability() bool {
 	return *n.cfg.Svm.EnforceBlockAvailability
 }
 
+// JsonRpcHighestTip is the highest polled tip across this network's generic
+// JSON-RPC upstreams. Feeds the cacheTipBucket key partition: 0 means no
+// poller has reported a tip yet (callers treat it as "no bucket segment").
+func (n *Network) JsonRpcHighestTip(ctx context.Context) int64 {
+	_, span := common.StartDetailSpan(ctx, "Network.JsonRpcHighestTip")
+	defer span.End()
+	var maxTip int64
+	for _, u := range n.upstreamsRegistry.GetNetworkUpstreams(ctx, n.networkId) {
+		sp := u.JsonRpcStatePoller()
+		if sp == nil || sp.IsObjectNull() {
+			continue
+		}
+		if tip := sp.LatestTip(); tip > maxTip {
+			maxTip = tip
+		}
+	}
+	span.SetAttributes(attribute.Int64("highest_tip", maxTip))
+	return maxTip
+}
+
 // SvmHighestIndexedSlot returns the MAX maxShredInsertSlot across SVM upstreams.
 // This is used only by the networkPreForward_getBlock guard — its job is to
 // avoid short-circuiting requests that ANY upstream can serve. It therefore
@@ -2851,6 +2872,19 @@ func (n *Network) prepareRequest(ctx context.Context, nr *common.NormalizedReque
 				nil,
 			)
 		}
+	case common.ArchitectureJsonRpc:
+		// Generic passthrough: no protocol normalization at all, but the
+		// request must still be valid JSON-RPC so downstream keying
+		// (cache hash, multiplexing, singleflight) has a stable shape.
+		if _, err := nr.JsonRpcRequest(ctx); err != nil {
+			return common.NewErrJsonRpcExceptionInternal(
+				0,
+				common.JsonRpcErrorParseException,
+				"failed to unmarshal json-rpc request",
+				err,
+				nil,
+			)
+		}
 	default:
 		return common.NewErrJsonRpcExceptionInternal(
 			0,
@@ -2899,11 +2933,16 @@ func (n *Network) GetFinality(ctx context.Context, req *common.NormalizedRequest
 	}
 
 	// Architecture-specific finality resolution. SVM uses commitment + slot comparisons,
-	// EVM uses block-number comparisons against the state poller's finalized block.
+	// EVM uses block-number comparisons against the state poller's finalized block,
+	// jsonrpc resolves only operator declarations (method flags + finalityFromParam)
+	// and is Unknown otherwise — the EVM extraction below must not run for it.
 	// Keeping this switch here (rather than inside the ArchitectureHandler) avoids
 	// plumbing Network's internal upstreams registry through the generic interface.
-	if n.cfg.Architecture == common.ArchitectureSvm {
+	switch n.cfg.Architecture {
+	case common.ArchitectureSvm:
 		return svm.GetFinality(ctx, n, req, resp)
+	case common.ArchitectureJsonRpc:
+		return jsonrpc.GetFinality(ctx, n, req, resp)
 	}
 
 	blockRef, blockNumber, _ := evm.ExtractBlockReferenceFromRequest(ctx, req)

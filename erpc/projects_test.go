@@ -93,6 +93,7 @@ func TestProject_Forward(t *testing.T) {
 			ssr,
 			nil, // evmJsonRpcCache
 			nil, // svmJsonRpcCache
+			nil, // jsonRpcCache
 			rateLimitersRegistry,
 			thirdparty.NewVendorsRegistry(),
 			nil, // ProxyPoolRegistry
@@ -203,6 +204,7 @@ func TestProject_TimeoutScenarios(t *testing.T) {
 			ssr,
 			nil, // evmJsonRpcCache
 			nil, // svmJsonRpcCache
+			nil, // jsonRpcCache
 			// &common.ServerConfig{
 			// 	MaxTimeout: util.StringPtr("10s"), // Large server timeout
 			// },
@@ -315,6 +317,7 @@ func TestProject_TimeoutScenarios(t *testing.T) {
 			ssr,
 			nil, // evmJsonRpcCache
 			nil, // svmJsonRpcCache
+			nil, // jsonRpcCache
 			rateLimitersRegistry,
 			thirdparty.NewVendorsRegistry(),
 			nil, // ProxyPoolRegistry
@@ -438,6 +441,7 @@ func TestProject_LazyLoadNetworkDefaults(t *testing.T) {
 			ssr,
 			nil,          // EvmJsonRpcCache
 			nil,          // SvmJsonRpcCache
+			nil,          // JsonRpcCache
 			rateLimiters, // RateLimitersRegistry
 			thirdparty.NewVendorsRegistry(),
 			nil, // ProxyPoolRegistry
@@ -555,6 +559,7 @@ func TestProject_NetworkAlias(t *testing.T) {
 			ssr,
 			nil, // evmJsonRpcCache
 			nil, // svmJsonRpcCache
+			nil, // jsonRpcCache
 			rateLimitersRegistry,
 			thirdparty.NewVendorsRegistry(),
 			nil, // ProxyPoolRegistry

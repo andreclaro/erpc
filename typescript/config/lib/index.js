@@ -21,6 +21,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var index_exports = {};
 __export(index_exports, {
   ArchitectureEvm: () => ArchitectureEvm,
+  ArchitectureJsonRpc: () => ArchitectureJsonRpc,
   ArchitectureSvm: () => ArchitectureSvm,
   AuthTypeJwt: () => AuthTypeJwt,
   AuthTypeNetwork: () => AuthTypeNetwork,
@@ -71,6 +72,7 @@ __export(index_exports, {
   UNFINALIZED: () => UNFINALIZED,
   UNKNOWN: () => UNKNOWN,
   UpstreamTypeEvm: () => UpstreamTypeEvm,
+  UpstreamTypeJsonRpc: () => UpstreamTypeJsonRpc,
   UpstreamTypeSvm: () => UpstreamTypeSvm,
   createConfig: () => createConfig
 });
@@ -84,6 +86,7 @@ var EvmNodeTypeArchive = "archive";
 var EvmSyncingStateUnknown = 0;
 var EvmSyncingStateSyncing = 1;
 var EvmSyncingStateNotSyncing = 2;
+var UpstreamTypeJsonRpc = "jsonrpc";
 var UpstreamTypeSvm = "svm";
 var RateLimitCountModeRequest = "request";
 var RateLimitCountModeCredit = "credit";
@@ -119,6 +122,7 @@ var CacheEmptyBehaviorAllow = 1;
 var CacheEmptyBehaviorOnly = 2;
 var ArchitectureEvm = "evm";
 var ArchitectureSvm = "svm";
+var ArchitectureJsonRpc = "jsonrpc";
 var ScopeNetwork = "network";
 var ScopeUpstream = "upstream";
 
@@ -139,6 +143,7 @@ var createConfig = (cfg) => {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   ArchitectureEvm,
+  ArchitectureJsonRpc,
   ArchitectureSvm,
   AuthTypeJwt,
   AuthTypeNetwork,
@@ -189,6 +194,7 @@ var createConfig = (cfg) => {
   UNFINALIZED,
   UNKNOWN,
   UpstreamTypeEvm,
+  UpstreamTypeJsonRpc,
   UpstreamTypeSvm,
   createConfig
 });

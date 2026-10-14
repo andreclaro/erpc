@@ -60,7 +60,7 @@ func TestHttpServer_H2C_WithoutSharedGrpc(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	erpcInstance, err := NewERPC(ctx, &logger, nil, nil, nil, cfg)
+	erpcInstance, err := NewERPC(ctx, &logger, nil, nil, nil, nil, cfg)
 	require.NoError(t, err)
 	erpcInstance.Bootstrap(ctx)
 
@@ -208,7 +208,7 @@ func TestHttpServer_H2C_ShutdownGoAwaysAndDrainsInFlightStream(t *testing.T) {
 	appCtx, sigterm := context.WithCancel(context.Background())
 	defer sigterm()
 
-	erpcInstance, err := NewERPC(appCtx, &logger, nil, nil, nil, cfg)
+	erpcInstance, err := NewERPC(appCtx, &logger, nil, nil, nil, nil, cfg)
 	require.NoError(t, err)
 	erpcInstance.Bootstrap(appCtx)
 
@@ -360,7 +360,7 @@ func TestHttpServer_SharedGrpc_ShutdownDrainsInFlightRPC(t *testing.T) {
 	appCtx, sigterm := context.WithCancel(context.Background())
 	defer sigterm()
 
-	erpcInstance, err := NewERPC(appCtx, &logger, nil, nil, nil, cfg)
+	erpcInstance, err := NewERPC(appCtx, &logger, nil, nil, nil, nil, cfg)
 	require.NoError(t, err)
 	erpcInstance.Bootstrap(appCtx)
 

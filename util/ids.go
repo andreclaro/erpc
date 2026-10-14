@@ -24,6 +24,13 @@ func SvmNetworkId(chain, cluster string) string {
 	return "svm:" + chain + ":" + cluster
 }
 
+// JsonRpcNetworkId derives the canonical "jsonrpc:<slug>" network ID for the
+// generic JSON-RPC architecture. The slug is user-chosen and validated by
+// IsValidNetworkId / common.IsValidNetwork.
+func JsonRpcNetworkId(slug string) string {
+	return "jsonrpc:" + slug
+}
+
 var validIdentifierRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 func IsValidIdentifier(s string) bool {
@@ -60,6 +67,21 @@ func IsValidNetworkId(s string) bool {
 		// Reject more than 2 segments — no use case for svm:a:b:c today.
 		if strings.Count(rest, ":") > 1 {
 			return false
+		}
+		return true
+	}
+	if strings.HasPrefix(s, "jsonrpc:") {
+		slug := s[len("jsonrpc:"):]
+		if slug == "" {
+			return false
+		}
+		for _, r := range slug {
+			if !(r == '-' || r == '_' || r == '.' ||
+				(r >= 'a' && r <= 'z') ||
+				(r >= 'A' && r <= 'Z') ||
+				(r >= '0' && r <= '9')) {
+				return false
+			}
 		}
 		return true
 	}
