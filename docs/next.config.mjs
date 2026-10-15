@@ -6,6 +6,14 @@ const withNextra = nextra({
 });
 
 export default withNextra({
+	async rewrites() {
+		return [
+			{
+				source: "/inside-erpc-kindle",
+				destination: "/inside-erpc-kindle.html",
+			},
+		];
+	},
 	webpack(config) {
 		config.module.rules.push({
 			test: /\.svg$/,

@@ -1,0 +1,240 @@
+---
+title: "Request tracing - Inside eRPC"
+description: "Follow one JSON-RPC call through every function eRPC runs: the span map, the force-trace escape hatch, and four traced examples — cache hit, hedge race, catch-up retry, consensus."
+---
+
+import { LLMsTxtLink, AISection, SourceLink, PromptExample } from "../../components";
+import { TimelineRace } from "../../components/explainer/TimelineRace";
+import { tracingScenarios } from "../../components/explainer/scenarios/request-tracing";
+
+<LLMsTxtLink />
+
+# Request tracing — following one call through every function
+
+The other pages in this section explain *what* each stage decides. This one is
+the "as much detail as possible" page: every function one call passes through,
+the OpenTelemetry span each one emits, and what a trace looks like when the
+call takes the short path, the slow path, or the weird one.
+
+One convention makes eRPC traces unusually readable: **span names are the
+function names.** `Network.Forward`, `Cache.Get`, `Upstream.Forward` — a span
+in your tracing backend is a direct pointer into the source tree. Turn on
+`tracing.detailed` and the map gains the internal loops; send one header and
+the sampler is bypassed for exactly that request.
+
+The four tabs below are four traces of the same `eth_getBlockByNumber` call:
+served from cache, raced with a hedge, retried through a missing-data wait,
+and settled by consensus.
+
+<TimelineRace scenarios={tracingScenarios} caption="Four traces, one call: every lane is a function in the source, every marker is a span or a decision you can grep for." />
+
+## The workflow
+
+1. **Cache-hit read.** The call touches six functions — HTTP handler, project
+   auth (which emits *no* span of its own), `Network.Forward`, `Cache.Get`,
+   response writer — and zero upstreams. The async cache writer stays idle:
+   a hit never produces a `Cache.Set`.
+2. **Cold read · hedge.** `Cache.Get` misses, the policy engine orders the
+   upstreams, and the failsafe executor fires a hedge at its adaptive delay.
+   Two attempts race; the loser is discarded with `ErrUpstreamHedgeCancelled`
+   and the response carries `X-ERPC-Upstream-Hedges: 1`. The `Cache.Set`
+   lands *after* the client was answered, on the app context with a 10s
+   budget.
+3. **Retry on missing data.** Upstream A answers `-32014` (missing data); the
+   executor classifies it as `reason=missing_data`, waits roughly one block
+   (EMA block time, recorded in the data-unavailable wait histogram), then
+   retries on upstream B. The `dataUnavailableCapReached` guard caps how long
+   this loop can run.
+4. **Consensus call.** `Consensus.Run` fans out three `consensus_slot`
+   attempts in parallel. Two return identical bytes and short-circuit the
+   third, which is cancelled mid-flight. The analyzer goroutine keeps
+   draining in the background — it survives your response.
+
+## In the source
+
+### Ingress — `erpc/http_server.go`
+
+- `createRequestHandler` (`http_server.go:246`) opens the root span
+  `Http.ReceivedRequest` via `common.StartHTTPServerSpan`
+  (`common/tracing_util.go:96`), then extracts any inbound W3C trace context.
+- `parseUrlPath` (`:877`) resolves `{project}/{architecture}/{chain}`;
+  gzipped bodies are handled at `:374`; a batch body (`[`) is split with one
+  goroutine per element at `:465` — each element gets its own `Request.Handle`
+  span (`common/tracing_util.go:165`). Detail spans `Http.ReadBody` (`:396`)
+  and `Http.ParseRequests` (`:420`) need `tracing.detailed`.
+- After `NewNormalizedRequest`, validation, method gating, and
+  `auth.NewPayloadFromHttp`, the handler calls `project.Forward`
+  (`http_server.go:725`).
+
+### Auth + project — `erpc/projects.go`, `auth/registry.go`
+
+- `ProjectsRegistry.GetProject` (`erpc/projects_registry.go:116`) →
+  `AuthenticateConsumer` (`projects.go:123`) → `AuthRegistry.Authenticate`
+  (`auth/registry.go:46`) walks the strategy chain; each strategy acquires its
+  own rate permit (`auth/authorizer.go:117`). **None of this emits a span** —
+  auth is invisible in traces by design.
+- `Project.Forward` (`projects.go:130`) opens its detail span, then
+  `AcquireRateLimitPermit` (`projects.go:374`, span `RateLimiter.DoLimit` with
+  `budget`/`method`/`scope`/`result` attributes,
+  `upstream/ratelimiter_budget.go:330`) before `network.Forward`.
+
+### `Network.Forward` — `erpc/networks.go:1743`
+
+- `tryServeStaticResponse` (`:1789`) → `handleMultiplexing` (`:3050`,
+  leader/follower) → `cacheDal.Get` (`:1825`, span `Cache.Get` in
+  `architecture/evm/json_rpc_cache.go:179`) → `GetOrderedInLane` (`:1863`,
+  detail span `PolicyEngine.GetOrdered` at `:1843`) →
+  `tryShortCircuitFutureBlock` (`:2005`) → network rate permit (`:2022`) →
+  `prepareRequest` (`:2030`).
+- `getFailsafeExecutor` (`:1708`) picks the first policy matching
+  method/finality/kind; `failsafeExecutor.Run` (`:2357`) runs it. On success
+  an async goroutine (`:2426`, response held via `AddRef()`, 10s context on
+  `appCtx`) performs `Cache.Set`, then `req.ExecState().Apply(forwardSpan)`
+  (`:2464`) stamps `execution.*` and `upstreams.*` attributes
+  (`common/exec_state.go:325`). `normalizeResponse` (`:3326`) restores the
+  JSON-RPC id byte-for-byte.
+
+### The failsafe executor — `erpc/network_executor.go`
+
+- `Run` (`:164`) composes `timeout( consensus?( retry( hedge( sweep ))) )`;
+  the timeout context carries `ErrDynamicTimeoutExceeded` as its cause
+  (`:178`). The consensus branch (`:205`) wraps `retry(hedge(...))` per slot
+  in `consensus.Run`.
+- `runRetry` (`:227`) asks `shouldRetryWithReason` (`:396`), which returns
+  reasons such as `missing_data`, `block_unavailable`, `retryable_error`,
+  `empty_result`, `pending_tx`, or `execution_exception_retryable`; the
+  empty-result loop is capped by `dataUnavailableCapReached` (`:385`).
+- `runHedge` (`:589`) delays by the adaptive hedge delay and keeps/discards
+  legs at the keep-rule (`:677`, `kept = !IsRetryableTowardNetwork(err)`).
+
+### Upstream + response — `upstream/upstream.go`, `erpc/http_server.go`
+
+- `Upstream.Forward` (`upstream/upstream.go:543`): `shouldSkip`
+  (cordon/exclusion/breaker, `:578`) → budget permit (`:591`, credit mode) →
+  `Client.SendRequest` (`:778`; leaf span `HttpJsonRpcClient.sendSingleRequest`,
+  `clients/http_json_rpc_client.go:667`) → the health tracker records the
+  outcome, with quantile `ObserveDuration` fed **only** by reverts (`:911`)
+  and successful non-empty responses (`:945`) → upstream-scope failsafe
+  `Run` (`:964`).
+- Response path: detail span `HttpServer.WriteResponse` (`http_server.go:744`)
+  → `setResponseHeaders` (`:1172`) and `writeCounterHeaders` (`:1225`, emits
+  `X-ERPC-Upstream-Hedges` at `:1230`) → `InjectHTTPResponseTraceContext`
+  (`:765`) writes the W3C traceparent so the *next* hop continues the trace →
+  `determineResponseStatusCode` (`:1591`, default 200 for JSON-RPC).
+
+## First principles
+
+> **Tracing follows the code, not the deployment topology.** Span names are
+> function names, so a trace is a stack of pointers into the source tree. The
+> cheapest way to find a function is to read a trace; the cheapest way to
+> understand a trace is to read the function.
+
+> **Timeouts are contexts with causes, not checked flags.** The executor sets
+> `ErrDynamicTimeoutExceeded` on the context at `network_executor.go:178`; the
+> deepest upstream learns the remaining budget the same way — one mechanism,
+> visible end-to-end in the trace as cancellations with causes.
+
+> **The response path never blocks on bookkeeping.** The cache write runs on
+> the app context after the answer leaves; the consensus analyzer drains in
+> the background. What the client waits for is exactly what the client needs.
+
+## Agent reference
+
+<PromptExample
+  n={1}
+  title="Read an eRPC trace for one slow call"
+  prompt="Using my eRPC config and a trace from my OTLP backend, walk me through one slow eth_getBlockByNumber call: which spans should exist, what the execution.* and upstreams.* attributes tell me, and how to force a detailed trace for one request without enabling detailed tracing globally."
+  defaultOpen={false}
+/>
+
+Reference URL for agents: `https://docs.erpc.cloud/inside-erpc/request-tracing.llms.txt`
+
+<AISection title="Request tracing — full agent reference" hint="OTel span map, tracing config, edge cases, and source entry points.">
+
+### How it works
+
+The span hierarchy for one call (always-on spans unless marked *detail*):
+
+`Http.ReceivedRequest` → `Http.ReadBody` *(detail)* → `Http.ParseRequests`
+*(detail)* → `Request.Handle` (one per batch element) → `Project.Forward`
+*(detail)* → `RateLimiter.DoLimit` (CLIENT kind; `budget`, `method`, `scope`,
+`result` attributes) → `Network.Forward` → `PolicyEngine.GetOrdered` *(detail)*
+→ `Cache.Get` (span opened in `architecture/evm/json_rpc_cache.go:179`; the
+policy lookup inside it is `Cache.FindGetPolicies`, *(detail)*,
+`:199`) → `Network.forwardAttempt` → `Network.UpstreamLoop` *(detail)* →
+`Consensus.Run` + `Consensus.CollectResponses` *(detail)* → `Upstream.Forward`
+→ `Upstream.tryForward.PreRequest` / `.SendRequest` *(detail)* →
+`HttpJsonRpcClient.sendSingleRequest` (gRPC BDS upstreams emit
+`GrpcBdsClient.*` instead) → `Cache.Set` (`:635`, from the async writer) →
+`Network.NormalizeResponse` *(detail)* → `HttpServer.WriteResponse` *(detail)*.
+
+Two span tiers: `StartSpan` spans are always-on when tracing is enabled;
+`StartDetailSpan` spans additionally require `tracing.detailed: true`. A
+request can bypass the sampler via the `X-ERPC-Force-Trace: true` header or
+`?force-trace=true` (`common/tracing_core.go:29`, sampler wrapper at `:248`),
+and `tracing.forceTraceMatchers` can force tracing by network/method patterns.
+The outbound response carries the W3C `traceparent` header
+(`common/tracing_util.go:58`), so clients can join eRPC's trace. Before a
+network response finishes, `ExecState().Apply` stamps `execution.attempts`,
+`execution.retries`, `execution.hedges`, `execution.upstream_attempts`, and
+the `upstreams.tried/outcomes/reasons/durations_ms/won` slices onto the
+`Network.Forward` span (`common/exec_state.go:325`) — a trace answers "which
+upstreams, why, and who won" without enumerating child spans. The auth path
+emits no span.
+
+### Config schema
+
+The full `tracing` block is documented on the [Tracing & monitoring](/operation/tracing)
+page; the shape (verified `common/config.go:226`) is `enabled`, `endpoint`,
+`protocol` (`grpc` | `http`), `sampleRate`, `detailed`, `serviceName`,
+`headers`, `tls`, `resourceAttributes`, `forceTraceMatchers`. Defaults
+(`common/defaults.go:771`): protocol `grpc`, endpoint `localhost:4317`
+(`http://localhost:4318` for http), `sampleRate: 1.0`, `serviceName: erpc`.
+`enabled` and `detailed` default to `false` — tracing is fully off until the
+block is configured.
+
+### Edge cases & gotchas
+
+1. **Auth is invisible in traces.** Strategy evaluation and its rate permit
+   produce logs and metrics, but no span — a trace that jumps from
+   `Request.Handle` straight to `Project.Forward` is normal.
+2. **A batch produces N `Request.Handle` spans.** Each batch element runs in
+   its own goroutine (`http_server.go:465`) with its own request handle span;
+   there is no batch-level parent beyond `Http.ParseRequests`.
+3. **Force-trace bypasses the sampler, not the tier split.** The header/query
+   flag makes an always-on trace certain, but *detail* spans still require
+   `tracing.detailed: true`.
+4. **Hedge losers are noise by design.** A discarded hedge leg ends in
+   `ErrUpstreamHedgeCancelled` — filter it (or read it as "the hedge did its
+   job"), not as an upstream failure.
+5. **The cache write lands after span end.** `Cache.Set` runs on a detached
+   10s context carrying the *span context* of `Network.Forward`
+   (`networks.go:2426`), so it can appear as a late child; a client
+   disconnect never aborts it.
+
+### Observability
+
+| Metric | Type | Labels | When it fires |
+|---|---|---|---|
+| `erpc_unexpected_panic_total` | counter | `scope`, `extra`, `error` | A recovered panic — e.g. `scope="request-handler"` in the batch goroutine or `scope="cache-set"` in the async writer |
+
+Tracing itself has no dedicated metric family; the trace is the signal. Correlate with the network/upstream families on the [metrics](/inside-erpc/metrics) page when a span shows an anomaly.
+
+### Source code entry points
+
+- HTTP span bootstrap, force-trace attribute — [<SourceLink file="common/tracing_util.go" lines="67-110" />], [<SourceLink file="common/tracing_core.go" lines="28-31" />]
+- Request handle span (per element) — [<SourceLink file="common/tracing_util.go" lines="155-175" />]
+- HTTP ingress: batch fan-out, Forward call, traceparent — [<SourceLink file="erpc/http_server.go" lines="246-260" />], [<SourceLink file="erpc/http_server.go" lines="465-480" />], [<SourceLink file="erpc/http_server.go" lines="725-730" />], [<SourceLink file="erpc/http_server.go" lines="760-770" />]
+- `Network.Forward` span + ExecState attributes — [<SourceLink file="erpc/networks.go" lines="1743-1760" />], [<SourceLink file="erpc/networks.go" lines="2426-2470" />], [<SourceLink file="common/exec_state.go" lines="315-360" />]
+- Failsafe executor spans and retry/hedge decisions — [<SourceLink file="erpc/network_executor.go" lines="164-215" />], [<SourceLink file="erpc/network_executor.go" lines="396-430" />]
+- Upstream span + send leaf — [<SourceLink file="upstream/upstream.go" lines="543-560" />], [<SourceLink file="clients/http_json_rpc_client.go" lines="660-675" />]
+
+### Related pages
+
+- [Tracing & monitoring](/operation/tracing) — the `tracing` config block and OTLP setup
+- [Request lifecycle](/inside-erpc/request-lifecycle) — the concurrency model these spans mirror
+- [Failsafe, in depth](/inside-erpc/failsafe-in-depth) — what `Network.forwardAttempt` is deciding
+- [Consensus](/inside-erpc/consensus) — how the three slots are run and analyzed
+- [Metrics](/inside-erpc/metrics) — reading `erpc_*` counters that correspond to span events
+
+</AISection>

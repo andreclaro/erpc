@@ -1,0 +1,253 @@
+---
+title: "Block availability - Inside eRPC"
+description: "How eRPC decides which upstream can actually serve block N — configured availability bounds, retryable skips with async head polls, a future-block short-circuit, and the one-block catch-up wait."
+---
+
+import { LLMsTxtLink, AISection, SourceLink, PromptExample } from "../../components";
+import { TimelineRace } from "../../components/explainer/TimelineRace";
+import { blockAvailabilityScenario } from "../../components/explainer/scenarios/block-availability";
+
+<LLMsTxtLink />
+
+# Block availability — who actually has block N?
+
+Every upstream sees the chain at a slightly different height. Ask the wrong node
+for block N and you get a `null` where a block should be — or a silent skip.
+eRPC's answer is to know each upstream's *serving range* before dispatching:
+upstreams can declare which blocks they have (`evm.blockAvailability` bounds),
+and eRPC tracks every upstream's live head via its state poller.
+
+When nobody can serve the block *yet*, eRPC does not fail the request — it waits
+about one block and retries, because on a healthy chain that is exactly when the
+data appears. And when the block is beyond what any upstream could possibly have,
+it answers the truthful `null` immediately instead of burning a fleet-wide fan-out.
+
+The timeline below tells one story: a **tip+0 read on a 2s chain**. The fleet
+majority already has block N — that is how the served tip became N — but the
+selection policy ordered this request `[A, B]`, and both are one block behind.
+A says so through its configured upper bound; B says nothing and just returns
+`null`. One catch-up wait later, A serves.
+
+<TimelineRace scenario={blockAvailabilityScenario} caption="A tip+0 request on a 2s chain: A is skipped by its configured upper bound (retryable — an async head poll fires), B returns null, eRPC waits one EMA block time (×1.0) and retries; A's refreshed gate now passes and serves block N." />
+
+## The workflow
+
+1. **Block N is produced** on a 2s-block chain. The fleet majority has already
+   ingested it, so the network's served tip is N. A client asks for exactly
+   block N — a tip+0 read (`"latest"` interpolated to a concrete number, or a
+   block number the client learned from a header subscription).
+2. **Policy order is `[A, B]`.** Before any dispatch,
+   `checkUpstreamBlockAvailability` compares N against A's configured serving
+   range. A declares `blockAvailability.upper.latestBlockMinus: 0` ("nothing
+   beyond my head") and its cached head is N−1 → N is above the upper bound.
+   The distance to A's live head is 1 block — well within
+   `maxRetryableBlockDistance` (default 128) — so the skip is **retryable**:
+   A may have this block shortly. `erpc_upstream_stale_upper_bound_total`
+   increments and the sweep moves on.
+3. **The skip fires an async head poll.** `handleBlockSkip` triggers
+   `PollLatestBlockNumber` in a fire-and-forget goroutine (10s budget, coalesced
+   by the poller's debounce) so the next retry sees a fresh head instead of
+   waiting 10s+ for the background ticker.
+4. **B forwards — and returns null.** B declares no bounds, so the gate lets
+   the request through; B's node simply hasn't ingested N yet and answers
+   `result: null`. A null block is emptyish, `eth_getBlockByNumber` is not in
+   `emptyResultAccept`, so the sweep exhausts keeping the empty response as the
+   best result.
+5. **The executor classifies the miss as "data not here *yet*".** With
+   `retryEmpty` on, the emptyish best result maps to retry reason
+   `empty_result`; `computeDelay` takes the catch-up path — **EMA block time ×
+   `blockUnavailableDelayMultiplier` (default 1.0) ≈ 2s** — betting the data
+   appears within about one block.
+   `erpc_network_retry_attempt_total{reason="empty_result"}` counts it and
+   `erpc_network_data_unavailable_wait_seconds` records the wait.
+6. **The wait is exactly when the fleet catches up.** The chain produces N+1;
+   A's node — one block behind — ingests N, and the poller refreshes eRPC's
+   cached head for A from N−1 to N.
+7. **Retry: A serves.** The policy orders `[A, B]` again; A's gate recomputes
+   its upper bound from the fresh head (`latestBlockMinus: 0` → maxBound = N),
+   N ≤ N, the request forwards, and A returns block N — `200 OK`, one catch-up
+   retry after the first attempt.
+
+Had the client asked for **N+1** — beyond *every* upstream's head — none of this
+would have fired: `tryShortCircuitFutureBlock` returns a truthful `null` straight
+from `Forward`, with no dispatch and no rate-limit permit consumed (details
+below).
+
+## In the source
+
+### The availability gate — `checkUpstreamBlockAvailability` (`erpc/networks.go:2869`)
+
+- Runs per upstream, inside the sweep loop right before dispatch
+  (`networks.go:2194`). A skip just `continue`s to the next upstream — it never
+  fails the request by itself.
+- Enforces **only the upstream's configured serving range**
+  (`EvmBlockAvailabilityBounds`, `upstream/upstream.go:1166`): explicit
+  `evm.blockAvailability.lower/upper`, with the deprecated
+  `maxAvailableRecentBlocks` folded in as a lower bound. Unbounded on both
+  sides → nothing to enforce.
+- Below the lower bound → **not retryable** (pruned history won't reappear by
+  waiting). Above the upper bound → retryable only while the block is also
+  ahead of the upstream's live head, within `maxRetryableBlockDistance`.
+- **Fail-open by design**: non-EVM network, unresolvable block number (e.g. a
+  block-hash lookup), or poller not ready → the request proceeds. There is
+  deliberately *no* implicit "block > latestBlock" head check here — it raced
+  the state poller on fast chains and falsely rejected fresh blocks
+  (issue #934). Tip-awareness lives in the short-circuit and in
+  `integrity.enforceHighestBlock` instead.
+- Range methods (`eth_getLogs`, `trace_filter`, `arbtrace_filter`) are exempt —
+  they enforce availability through their own range-aware hook — and operators
+  can opt out per method or network with `enforceBlockAvailability: false`.
+
+### The retry horizon — `maxRetryableBlockDistance` (`erpc/networks.go:1324`)
+
+- Default: **max(128, 60s of chain progress)** — a 128-block floor
+  (`defaultMaxRetryableBlockDistance`) versus `retryableBlockHorizon` (60s)
+  divided by the network's EMA block time (`networks.go:1343`). On a 2s chain:
+  max(128, 30) = **128**; on a 0.25s chain: max(128, 240) = **240**.
+- Why chain progress: 128 blocks is ~25 minutes on a 12s chain but ~30 seconds
+  at 4 blocks/s — *a minute of chain progress means the same thing everywhere.*
+  Larger is the safe direction: the value only decides whether to keep trying,
+  so it can cost extra retries but never turn a serveable request into a
+  failure.
+- Operator override: `networks[].evm.maxRetryableBlockDistance` — an explicit
+  value is returned untouched.
+
+### The future-block short-circuit — `tryShortCircuitFutureBlock` (`erpc/networks.go:853`)
+
+- A concrete-numbered `eth_getBlockByNumber` beyond **every** eligible
+  upstream's head gets a synthesized `null` returned directly from `Forward`
+  (call site `networks.go:2005`) — never dispatched, never cached, and it runs
+  before rate limiting so it consumes no permit.
+- The comparison uses the **MAX observed head** across eligible upstreams (at
+  the network's `emptyResultConfidence`, default `blockHead`) — not the
+  majority served tip — so it can never null out a block the most-ahead
+  upstream actually has.
+- Gated on `servedTip.enabledFor: ["latest"]` — the same opt-in that makes the
+  head trustworthy; the default max mode sweeps instead. Unknown head → fail
+  open.
+
+### The catch-up wait — `shouldRetryWithReason` + `computeDelay` (`erpc/network_executor.go:396`, `:554`)
+
+- Three retry reasons share the catch-up path: `block_unavailable` (the gate),
+  `empty_result` (emptyish result + `retryEmpty`), and `missing_data` (the
+  upstream said "I don't have it"). All three mean *the data will appear
+  shortly*; genuine errors (`retryable_error`, `pending_tx`) use exponential
+  backoff instead.
+- The delay is `dynamicBlockUnavailableDelay()` — **EMA block time ×
+  `blockUnavailableDelayMultiplier` (default 1.0)**, wired from the health
+  tracker's per-network block time in `erpc/networks_registry.go:105`. Before
+  the EMA warms up it falls back to the fixed `retry.emptyResultDelay` (no
+  hardcoded default — set it per chain).
+- All catch-up retries share one cap: `retry.emptyResultMaxAttempts`
+  (**default 2** — one original + one retry), a separate budget from
+  `maxAttempts`, which governs genuine-error failover.
+- `retryEmpty` defaults **off** (`common/request.go:142`): empty responses pass
+  through as-is unless the network sets `directiveDefaults.retryEmpty: true` or
+  the caller sends `X-ERPC-Retry-Empty: true`. Bounds-gated skips need no
+  directive — their retryable classification comes from the gate itself.
+
+### The state poller — `architecture/evm/evm_state_poller.go`
+
+- `FullySyncedThreshold = 4` (`:25`): an upstream is trusted as synced only
+  after four consecutive "not syncing" answers; a single `syncing=true` resets
+  the counter. Syncing upstreams are excluded from head computations, so a
+  catching-up node can't poison the gate's "live head".
+- The skip-triggered `PollLatestBlockNumber` runs with a 10s timeout and
+  respects the poller debounce (`DefaultEvmStatePollerDebounce = 5s`,
+  `common/defaults.go:2364`), so concurrent triggers from many requests
+  coalesce into one poll.
+
+## First principles
+
+> **⏳ Waiting only works below the finality horizon.** A block that will exist
+> in about one block time is worth waiting for; pruned history and permanently
+> missing slots are not. Every wait-or-fail decision on this path encodes one
+> question — *will this data appear?* — and answers it from distance-to-head,
+> not from error text.
+
+> **🔓 Fail open when the bounds are unknown.** Non-EVM network, block-hash
+> lookup, cold poller, no configured bounds — every "can't tell" branch lets
+> the request through. Availability gating is a latency and quota optimization;
+> it must never become the reason a serveable request fails.
+
+> **📏 Ask the chain how long to wait, not the config file.** The catch-up
+> delay derives from the network's measured block time (EMA × 1.0), so the same
+> defaults wait ~250ms on Arbitrum and ~12s on Ethereum — and
+> `maxRetryableBlockDistance` scales the "is it coming?" horizon the same way.
+
+## Agent reference
+
+<PromptExample
+  n={1}
+  title="Audit my catch-up retries"
+  prompt="Using my eRPC config and metrics, check whether block_unavailable / empty_result / missing_data retries on my fastest chain are healthy tip-racing or a chronically lagging upstream: compare the catch-up wait p95 against that chain's block time and read the wait pressure trend, then recommend concrete config changes (blockAvailability bounds, maxRetryableBlockDistance, retryEmpty, emptyResultMaxAttempts)."
+  defaultOpen={false}
+/>
+
+Reference URL for agents: `https://docs.erpc.cloud/inside-erpc/block-availability.llms.txt`
+
+<AISection title="Block availability — full agent reference" hint="Availability gating, retry horizons, catch-up waits, metrics, and source entry points.">
+
+### How it works
+
+Before dispatch, the request's concrete block number (client-sent or
+interpolated from a tag) is compared per upstream against its configured
+`evm.blockAvailability` bounds inside the selection sweep. Below the lower
+bound is a terminal skip (pruned history); above the upper bound is retryable
+only while the block sits within `maxRetryableBlockDistance` (default
+max(128, 60s ÷ EMA block time)) of that upstream's live head — and every
+retryable skip fires an async `PollLatestBlockNumber` (10s budget,
+debounce-coalesced) so the cached head refreshes before the retry. Upstreams
+without bounds forward normally; when the node simply hasn't ingested the
+block it returns empty, which (with `retryEmpty` on) the executor classifies
+as `empty_result`. The three "not yet data" reasons — `block_unavailable`,
+`empty_result`, `missing_data` — share one delay path: EMA block time ×
+`blockUnavailableDelayMultiplier` (default 1.0), falling back to
+`retry.emptyResultDelay` before the EMA warms, all capped by
+`retry.emptyResultMaxAttempts` (default 2), a budget separate from
+`maxAttempts`. Separately, a concrete `eth_getBlockByNumber` beyond every
+eligible upstream's head short-circuits to a truthful `null` without
+dispatching when `servedTip.enabledFor` includes `latest`. Every uncertain
+branch — unknown block number, unknown bounds, cold poller — fails open and
+lets the request through.
+
+### Observability
+
+| Metric | Type | Labels | When it fires |
+|---|---|---|---|
+| `erpc_upstream_stale_upper_bound_total` | counter | `project`, `vendor`, `network`, `upstream`, `category`, `confidence` | A request was skipped because its block was above the upstream's configured upper availability bound |
+| `erpc_upstream_stale_lower_bound_total` | counter | `project`, `vendor`, `network`, `upstream`, `category`, `confidence` | A request was skipped below the lower bound (pruned history — never retryable) |
+| `erpc_upstream_request_errors_total` | counter | `project`, `vendor`, `network`, `upstream`, `category`, `error`, `severity`, `composite`, `finality`, `user`, `agent_name` | `handleBlockSkip` records each availability skip with `severity="info"` |
+| `erpc_network_retry_attempt_total` | counter | `project`, `network`, `category`, `reason`, `finality` | Every network-scope retry; the catch-up reasons are `block_unavailable`, `empty_result`, `missing_data` |
+| `erpc_network_data_unavailable_wait_seconds` | histogram | `project`, `network`, `category`, `reason`, `finality` | The wall-clock catch-up wait before a not-yet-data retry — ≈ one block time when healthy |
+| `erpc_network_dynamic_block_time_milliseconds` | gauge | `project`, `network` | The EMA block time that sizes both the catch-up wait and the retry horizon |
+
+The Grafana **Catch-up Retries / Wait / Pressure** panels build on the last
+two; read the runbook at `monitoring/catch-up-metrics.md` before judging them.
+A non-zero baseline is normal tip-racing — judge by pressure trend
+(`rate(_sum)` ≈ concurrent waiters, via Little's law) and per-chain wait
+sanity, and treat any catch-up volume on `finalized` data as a red flag.
+
+### Source code entry points
+
+- Availability gate — [<SourceLink file="erpc/networks.go" lines="2843-2940" />], call site [<SourceLink file="erpc/networks.go" lines="2193-2198" />]
+- Skip handler + async head poll — [<SourceLink file="erpc/networks.go" lines="2772-2819" />]
+- Retry horizon (128 blocks vs 60s of chain progress) — [<SourceLink file="erpc/networks.go" lines="1321-1354" />]
+- Future-block short-circuit — [<SourceLink file="erpc/networks.go" lines="839-879" />], call site [<SourceLink file="erpc/networks.go" lines="2001-2011" />]
+- Retry-reason classification (`block_unavailable` / `empty_result` / `missing_data`) — [<SourceLink file="erpc/network_executor.go" lines="393-552" />]
+- Catch-up delay path (EMA × multiplier, fixed fallback) — [<SourceLink file="erpc/network_executor.go" lines="554-587" />]
+- Dynamic delay wiring from the health tracker — [<SourceLink file="erpc/networks_registry.go" lines="102-118" />]
+- State poller (`FullySyncedThreshold = 4`, syncing exclusion) — [<SourceLink file="architecture/evm/evm_state_poller.go" lines="25" />], [<SourceLink file="architecture/evm/evm_state_poller.go" lines="330-400" />]
+- Upstream bounds resolution — [<SourceLink file="upstream/upstream.go" lines="1161-1168" />]
+- Defaults (multiplier 1.0, poller debounce 5s, emptyResultMaxAttempts 2) — [<SourceLink file="common/defaults.go" lines="2363-2366" />], [<SourceLink file="common/defaults.go" lines="2408-2412" />]
+
+### Related pages
+
+- [Block tracking & served tip](/reference/evm/block-tracking) — how upstream heads are tracked and distilled into the served tip
+- [Upstream config](/config/projects/upstreams) — `evm.blockAvailability` bounds and `maxRetryableBlockDistance` schema
+- [Retry policy](/config/failsafe/retry) — `emptyResultMaxAttempts`, `emptyResultDelay`, and the retry reasons
+- [Failsafe, in depth](/inside-erpc/failsafe-in-depth) — the executor that fires these retries
+- [Health & selection](/inside-erpc/health-and-selection) — the policy that ordered `[A, B]`
+- [EVM translation](/inside-erpc/evm-translation) — how `"latest"` becomes the concrete N this page gates on
+
+</AISection>
