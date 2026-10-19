@@ -16,6 +16,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/erpc/erpc/architecture/evm"
+	"github.com/erpc/erpc/architecture/jsonrpc"
 	"github.com/erpc/erpc/architecture/svm"
 	"github.com/erpc/erpc/clients"
 	"github.com/erpc/erpc/common"
@@ -202,6 +203,7 @@ type Upstream struct {
 
 	networkId            atomic.Value
 	networkLabel         atomic.Value
+	networkCfg           atomic.Pointer[common.NetworkConfig]
 	supportedMethods     sync.Map
 	metricsTracker       *health.Tracker
 	sharedStateRegistry  data.SharedStateRegistry
@@ -210,6 +212,7 @@ type Upstream struct {
 	rateLimiterAutoTuner *RateLimitAutoTuner
 	evmStatePoller       common.EvmStatePoller
 	svmStatePoller       common.SvmStatePoller
+	jsonRpcStatePoller   common.JsonRpcStatePoller
 	statePollerOnce      sync.Once
 	// True after successful chainId detection/validation; enables short-circuit in EvmGetChainId.
 	chainIdValidated atomic.Bool
@@ -339,6 +342,11 @@ func (u *Upstream) Bootstrap(ctx context.Context) error {
 			u.evmStatePoller = evm.NewEvmStatePoller(u.ProjectId, u.appCtx, u.logger, u, u.metricsTracker, u.sharedStateRegistry)
 		case common.UpstreamTypeSvm:
 			u.svmStatePoller = svm.NewSvmStatePoller(u.ProjectId, u.appCtx, u.logger, u, u.metricsTracker, u.sharedStateRegistry)
+		case common.UpstreamTypeJsonRpc:
+			// The generic poller's loop starts only when Configure receives a
+			// configured jsonrpc.statePoller (via SetNetworkConfig) — without
+			// probe config there is no poller activity, by design.
+			u.jsonRpcStatePoller = jsonrpc.NewJsonRpcStatePoller(u.ProjectId, u.appCtx, u.logger, u, u.metricsTracker, u.sharedStateRegistry)
 		}
 	})
 	u.operatorCordonVar()
@@ -365,6 +373,11 @@ func (u *Upstream) Bootstrap(ctx context.Context) error {
 		}
 		if err := u.svmStatePoller.Bootstrap(ctx); err != nil {
 			u.logger.Error().Err(err).Msg("failed on initial bootstrap of svm state poller (will retry in background)")
+		}
+	}
+	if u.jsonRpcStatePoller != nil {
+		if err := u.jsonRpcStatePoller.Bootstrap(ctx); err != nil {
+			u.logger.Error().Err(err).Msg("failed on initial bootstrap of jsonrpc state poller (will retry in background)")
 		}
 	}
 
@@ -492,6 +505,11 @@ func (u *Upstream) SetNetworkConfig(cfg *common.NetworkConfig) {
 		u.logger.Warn().Msg("unexpectedly received nil network config")
 		return
 	}
+	// Keep the full network config reachable from the extractor (error rules,
+	// method declarations) and the generic state poller (probe configuration).
+	// Stored read-only; the config itself is shared with the network, which
+	// treats it as immutable after bootstrap.
+	u.networkCfg.Store(cfg)
 	if cfg.Evm != nil && u.evmStatePoller != nil {
 		// propagate alias to evm config so the poller can use it without a direct network reference
 		u.evmStatePoller.SetNetworkConfig(cfg)
@@ -500,6 +518,15 @@ func (u *Upstream) SetNetworkConfig(cfg *common.NetworkConfig) {
 		// StatePollerDebounce is a network-level SVM setting; the per-upstream
 		// poller has no direct network reference, so push the cadence in here.
 		u.svmStatePoller.SetDebounceInterval(cfg.Svm.StatePollerDebounce.Duration())
+	}
+	if cfg.Jsonrpc != nil && u.jsonRpcStatePoller != nil {
+		// The generic poller polls only what the network's jsonrpc.statePoller
+		// block declares; without it the poller stays inert (v1 behavior).
+		if sp := cfg.Jsonrpc.StatePoller; sp != nil {
+			if err := u.jsonRpcStatePoller.Configure(sp); err != nil {
+				u.logger.Error().Err(err).Msg("failed to configure jsonrpc state poller")
+			}
+		}
 	}
 	// Always set networkId from the provided config
 	nid := cfg.NetworkId()
@@ -1413,6 +1440,16 @@ func (u *Upstream) detectFeatures(ctx context.Context) error {
 		// Genesis-hash validation runs in Bootstrap (svmVerifyGenesisHash) once
 		// the client and networkId are in place, so it can go through the
 		// upstream's normal Forward path.
+	} else if cfg.Type == common.UpstreamTypeJsonRpc {
+		// No protocol probing by design: the operator declares which jsonrpc
+		// network (slug) this upstream serves. Config validation enforces the
+		// block's presence and charset.
+		if cfg.Jsonrpc == nil || cfg.Jsonrpc.NetworkId == "" {
+			return common.NewErrUpstreamClientInitialization(
+				fmt.Errorf("jsonrpc upstream %q is missing jsonrpc.networkId", cfg.Id), u,
+			)
+		}
+		u.networkId.Store(util.JsonRpcNetworkId(cfg.Jsonrpc.NetworkId))
 	} else {
 		return fmt.Errorf("upstream type not supported: %s", cfg.Type)
 	}

@@ -78,6 +78,7 @@ func directiveMatcherProjects(t *testing.T) *ProjectsRegistry {
 		ssr,
 		nil, // evmJsonRpcCache
 		nil, // svmJsonRpcCache — added on this branch
+		nil, // jsonRpcCache
 		nil, // rateLimitersRegistry
 		thirdparty.NewVendorsRegistry(),
 		nil,

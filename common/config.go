@@ -309,6 +309,7 @@ type AliasingRuleConfig struct {
 type DatabaseConfig struct {
 	EvmJsonRpcCache *CacheConfig       `yaml:"evmJsonRpcCache,omitempty" json:"evmJsonRpcCache"`
 	SvmJsonRpcCache *CacheConfig       `yaml:"svmJsonRpcCache,omitempty" json:"svmJsonRpcCache"`
+	JsonRpcCache    *CacheConfig       `yaml:"jsonRpcCache,omitempty" json:"jsonRpcCache"`
 	SharedState     *SharedStateConfig `yaml:"sharedState,omitempty" json:"sharedState"`
 }
 
@@ -359,6 +360,23 @@ type CacheMethodConfig struct {
 	// EnforceBlockAvailability controls whether per-upstream block availability bounds (upper/lower)
 	// are enforced for this method at the network level. When nil or true, enforcement is enabled.
 	EnforceBlockAvailability *bool `yaml:"enforceBlockAvailability,omitempty" json:"enforceBlockAvailability,omitempty"`
+
+	// Unfinalized (jsonrpc networks) declares the method's responses are pinned
+	// to a slot/height/hash/signature but fork-droppable until the chain's
+	// finality catches up — TTL policies keyed on finality: unfinalized apply.
+	// Mutually exclusive with Finalized, Realtime and FinalityFromParam.
+	Unfinalized bool `yaml:"unfinalized,omitempty" json:"unfinalized,omitempty"`
+	// FinalityFromParam (jsonrpc networks) declares that one method name has
+	// per-call finality carried by a request param (e.g. NEAR's "finality"
+	// param, Starknet block tags). Mutually exclusive with the static flags.
+	FinalityFromParam *FinalityFromParamConfig `yaml:"finalityFromParam,omitempty" json:"finalityFromParam,omitempty"`
+	// CacheTipBucket (jsonrpc networks) partitions the cache key by tip/bucketSize
+	// for this method; requires a configured jsonrpc.statePoller. 0 disables.
+	CacheTipBucket int `yaml:"cacheTipBucket,omitempty" json:"cacheTipBucket,omitempty"`
+	// ResultClassifications (jsonrpc networks) declares result-embedded failure
+	// shapes (e.g. Stellar getTransaction status NOT_FOUND) that must be treated
+	// as errors before caching/consensus see the response.
+	ResultClassifications []*JsonRpcClassificationRuleConfig `yaml:"resultClassifications,omitempty" json:"resultClassifications,omitempty"`
 }
 
 type CachePolicyConfig struct {
@@ -950,6 +968,7 @@ type UpstreamConfig struct {
 	Endpoint                     string                   `yaml:"endpoint,omitempty" json:"endpoint"`
 	Evm                          *EvmUpstreamConfig       `yaml:"evm,omitempty" json:"evm"`
 	Svm                          *SvmUpstreamConfig       `yaml:"svm,omitempty" json:"svm"`
+	Jsonrpc                      *JsonrpcUpstreamConfig   `yaml:"jsonrpc,omitempty" json:"jsonrpc"`
 	JsonRpc                      *JsonRpcUpstreamConfig   `yaml:"jsonRpc,omitempty" json:"jsonRpc"`
 	Grpc                         *GrpcUpstreamConfig      `yaml:"grpc,omitempty" json:"grpc"`
 	IgnoreMethods                []string                 `yaml:"ignoreMethods,omitempty" json:"ignoreMethods"`
@@ -2356,6 +2375,7 @@ type NetworkConfig struct {
 	Failsafe          []*FailsafeConfig        `yaml:"failsafe,omitempty" json:"failsafe"`
 	Evm               *EvmNetworkConfig        `yaml:"evm,omitempty" json:"evm"`
 	Svm               *SvmNetworkConfig        `yaml:"svm,omitempty" json:"svm"`
+	Jsonrpc           *JsonrpcNetworkConfig    `yaml:"jsonrpc,omitempty" json:"jsonrpc"`
 	SelectionPolicy   *SelectionPolicyConfig   `yaml:"selectionPolicy,omitempty" json:"selectionPolicy"`
 	DirectiveDefaults *DirectiveDefaultsConfig `yaml:"directiveDefaults,omitempty" json:"directiveDefaults"`
 	Alias             string                   `yaml:"alias,omitempty" json:"alias"`
@@ -2437,6 +2457,7 @@ func (n *NetworkConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		Failsafe          *FailsafeConfig          `yaml:"failsafe,omitempty"`
 		Evm               *EvmNetworkConfig        `yaml:"evm,omitempty"`
 		Svm               *SvmNetworkConfig        `yaml:"svm,omitempty"`
+		Jsonrpc           *JsonrpcNetworkConfig    `yaml:"jsonrpc,omitempty"`
 		SelectionPolicy   *SelectionPolicyConfig   `yaml:"selectionPolicy,omitempty"`
 		DirectiveDefaults *DirectiveDefaultsConfig `yaml:"directiveDefaults,omitempty"`
 		Alias             string                   `yaml:"alias,omitempty"`
@@ -2458,6 +2479,7 @@ func (n *NetworkConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	n.RateLimitBudget = old.RateLimitBudget
 	n.Evm = old.Evm
 	n.Svm = old.Svm
+	n.Jsonrpc = old.Jsonrpc
 	n.SelectionPolicy = old.SelectionPolicy
 	n.DirectiveDefaults = old.DirectiveDefaults
 	n.Alias = old.Alias
@@ -2680,6 +2702,176 @@ func (s *SvmUpstreamConfig) Copy() *SvmUpstreamConfig {
 		out.BlockAvailability = s.BlockAvailability.Copy()
 	}
 	return &out
+}
+
+// JsonrpcUpstreamConfig carries per-upstream binding for the generic JSON-RPC
+// architecture. Unlike EVM (chainId detectable over RPC) and SVM (cluster is a
+// protocol fact), a generic endpoint exposes nothing eRPC can probe to learn
+// which jsonrpc network it serves — the operator declares it.
+type JsonrpcUpstreamConfig struct {
+	// NetworkId is the slug of the jsonrpc network this upstream serves;
+	// composes the upstream's network ID "jsonrpc:<slug>". Required for
+	// upstreams with type: jsonrpc. Charset mirrors the network slug rule.
+	NetworkId string `yaml:"networkId" json:"networkId"`
+}
+
+// JsonrpcNetworkConfig carries the network-level configuration for generic
+// JSON-RPC networks. The architecture carries no protocol logic: the optional
+// blocks below are operator-declared facts (probe methods, error shapes) that
+// the generic machinery consumes, never protocol knowledge baked into eRPC.
+type JsonrpcNetworkConfig struct {
+	// NetworkId is the user-chosen slug composing the full network ID
+	// "jsonrpc:<slug>". Charset: letters, digits, '-', '_', '.'.
+	NetworkId string `yaml:"networkId" json:"networkId"`
+
+	// StatePoller optionally declares how to poll this network's tip
+	// (and optionally finalized tip, availability floor, and a health
+	// probe). Absent = no poller, no block tracking — the v1 property.
+	StatePoller *JsonRpcStatePollerConfig `yaml:"statePoller,omitempty" json:"statePoller,omitempty"`
+
+	// ErrorRules classifies JSON-RPC error shapes that the generic extractor
+	// cannot derive (e.g. NEAR's verror cause names). Evaluated in order,
+	// first match wins; no match = v1 fallthrough behavior.
+	ErrorRules []*JsonRpcClassificationRuleConfig `yaml:"errorRules,omitempty" json:"errorRules,omitempty"`
+}
+
+// JsonRpcStatePollerConfig declares the generic state poller probes.
+// All probes are optional except Tip (required when the block is present).
+type JsonRpcStatePollerConfig struct {
+	// Interval between poll ticks. Default 5s when unset.
+	Interval Duration `yaml:"interval,omitempty" json:"interval,omitempty" tstype:"Duration"`
+
+	// Tip polls the chain's best head. Required when statePoller is present.
+	Tip *JsonRpcStateProbeConfig `yaml:"tip,omitempty" json:"tip,omitempty"`
+
+	// FinalizedTip optionally polls a second, finalized counter (NEAR's
+	// block{finality:final}, XRPL's validated_ledger.seq, Substrate's
+	// two-hop chain_getFinalizedHead -> chain_getHeader).
+	FinalizedTip *JsonRpcStateProbeConfig `yaml:"finalizedTip,omitempty" json:"finalizedTip,omitempty"`
+
+	// Floor optionally polls the node's availability floor (Stellar
+	// getHealth.oldestLedger, XRPL server_info.complete_ledgers).
+	Floor *JsonRpcStateProbeConfig `yaml:"floor,omitempty" json:"floor,omitempty"`
+
+	// Health optionally declares a liveness probe; a JSON-RPC or transport
+	// error marks the upstream unhealthy for the tick.
+	Health *JsonRpcStateProbeConfig `yaml:"health,omitempty" json:"health,omitempty"`
+}
+
+// JsonRpcStateProbeConfig declares one poller probe: a JSON-RPC method, a
+// dot-path into the response, and how to decode the value at that path.
+type JsonRpcStateProbeConfig struct {
+	// Method is the JSON-RPC method to call (e.g. "status", "getLatestLedger").
+	Method string `yaml:"method" json:"method"`
+
+	// Path is a dot-path from the response root (e.g. "$.result.sync_info.latest_block_height").
+	Path string `yaml:"path" json:"path"`
+
+	// Encoding decodes the value: auto (default) accepts a JSON number, a
+	// decimal string, or a 0x hex string; number|string|hex force one form.
+	// An unparseable sample is a skipped tick, never a crash.
+	Encoding string `yaml:"encoding,omitempty" json:"encoding,omitempty"`
+
+	// Params, when set, is sent verbatim as the JSON-RPC params member —
+	// array form (Starknet/XRPL) or object form (NEAR). Nil sends [].
+	Params interface{} `yaml:"params,omitempty" json:"params,omitempty"`
+
+	// RangeStart parses the value as a (possibly disjoint) ledger range
+	// string ("a-b,c-d", "empty") and keeps only the start — XRPL's
+	// complete_ledgers. Non-range values mean "floor unknown", never 0.
+	RangeStart bool `yaml:"rangeStart,omitempty" json:"rangeStart,omitempty"`
+
+	// UnhealthyWhen, when it matches the probe response, treats the upstream
+	// as unhealthy for this tick exactly like a failed probe (e.g. CometBFT
+	// catching_up, NEAR syncing).
+	UnhealthyWhen *JsonRpcValueMatcherConfig `yaml:"unhealthyWhen,omitempty" json:"unhealthyWhen,omitempty"`
+
+	// ThenCall expresses a two-hop resolve (Substrate: block hash -> header
+	// number): the value at Path becomes the sole param of ThenCall.Method
+	// and the counter is read from ThenCall.Path instead.
+	ThenCall *JsonRpcThenCallConfig `yaml:"thenCall,omitempty" json:"thenCall,omitempty"`
+}
+
+// JsonRpcThenCallConfig is the resolve hop of a two-tip probe.
+type JsonRpcThenCallConfig struct {
+	// Method is the second JSON-RPC method to call.
+	Method string `yaml:"method" json:"method"`
+
+	// PassValueAsParam sends the first call's extracted value as the sole
+	// JSON-RPC param. The only supported parameterization in v2; required.
+	PassValueAsParam bool `yaml:"passValueAsParam" json:"passValueAsParam"`
+
+	// Path is the dot-path into the second response.
+	Path string `yaml:"path" json:"path"`
+
+	// Encoding decodes the second value (same grammar as the probe's).
+	Encoding string `yaml:"encoding,omitempty" json:"encoding,omitempty"`
+}
+
+// JsonRpcValueMatcherConfig matches a value extracted from a response by
+// path. Values are stringified on both sides before comparison, so chain
+// codes that arrive as numbers (Starknet 24) or strings (Substrate "4003")
+// both work. At most one of Equals/In may be set.
+type JsonRpcValueMatcherConfig struct {
+	Path   string        `yaml:"path" json:"path"`
+	Equals interface{}   `yaml:"equals,omitempty" json:"equals,omitempty"`
+	In     []interface{} `yaml:"in,omitempty" json:"in,omitempty"`
+}
+
+// JsonRpcClassificationRuleConfig declares how to classify a response shape
+// that the generic extractor cannot derive. Used for network-level errorRules
+// (JSON-RPC error envelopes and result-embedded failures) and for per-method
+// resultClassifications (result-embedded failures only).
+type JsonRpcClassificationRuleConfig struct {
+	// Match selects the envelope: ResultPath inspects the JSON-RPC result,
+	// ErrorPath inspects the error object (e.g. NEAR's $.error.cause.name).
+	Match *JsonRpcClassificationMatchConfig `yaml:"match" json:"match"`
+
+	// CodePath + CodeMap implement two-stage matching (XRPL): the rule
+	// matches the envelope, then the sub-code extracted from CodePath picks
+	// the class. CodeMap without CodePath is invalid.
+	CodePath string            `yaml:"codePath,omitempty" json:"codePath,omitempty"`
+	CodeMap  map[string]string `yaml:"codeMap,omitempty" json:"codeMap,omitempty"`
+
+	// ClassifyAs is the class for a matched rule without CodeMap:
+	// missingData | clientError | serverError.
+	ClassifyAs string `yaml:"classifyAs,omitempty" json:"classifyAs,omitempty"`
+
+	// Default is the class for a matched rule whose CodeMap has no entry
+	// for the extracted sub-code.
+	Default string `yaml:"default,omitempty" json:"default,omitempty"`
+}
+
+// JsonRpcClassificationMatchConfig selects a value inside a JSON-RPC
+// response. Exactly one of ResultPath/ErrorPath must be set; at most one of
+// Equals/In/IsNull. Values are stringified on both sides before comparison.
+type JsonRpcClassificationMatchConfig struct {
+	ResultPath string        `yaml:"resultPath,omitempty" json:"resultPath,omitempty"`
+	ErrorPath  string        `yaml:"errorPath,omitempty" json:"errorPath,omitempty"`
+	Equals     interface{}   `yaml:"equals,omitempty" json:"equals,omitempty"`
+	In         []interface{} `yaml:"in,omitempty" json:"in,omitempty"`
+	IsNull     bool          `yaml:"isNull,omitempty" json:"isNull,omitempty"`
+}
+
+// FinalityFromParamConfig declares that a method's finality is carried by a
+// request param. The mapping table is the operator's assertion about the
+// chain's finality model; eRPC never validates values against a chain enum.
+type FinalityFromParamConfig struct {
+	// Key matches any object param containing this key (e.g. NEAR's
+	// "finality"). Mutually exclusive with Index.
+	Key string `yaml:"key,omitempty" json:"key,omitempty"`
+
+	// Index selects a positional param (e.g. Starknet's block_id at index 0).
+	// Mutually exclusive with Key.
+	Index *int `yaml:"index,omitempty" json:"index,omitempty"`
+
+	// Map converts the stringified param value to a finality enum value
+	// (finalized|unfinalized|realtime|unknown).
+	Map map[string]string `yaml:"map" json:"map"`
+
+	// Default applies when the param is absent, non-string, or unmapped.
+	// Required — no silent unknown.
+	Default string `yaml:"default" json:"default"`
 }
 
 type EvmNetworkConfig struct {
@@ -3433,6 +3625,11 @@ func (c *NetworkConfig) NetworkId() string {
 			return ""
 		}
 		return util.SvmNetworkId(c.Svm.Chain, c.Svm.Cluster)
+	case ArchitectureJsonRpc:
+		if c.Jsonrpc == nil || c.Jsonrpc.NetworkId == "" {
+			return ""
+		}
+		return util.JsonRpcNetworkId(c.Jsonrpc.NetworkId)
 	default:
 		return ""
 	}

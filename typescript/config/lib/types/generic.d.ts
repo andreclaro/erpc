@@ -1,4 +1,4 @@
-import type { DynamoDBConnectorConfig, EvmNetworkConfig, SvmNetworkConfig, AuthStrategyConfig as GenAuthStrategyConfig, JwtStrategyConfig, MemoryConnectorConfig, NetworkStrategyConfig, PostgreSQLConnectorConfig, RedisConnectorConfig, SecretStrategyConfig, SiweStrategyConfig } from "../generated";
+import type { DynamoDBConnectorConfig, EvmNetworkConfig, JsonrpcNetworkConfig, SvmNetworkConfig, AuthStrategyConfig as GenAuthStrategyConfig, JwtStrategyConfig, MemoryConnectorConfig, NetworkStrategyConfig, PostgreSQLConnectorConfig, RedisConnectorConfig, SecretStrategyConfig, SiweStrategyConfig } from "../generated";
 /**
  * Possible log level configuration
  */
@@ -15,7 +15,7 @@ export type ByteSize = `${number}kb` | `${number}mb` | `${number}b` | number;
 /**
  * Suported network architecture
  */
-export type NetworkArchitecture = "evm" | "svm";
+export type NetworkArchitecture = "evm" | "svm" | "jsonrpc";
 /**
  * Supported connector driver type overide
  */
@@ -43,7 +43,7 @@ export type ConnectorConfig = {
 /**
  * Supported upstream type
  */
-export type UpstreamType = "evm" | "evm+goldsky" | "evm+alchemy" | "evm+blastapi" | "evm+conduit" | "evm+drpc" | "evm+dwellir" | "evm+envio" | "evm+etherspot" | "evm+infura" | "evm+pimlico" | "evm+quicknode" | "evm+llama" | "evm+thirdweb" | "evm+repository" | "evm+superchain" | "evm+chainstack" | "evm+tenderly" | "evm+onfinality" | "evm+erpc" | "evm+blockpi" | "evm+ankr" | "evm+routemesh" | "svm";
+export type UpstreamType = "evm" | "evm+goldsky" | "evm+alchemy" | "evm+blastapi" | "evm+conduit" | "evm+drpc" | "evm+dwellir" | "evm+envio" | "evm+etherspot" | "evm+infura" | "evm+pimlico" | "evm+quicknode" | "evm+llama" | "evm+thirdweb" | "evm+repository" | "evm+superchain" | "evm+chainstack" | "evm+tenderly" | "evm+onfinality" | "evm+erpc" | "evm+blockpi" | "evm+ankr" | "evm+routemesh" | "svm" | "jsonrpc";
 /**
  * Supported auth type
  */
@@ -72,6 +72,10 @@ export type EvmNetworkConfigForDefaults = Omit<EvmNetworkConfig, "chainId">;
  * Network defaults override (cluster isn't needed for defaults config)
  */
 export type SvmNetworkConfigForDefaults = Omit<SvmNetworkConfig, "cluster">;
+/**
+ * Network defaults override (networkId isn't needed for defaults config)
+ */
+export type JsonrpcNetworkConfigForDefaults = Omit<JsonrpcNetworkConfig, "networkId">;
 /**
  * Accepts both boolean (backward compat) and string (connector ID pattern) values.
  * Examples: true, false, "redis*", "memory*|dynamo*"

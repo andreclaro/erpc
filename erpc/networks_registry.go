@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/erpc/erpc/architecture/evm"
+	"github.com/erpc/erpc/architecture/jsonrpc"
 	"github.com/erpc/erpc/architecture/svm"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/consensus"
@@ -26,6 +27,7 @@ type NetworksRegistry struct {
 	metricsTracker       *health.Tracker
 	evmJsonRpcCache      *evm.EvmJsonRpcCache
 	svmJsonRpcCache      *svm.SvmJsonRpcCache
+	jsonRpcCache         *jsonrpc.GenericJsonRpcCache
 	rateLimitersRegistry *upstream.RateLimitersRegistry
 	policyEngine         *policy.Engine
 	preparedNetworks     sync.Map // map[string]*Network
@@ -47,6 +49,7 @@ func NewNetworksRegistry(
 	metricsTracker *health.Tracker,
 	evmJsonRpcCache *evm.EvmJsonRpcCache,
 	svmJsonRpcCache *svm.SvmJsonRpcCache,
+	jsonRpcCache *jsonrpc.GenericJsonRpcCache,
 	rateLimitersRegistry *upstream.RateLimitersRegistry,
 	policyEngine *policy.Engine,
 	logger *zerolog.Logger,
@@ -59,6 +62,7 @@ func NewNetworksRegistry(
 		metricsTracker:       metricsTracker,
 		evmJsonRpcCache:      evmJsonRpcCache,
 		svmJsonRpcCache:      svmJsonRpcCache,
+		jsonRpcCache:         jsonRpcCache,
 		rateLimitersRegistry: rateLimitersRegistry,
 		policyEngine:         policyEngine,
 		preparedNetworks:     sync.Map{},
@@ -339,6 +343,10 @@ func (nr *NetworksRegistry) prepareNetwork(nwCfg *common.NetworkConfig) (*Networ
 		if nr.svmJsonRpcCache != nil {
 			network.cacheDal = nr.svmJsonRpcCache.WithProjectId(nr.project.Config.Id)
 		}
+	case common.ArchitectureJsonRpc:
+		if nr.jsonRpcCache != nil {
+			network.cacheDal = nr.jsonRpcCache.WithProjectId(nr.project.Config.Id)
+		}
 	}
 	// Register alias for lazy-created networks to support alias-based routing
 	if nwCfg.Alias != "" {
@@ -401,6 +409,11 @@ func (nr *NetworksRegistry) resolveNetworkConfig(networkId string) (*common.Netw
 				return nil, common.NewErrInvalidEvmChainId(networkId)
 			}
 			nwCfg.Svm = &common.SvmNetworkConfig{Chain: chain, Cluster: cluster}
+		case common.ArchitectureJsonRpc:
+			if s[1] == "" {
+				return nil, common.NewErrInvalidEvmChainId(networkId)
+			}
+			nwCfg.Jsonrpc = &common.JsonrpcNetworkConfig{NetworkId: s[1]}
 		default:
 			return nil, common.NewErrInvalidEvmChainId(networkId)
 		}
