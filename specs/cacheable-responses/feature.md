@@ -1,7 +1,8 @@
 # Response-mark cache admission (consensus) — Specification
 
-**Status**: Proposal (reshapes [#1387](https://github.com/erpc/erpc/pull/1387) / crcl-main [#273](https://github.com/crcl-main/erpc/pull/273))
+**Status**: Proposal
 **Direction**: [@aramalipoor](https://github.com/erpc/erpc/pull/1387#discussion_r4443850931) — cache stays consensus-ignorant; mark on response
+**Base**: `main`
 **Last revised**: 2026-11-02
 
 Companion: [plan.md](./plan.md) (delivery).
@@ -15,34 +16,32 @@ Companion: [plan.md](./plan.md) (delivery).
 ## TLDR
 
 Consensus marks the **winning response** as cacheable or not from a per-policy
-bool. The cache only reads that mark. Selector networks reopen Get/Set; writes
-from non-cacheable grades are skipped.
+bool. The cache only reads that mark. Selector networks use Get/Set normally;
+writes from non-cacheable grades are skipped.
 
 - **`cacheableResponses` on each consensus policy** (inline default + named).
 - **Omit defaults:** inline / fail-closed `default` → `true`; named policies → `false`.
 - **Mark in `Consensus.Run`** after the round, on the response (not the request).
 - **Cache Set** skips when mark is `false`; `nil` (never through consensus) caches as today.
-- **No** `cacheableConsensusPolicies` on the cache config; **no** `cachingStrategy` enum.
 - **Scope v1:** consensus only (multi-module AND later).
 
 ---
 
 ## 1. Purpose
 
-Replace the allowlist approach (`database.*.cacheableConsensusPolicies`) with
-response-level admission owned by consensus.
+Response-level cache admission owned by consensus. The cache component stays
+generic: it only honors a mark on the response.
 
 ### Goals
 
-- Cache component has no consensus types / policy-name lists.
+- Cache has no consensus types or policy-name knowledge.
 - Operators control cacheability per consensus grade.
-- Selector-enabled networks can cache trusted grades again.
-- Zero behavior change for no-selector + cache deploys (`nil` mark → still cache).
+- Selector-enabled networks can cache trusted grades.
+- Zero behavior change for traffic that never runs consensus (`nil` mark → still cache).
 
 ### Non-goals
 
 - Integrity (or other modules) voting on the mark in v1.
-- `cachingStrategy: defaultAllow | defaultIgnore`.
 - Encoding policy names into cache keys / multiplexing under selector.
 
 ---
@@ -69,12 +68,6 @@ failsafe:
           cacheableResponses: false  # omit also false
 ```
 
-**Upgrade map** from allowlist PR: `cacheableConsensusPolicies: ["default"]` →
-rely on inline default `true` + named weaker grades `false`.
-
-**Remove:** `CacheConfig.cacheableConsensusPolicies`, `AllowsSelectorCache`,
-cache-side policy sets.
-
 ---
 
 ## 3. Behavior
@@ -83,8 +76,11 @@ cache-side policy sets.
 |---|---|
 | `Consensus.Run` | After `ex.Run`, `resp.SetCacheable(pol.CacheableResponses)` |
 | Cache Set | Skip if mark == `false`; `nil` → allow |
-| Cache Get | No consensus knowledge; under selector **reopen Get** |
-| Forward | Drop `cacheEligible` / `AllowsSelectorCache`; use cache when `cacheDal` exists |
+| Cache Get | No consensus knowledge; available whenever a cache is configured |
+| Forward | Use cache when `cacheDal` exists (+ existing skip-read directives) |
+
+Today selector-enabled networks skip cache entirely. After this feature, that
+skip is removed: admission is write-side via the response mark.
 
 ---
 

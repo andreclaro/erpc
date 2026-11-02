@@ -2,8 +2,8 @@
 
 **Status**: Spec landed; implementation pending
 **Last revised**: 2026-11-02
+**Base**: `main`
 **Spec**: [feature.md](./feature.md) — single source of truth for behavior
-**Related**: [erpc/erpc#1387](https://github.com/erpc/erpc/pull/1387), [crcl-main#273](https://github.com/crcl-main/erpc/pull/273)
 
 Companion to [feature.md](./feature.md). Delivery sequence only.
 
@@ -11,8 +11,8 @@ Companion to [feature.md](./feature.md). Delivery sequence only.
 
 ## TLDR
 
-Land the spec, then replace the allowlist PR with response marks + policy bools.
-Ship config → mark → cache Set → Forward Get reopen → docs; delete allowlist.
+Ship config → mark in `Consensus.Run` → cache Set respects mark → Forward uses
+cache under selector → docs.
 
 ---
 
@@ -21,11 +21,10 @@ Ship config → mark → cache Set → Forward Get reopen → docs; delete allow
 | Topic | Where |
 |-------|--------|
 | Mark on response; cache ignores consensus types | feature §1, §5 |
-| `cacheableResponses *bool`; omit default/true, named/false | feature §2 |
+| `cacheableResponses *bool`; omit default/`true`, named/`false` | feature §2 |
 | Set in `Consensus.Run` after round | feature §3, §5 |
-| Set skips `false`; nil allows; reopen Get under selector | feature §3 |
-| No `cachingStrategy`; consensus-only v1 | feature Non-goals / §6 |
-| Upgrade from allowlist → policy bools | feature §2 |
+| Set skips `false`; nil allows; Get available under selector | feature §3 |
+| Consensus-only v1 | feature Non-goals / §6 |
 
 ---
 
@@ -33,7 +32,7 @@ Ship config → mark → cache Set → Forward Get reopen → docs; delete allow
 
 - [x] Write `specs/cacheable-responses/feature.md`
 - [x] Write this plan
-- [ ] Review with Aram / maintainers; supersede allowlist approach on #1387
+- [ ] Review with Aram / maintainers
 
 **Acceptance**: Spec accepted as implementation contract.
 
@@ -61,18 +60,16 @@ Ship config → mark → cache Set → Forward Get reopen → docs; delete allow
 ## Phase 3 — Cache Set + Forward Get
 
 - Evm/Svm `Set`: skip when mark == `false` only
-- Remove allowlist field, `AllowsSelectorCache`, `cacheEligible` selector gate
-- Reopen Get under selector when `cacheDal` present
-- Replace allowlist tests with mark-based tests
+- Stop skipping cache under selector; use `cacheDal` whenever present
+- Tests: selector + default caches; selector + fallback does not write; no-consensus unchanged
 
-**Acceptance**: selector + default caches; selector + fallback does not write; no-selector unchanged.
+**Acceptance**: mark-based admission green end-to-end.
 
 ---
 
-## Phase 4 — Docs + PRs
+## Phase 4 — Docs
 
-- Update consensus-policies + cache AISections; migration note
-- Reshape #1387 / #273 (or replace) to this design
-- Stg: policy bools instead of `cacheableConsensusPolicies`
+- Update consensus-policies + cache AISections
+- Example: `cacheableResponses` on inline default vs `fallback`
 
-**Acceptance**: docs match code; PRs describe response-mark model.
+**Acceptance**: docs match code.
