@@ -15,29 +15,35 @@ Companion: [plan.md](./plan.md) (delivery).
 
 ## TLDR
 
-Consensus marks the **winning response** as cacheable or not from a per-policy
-bool. The cache only reads that mark. Selector networks use Get/Set normally;
-writes from non-cacheable grades are skipped.
+The cache has a default write strategy. Modules (consensus in v1) mark the
+**winning response** cacheable or not. Circle’s posture: **`defaultAllow`**, and
+set `cacheableResponses: false` on weaker grades like `fallback`.
 
+- **`cachingStrategy` on the cache block:** `defaultAllow` | `defaultIgnore`
+  (omit → **`defaultAllow`**).
 - **`cacheableResponses` on each consensus policy** (inline default + named).
-- **Omit defaults:** inline / fail-closed `default` → `true`; named policies → `false`.
+- **Omit defaults for the policy bool:** inline / fail-closed `default` → `true`;
+  named policies → `false`.
 - **Mark in `Consensus.Run`** after the round, on the response (not the request).
-- **Cache Set** skips when mark is `false`; `nil` (never through consensus) caches as today.
+- **Cache Set** combines strategy + mark (see §3).
 - **Scope v1:** consensus only (multi-module AND later).
 
 ---
 
 ## 1. Purpose
 
-Response-level cache admission owned by consensus. The cache component stays
-generic: it only honors a mark on the response.
+Response-level cache admission. The cache stays generic: it only knows a
+strategy and a mark on the response. Consensus (and later integrity) decide the
+mark without leaking policy names into the cache.
 
 ### Goals
 
 - Cache has no consensus types or policy-name knowledge.
+- Operators control the default write posture (`defaultAllow` vs `defaultIgnore`).
 - Operators control cacheability per consensus grade.
 - Selector-enabled networks can cache trusted grades.
-- Zero behavior change for traffic that never runs consensus (`nil` mark → still cache).
+- Existing users who omit `cachingStrategy` keep today’s open write posture
+  (`defaultAllow`).
 
 ### Non-goals
 
@@ -48,7 +54,25 @@ generic: it only honors a mark on the response.
 
 ## 2. Config surface
 
-On `ConsensusPolicyConfig`:
+### 2.1 Cache (`CacheConfig` under `evmJsonRpcCache` / `svmJsonRpcCache`)
+
+| Field | Type | Omit default |
+|---|---|---|
+| `cachingStrategy` | `defaultAllow` \| `defaultIgnore` | **`defaultAllow`** |
+
+```yaml
+database:
+  evmJsonRpcCache:
+    cachingStrategy: defaultAllow   # omit also defaultAllow
+    # connectors / policies ...
+```
+
+- **`defaultAllow`** — write unless a module marks the response uncacheable
+  (`false`). Unmarked (`nil`) responses are written.
+- **`defaultIgnore`** — write only when a module marks the response cacheable
+  (`true`). Unmarked responses are skipped.
+
+### 2.2 Consensus (`ConsensusPolicyConfig`)
 
 | Field | Type | Omit default |
 |---|---|---|
@@ -65,8 +89,11 @@ failsafe:
         fallback:
           extends: default
           requiredParticipants: []
-          cacheableResponses: false  # omit also false
+          cacheableResponses: false  # omit also false — Circle posture
 ```
+
+**Circle / typical selector setup:** leave cache at `defaultAllow`; set
+`cacheableResponses: false` on `fallback` (and any other weaker named grade).
 
 ---
 
@@ -75,12 +102,22 @@ failsafe:
 | Step | Rule |
 |---|---|
 | `Consensus.Run` | After `ex.Run`, `resp.SetCacheable(pol.CacheableResponses)` |
-| Cache Set | Skip if mark == `false`; `nil` → allow |
+| Cache Set | See decision table below |
 | Cache Get | No consensus knowledge; available whenever a cache is configured |
 | Forward | Use cache when `cacheDal` exists (+ existing skip-read directives) |
 
+**Set decision** (strategy × mark):
+
+| `cachingStrategy` | mark `nil` | mark `true` | mark `false` |
+|---|---|---|---|
+| `defaultAllow` | write | write | **skip** |
+| `defaultIgnore` | **skip** | write | **skip** |
+
+When multiple modules vote later: **AND** of explicit marks (any `false` →
+uncacheable); modules that did not run cast no vote. v1 only consensus sets the mark.
+
 Today selector-enabled networks skip cache entirely. After this feature, that
-skip is removed: admission is write-side via the response mark.
+skip is removed: admission is write-side via strategy + mark.
 
 ---
 
@@ -99,8 +136,10 @@ flowchart TD
   def --> run
   run --> mark["resp.SetCacheable(pol.cacheableResponses)"]
   mark --> set{Cache Set}
-  set -->|mark false| skip[Skip write]
-  set -->|mark true or nil| write[Persist]
+  set --> decide{"strategy × mark"}
+  decide -->|defaultAllow + false| skip[Skip write]
+  decide -->|defaultIgnore + nil/false| skip
+  decide -->|otherwise| write[Persist]
   mark --> client[Return to client]
 ```
 
@@ -118,11 +157,14 @@ sequenceDiagram
   C->>R: SetCacheable(pol.cacheableResponses)
   C-->>N: resp
   N->>K: Set(req, resp)
-  Note over K: skip only if mark == false
+  Note over K: defaultAllow: skip only if mark false
 ```
 
 ```mermaid
 flowchart LR
+  subgraph cache_cfg
+    S[cachingStrategy defaultAllow]
+  end
   subgraph consensus
     P[cacheableResponses on policy]
     Run[Consensus.Run marks response]
@@ -131,9 +173,10 @@ flowchart LR
     R[Response.cacheable *bool]
   end
   subgraph cache
-    S[JsonRpcCache.Set]
+    Set[JsonRpcCache.Set]
   end
-  P --> Run --> R --> S
+  S --> Set
+  P --> Run --> R --> Set
 ```
 
 ---
@@ -143,9 +186,14 @@ flowchart LR
 **Best place:** `Consensus.Run`, single choke point after `ex.Run` returns the
 winning response. Leave `markSelected` (ExecState / header) unchanged.
 
+API shape (aligned with `SetFromCache` / `FromCache`):
+- `SetCacheable(*bool)` / `Cacheable() *bool` for the mark
+- Effective allow for Set derived from strategy × mark (§3)
+
 ---
 
 ## 6. Open for later
 
 - Multi-module AND (consensus ∧ integrity ∧ …); absent module = no vote.
+- Integrity veto timing vs async cache Set.
 - Optional read-side mark checks (not required if Set is strict).
