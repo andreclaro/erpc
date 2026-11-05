@@ -5,13 +5,15 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
@@ -56,18 +58,18 @@ func newReadyDynamoConnector(t *testing.T, cfg *common.DynamoDBConnectorConfig) 
 
 // putRawItem writes an item directly, for shapes Set never produces (legacy
 // string values, already-expired TTLs, values with no payload).
-func putRawItem(t *testing.T, c *DynamoDBConnector, item map[string]*dynamodb.AttributeValue) {
+func putRawItem(t *testing.T, c *DynamoDBConnector, item map[string]types.AttributeValue) {
 	t.Helper()
-	_, err := c.writeClient.PutItem(&dynamodb.PutItemInput{TableName: aws.String(c.table), Item: item})
+	_, err := c.writeClient.PutItem(context.Background(), &dynamodb.PutItemInput{TableName: aws.String(c.table), Item: item})
 	require.NoError(t, err)
 }
 
-func ddbItem(pk, rk string) map[string]*dynamodb.AttributeValue {
-	return map[string]*dynamodb.AttributeValue{"pk": {S: aws.String(pk)}, "rk": {S: aws.String(rk)}}
+func ddbItem(pk, rk string) map[string]types.AttributeValue {
+	return map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: pk}, "rk": &types.AttributeValueMemberS{Value: rk}}
 }
 
-func pastTTL() *dynamodb.AttributeValue {
-	return &dynamodb.AttributeValue{N: aws.String(strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10))}
+func pastTTL() *types.AttributeValueMemberN {
+	return &types.AttributeValueMemberN{Value: strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10)}
 }
 
 func TestDynamoDBConnector_GetSetDelete(t *testing.T) {
@@ -79,16 +81,16 @@ func TestDynamoDBConnector_GetSetDelete(t *testing.T) {
 	require.NoError(t, c.Set(ctx, "pk", "no-ttl", make([]byte, 2048), nil))
 
 	legacy := ddbItem("pk", "legacy")
-	legacy["value"] = &dynamodb.AttributeValue{S: aws.String("legacy-string")}
+	legacy["value"] = &types.AttributeValueMemberS{Value: "legacy-string"}
 	putRawItem(t, c, legacy)
 
 	expired := ddbItem("pk", "expired")
-	expired["value"] = &dynamodb.AttributeValue{B: []byte("old")}
+	expired["value"] = &types.AttributeValueMemberB{Value: []byte("old")}
 	expired["ttl"] = pastTTL()
 	putRawItem(t, c, expired)
 
 	novalue := ddbItem("pk", "novalue")
-	novalue["value"] = &dynamodb.AttributeValue{N: aws.String("1")}
+	novalue["value"] = &types.AttributeValueMemberN{Value: "1"}
 	putRawItem(t, c, novalue)
 
 	cases := []struct {
@@ -130,20 +132,20 @@ func TestDynamoDBConnector_ReverseIndexGet(t *testing.T) {
 	require.NoError(t, c.Set(ctx, "evm:1:100", "rk", []byte("b100"), nil))
 	require.NoError(t, c.Set(ctx, "evm:1:200", "rk", []byte("b200"), nil))
 	legacy := ddbItem("evm:2:100", "rk")
-	legacy["value"] = &dynamodb.AttributeValue{S: aws.String("legacy")}
+	legacy["value"] = &types.AttributeValueMemberS{Value: "legacy"}
 	putRawItem(t, c, legacy)
 	// Expired item sorting above all live ones must be skipped.
 	expired := ddbItem("evm:1:999", "rk")
-	expired["value"] = &dynamodb.AttributeValue{B: []byte("expired")}
+	expired["value"] = &types.AttributeValueMemberB{Value: []byte("expired")}
 	expired["ttl"] = pastTTL()
 	putRawItem(t, c, expired)
 	// Only an expired item under this range key.
 	onlyExpired := ddbItem("evm:1:1", "dead-rk")
-	onlyExpired["value"] = &dynamodb.AttributeValue{B: []byte("x")}
+	onlyExpired["value"] = &types.AttributeValueMemberB{Value: []byte("x")}
 	onlyExpired["ttl"] = pastTTL()
 	putRawItem(t, c, onlyExpired)
 	bad := ddbItem("evm:3:1", "bad-rk")
-	bad["value"] = &dynamodb.AttributeValue{N: aws.String("1")}
+	bad["value"] = &types.AttributeValueMemberN{Value: "1"}
 	putRawItem(t, c, bad)
 
 	cases := []struct {
@@ -185,10 +187,10 @@ func TestDynamoDBConnector_List(t *testing.T) {
 	require.NoError(t, c.Set(ctx, "a", "1", []byte("va"), nil))
 	require.NoError(t, c.Set(ctx, "b", "2", []byte("vb"), nil))
 	legacy := ddbItem("c", "3")
-	legacy["value"] = &dynamodb.AttributeValue{S: aws.String("vc")}
+	legacy["value"] = &types.AttributeValueMemberS{Value: "vc"}
 	putRawItem(t, c, legacy)
 	expired := ddbItem("d", "4")
-	expired["value"] = &dynamodb.AttributeValue{B: []byte("old")}
+	expired["value"] = &types.AttributeValueMemberB{Value: []byte("old")}
 	expired["ttl"] = pastTTL()
 	putRawItem(t, c, expired)
 
@@ -262,19 +264,19 @@ func TestDynamoDBConnector_WatchCounter(t *testing.T) {
 func TestDynamoDBConnector_GetSimpleValueShapes(t *testing.T) {
 	ctx, c := newReadyDynamoConnector(t, ddbConnectorConfig(sharedDynamoEndpoint(t)))
 
-	item := func(key string, v *dynamodb.AttributeValue) {
+	item := func(key string, v types.AttributeValue) {
 		it := ddbItem(key, "value")
 		if v != nil {
 			it["value"] = v
 		}
 		putRawItem(t, c, it)
 	}
-	item("binary", &dynamodb.AttributeValue{B: []byte(`{"v":1,"t":5}`)})
-	item("string", &dynamodb.AttributeValue{S: aws.String(`{"v":2,"t":6}`)})
-	item("number", &dynamodb.AttributeValue{N: aws.String("7")})
+	item("binary", &types.AttributeValueMemberB{Value: []byte(`{"v":1,"t":5}`)})
+	item("string", &types.AttributeValueMemberS{Value: `{"v":2,"t":6}`})
+	item("number", &types.AttributeValueMemberN{Value: "7"})
 	item("no-value-attr", nil)
-	item("zero-ts", &dynamodb.AttributeValue{B: []byte(`{"v":3,"t":0}`)})
-	item("bool", &dynamodb.AttributeValue{BOOL: aws.Bool(true)})
+	item("zero-ts", &types.AttributeValueMemberB{Value: []byte(`{"v":3,"t":0}`)})
+	item("bool", &types.AttributeValueMemberBOOL{Value: true})
 
 	cases := []struct {
 		key  string
@@ -354,28 +356,28 @@ func TestDynamoDBConnector_EnsuresReverseIndexOnExistingTable(t *testing.T) {
 	// Create a table without the reverse index, then point a connector with a
 	// differently-named index at it: the connector must add the index.
 	plain := cfg.Table + "_plain"
-	_, err := c.writeClient.CreateTable(&dynamodb.CreateTableInput{
+	_, err := c.writeClient.CreateTable(ctx, &dynamodb.CreateTableInput{
 		TableName: aws.String(plain),
-		KeySchema: []*dynamodb.KeySchemaElement{
-			{AttributeName: aws.String("pk"), KeyType: aws.String("HASH")},
-			{AttributeName: aws.String("rk"), KeyType: aws.String("RANGE")},
+		KeySchema: []types.KeySchemaElement{
+			{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash},
+			{AttributeName: aws.String("rk"), KeyType: types.KeyTypeRange},
 		},
-		AttributeDefinitions: []*dynamodb.AttributeDefinition{
-			{AttributeName: aws.String("pk"), AttributeType: aws.String("S")},
-			{AttributeName: aws.String("rk"), AttributeType: aws.String("S")},
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("rk"), AttributeType: types.ScalarAttributeTypeS},
 		},
-		BillingMode: aws.String("PAY_PER_REQUEST"),
+		BillingMode: types.BillingModePayPerRequest,
 	})
 	require.NoError(t, err)
 
 	cfg2 := ddbConnectorConfig(endpoint)
 	cfg2.Table = plain
 	_, c2 := newReadyDynamoConnector(t, cfg2)
-	out, err := c2.writeClient.DescribeTableWithContext(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(plain)})
+	out, err := c2.writeClient.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(plain)})
 	require.NoError(t, err)
 	var names []string
 	for _, g := range out.Table.GlobalSecondaryIndexes {
-		names = append(names, *g.IndexName)
+		names = append(names, aws.ToString(g.IndexName))
 	}
 	assert.Contains(t, names, "idx_reverse")
 
@@ -411,19 +413,28 @@ func TestDynamoDBConnector_InitFailures(t *testing.T) {
 		})
 	}
 
-	t.Run("every auth mode builds a session", func(t *testing.T) {
+	t.Run("every auth mode builds a config", func(t *testing.T) {
+		credsFile := t.TempDir() + "/credentials"
+		require.NoError(t, os.WriteFile(credsFile, []byte("[default]\naws_access_key_id = a\naws_secret_access_key = b\n"), 0o600))
 		for _, auth := range []*common.AwsAuthConfig{
 			nil,
 			{Mode: "env"},
-			{Mode: "file", CredentialsFile: "/nonexistent", Profile: "default"},
+			{Mode: "file", CredentialsFile: credsFile, Profile: "default"},
 			{Mode: "secret", AccessKeyID: "a", SecretAccessKey: "b"},
 		} {
-			cfg := ddbConnectorConfig("http://127.0.0.1:1")
-			cfg.Auth = auth
-			sess, err := createSession(cfg)
+			awsCfg, err := createAWSConfig(context.Background(), auth, "us-west-2")
 			require.NoError(t, err)
-			assert.Equal(t, "us-west-2", *sess.Config.Region)
+			assert.Equal(t, "us-west-2", awsCfg.Region)
 		}
+	})
+
+	t.Run("file mode with unknown profile fails at build time", func(t *testing.T) {
+		credsFile := t.TempDir() + "/credentials"
+		require.NoError(t, os.WriteFile(credsFile, []byte("[default]\naws_access_key_id = a\naws_secret_access_key = b\n"), 0o600))
+		_, err := createAWSConfig(context.Background(), &common.AwsAuthConfig{
+			Mode: "file", CredentialsFile: credsFile, Profile: "nope",
+		}, "us-west-2")
+		require.Error(t, err)
 	})
 
 	t.Run("unreachable endpoint returns promptly and entry points report not initialized", func(t *testing.T) {

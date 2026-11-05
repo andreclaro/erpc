@@ -316,12 +316,12 @@ func TestHandleConnectionFailure_CoalescesConcurrentMarks(t *testing.T) {
 func TestPostgreSQLIAMAuthBeforeConnect(t *testing.T) {
 	t.Parallel()
 
-	sess, err := createAWSSession(&common.AwsAuthConfig{
+	awsCfg, err := createAWSConfig(context.Background(), &common.AwsAuthConfig{
 		Mode:            "secret",
 		AccessKeyID:     "AKIAIOSFODNN7EXAMPLE",
 		SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 	}, "us-east-1")
-	require.NoError(t, err, "createAWSSession must succeed with static creds")
+	require.NoError(t, err, "createAWSConfig must succeed with static creds")
 
 	iamCfg := &common.PostgreSQLIAMAuthConfig{
 		Enabled:  true,
@@ -330,7 +330,7 @@ func TestPostgreSQLIAMAuthBeforeConnect(t *testing.T) {
 		DBUser:   "erpc-user",
 	}
 
-	hook := newRDSBeforeConnect(sess, iamCfg)
+	hook := newRDSBeforeConnect(awsCfg, iamCfg)
 	require.NotNil(t, hook, "BeforeConnect hook must not be nil")
 
 	// Invoke the hook with a blank ConnConfig and verify it sets a password.

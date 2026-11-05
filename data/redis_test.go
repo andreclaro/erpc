@@ -942,7 +942,7 @@ func TestRedisConnector_ChainIsolation(t *testing.T) {
 func TestGenerateElastiCacheIAMToken(t *testing.T) {
 	t.Parallel()
 
-	sess, err := createAWSSession(&common.AwsAuthConfig{
+	awsCfg, err := createAWSConfig(context.Background(), &common.AwsAuthConfig{
 		Mode:            "secret",
 		AccessKeyID:     "AKIAIOSFODNN7EXAMPLE",
 		SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
@@ -956,7 +956,7 @@ func TestGenerateElastiCacheIAMToken(t *testing.T) {
 			Region:    "us-east-1",
 			UserID:    "iam-user-01",
 		}
-		token, err := generateElastiCacheIAMToken(sess, cfg)
+		token, err := generateElastiCacheIAMToken(context.Background(), awsCfg, cfg)
 		require.NoError(t, err)
 
 		// Token must have scheme stripped.
@@ -982,7 +982,7 @@ func TestGenerateElastiCacheIAMToken(t *testing.T) {
 			Region:    "us-east-1",
 			UserID:    "iam-user-01",
 		}
-		token, err := generateElastiCacheIAMToken(sess, cfg)
+		token, err := generateElastiCacheIAMToken(context.Background(), awsCfg, cfg)
 		require.NoError(t, err)
 		require.True(t, strings.HasPrefix(token, "my-cluster/"), "token host must be lowercased, got: %s", token)
 	})
@@ -993,7 +993,7 @@ func TestGenerateElastiCacheIAMToken(t *testing.T) {
 func TestRedisIAMAuthCredentialsProvider(t *testing.T) {
 	t.Parallel()
 
-	sess, err := createAWSSession(&common.AwsAuthConfig{
+	awsCfg, err := createAWSConfig(context.Background(), &common.AwsAuthConfig{
 		Mode:            "secret",
 		AccessKeyID:     "AKIAIOSFODNN7EXAMPLE",
 		SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
@@ -1007,7 +1007,7 @@ func TestRedisIAMAuthCredentialsProvider(t *testing.T) {
 		UserID:    "iam-user-01",
 	}
 
-	provider := newElastiCacheCredentialsProvider(sess, iamCfg)
+	provider := newElastiCacheCredentialsProvider(awsCfg, iamCfg)
 
 	username, token, err := provider(context.Background())
 	require.NoError(t, err)

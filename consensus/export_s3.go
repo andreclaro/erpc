@@ -2,18 +2,20 @@ package consensus
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/erpc/erpc/common"
 	"github.com/rs/zerolog"
 )
@@ -21,7 +23,7 @@ import (
 // s3PutObjectAPI is the sliver of the S3 client this exporter uses. It is an
 // interface so the buffering/flush logic can be tested without AWS.
 type s3PutObjectAPI interface {
-	PutObject(*s3.PutObjectInput) (*s3.PutObjectOutput, error)
+	PutObject(ctx context.Context, in *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
 }
 
 // pendingBatch is the set of records that will become ONE S3 object.
@@ -103,10 +105,11 @@ func newS3MisbehaviorExporter(cfg *common.MisbehaviorsDestinationConfig, log *ze
 		return nil, err
 	}
 
-	// Create AWS session with tuned HTTP transport for better connection reuse
-	awsConfig := &aws.Config{
-		Region: aws.String(cfg.S3.Region),
-		HTTPClient: &http.Client{
+	// Build AWS config with tuned HTTP transport for better connection reuse
+	ctx := context.Background()
+	optFns := []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(cfg.S3.Region),
+		awsconfig.WithHTTPClient(&http.Client{
 			Transport: &http.Transport{
 				Proxy: http.ProxyFromEnvironment,
 				DialContext: (&net.Dialer{
@@ -121,52 +124,70 @@ func newS3MisbehaviorExporter(cfg *common.MisbehaviorsDestinationConfig, log *ze
 				ExpectContinueTimeout: 1 * time.Second,
 			},
 			Timeout: 0,
-		},
-		MaxRetries: aws.Int(5),
-	}
-
-	// S3-compatible providers (Tigris, MinIO, R2, …) — path-style keeps bucket
-	// resolution off DNS, which every compatible provider supports.
-	if cfg.S3.Endpoint != "" {
-		awsConfig.Endpoint = aws.String(cfg.S3.Endpoint)
-		awsConfig.S3ForcePathStyle = aws.Bool(true)
+		}),
+		awsconfig.WithRetryMaxAttempts(5),
 	}
 
 	// Configure credentials if provided
-	if cfg.S3.Credentials != nil {
-		switch cfg.S3.Credentials.Mode {
+	if credsCfg := cfg.S3.Credentials; credsCfg != nil {
+		switch credsCfg.Mode {
 		case "secret":
-			awsConfig.Credentials = credentials.NewStaticCredentials(
-				cfg.S3.Credentials.AccessKeyID,
-				cfg.S3.Credentials.SecretAccessKey,
-				"",
-			)
+			optFns = append(optFns, awsconfig.WithCredentialsProvider(
+				credentials.NewStaticCredentialsProvider(
+					credsCfg.AccessKeyID,
+					credsCfg.SecretAccessKey,
+					"",
+				),
+			))
 		case "file":
-			awsConfig.Credentials = credentials.NewSharedCredentials(
-				cfg.S3.Credentials.CredentialsFile,
-				cfg.S3.Credentials.Profile,
-			)
+			if credsCfg.CredentialsFile != "" {
+				// An empty file path must not be passed through: v1 treated it
+				// as "use the default ~/.aws/credentials", v2 would read a bogus path.
+				optFns = append(optFns, awsconfig.WithSharedCredentialsFiles([]string{credsCfg.CredentialsFile}))
+			}
+			if credsCfg.Profile != "" {
+				optFns = append(optFns, awsconfig.WithSharedConfigProfile(credsCfg.Profile))
+			}
 		case "env":
-			// Use environment variables (default behavior)
-			awsConfig.Credentials = credentials.NewEnvCredentials()
+			// Environment variables only — fail when unset, like v1's
+			// credentials.NewEnvCredentials.
+			optFns = append(optFns, awsconfig.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
+				id := os.Getenv("AWS_ACCESS_KEY_ID")
+				secret := os.Getenv("AWS_SECRET_ACCESS_KEY")
+				if id == "" || secret == "" {
+					return aws.Credentials{}, fmt.Errorf("env credentials require AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to be set")
+				}
+				return aws.Credentials{
+					AccessKeyID:     id,
+					SecretAccessKey: secret,
+					SessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
+					Source:          "EnvCredentials",
+				}, nil
+			})))
 		default:
 			// Use default credential chain (env, IAM role, etc.)
 		}
 	}
-	// If no credentials specified, AWS SDK will use default chain:
-	// 1. Environment variables
-	// 2. Shared credentials file
-	// 3. IAM role (for EC2/ECS/EKS)
 
-	sess, err := session.NewSession(awsConfig)
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, optFns...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create AWS session: %w", err)
+		return nil, fmt.Errorf("failed to create AWS config: %w", err)
 	}
 
-	s3Client := s3.New(sess)
+	// S3-compatible providers (Tigris, MinIO, R2, …) — path-style keeps bucket
+	// resolution off DNS, which every compatible provider supports.
+	var s3Client *s3.Client
+	if cfg.S3.Endpoint != "" {
+		s3Client = s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(cfg.S3.Endpoint)
+			o.UsePathStyle = true
+		})
+	} else {
+		s3Client = s3.NewFromConfig(awsCfg)
+	}
 
 	// Verify bucket access
-	_, err = s3Client.HeadBucket(&s3.HeadBucketInput{
+	_, err = s3Client.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(bucket),
 	})
 	if err != nil {
@@ -282,7 +303,7 @@ func (e *s3MisbehaviorExporter) flush() error {
 			Body:        bytes.NewReader(b.buf.Bytes()),
 			ContentType: aws.String(e.cfg.S3.ContentType),
 		}
-		if _, err := e.s3Client.PutObject(input); err != nil {
+		if _, err := e.s3Client.PutObject(context.Background(), input); err != nil {
 			// Keep the batch buffered so the next flush retries it.
 			e.log.Error().Err(err).Str("bucket", e.bucket).Str("key", key).Int("bytes", b.buf.Len()).Int("records", b.count).Msg("failed to upload misbehavior records to S3")
 			continue
