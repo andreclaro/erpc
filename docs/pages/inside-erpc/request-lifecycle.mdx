@@ -54,21 +54,21 @@ were answered — your latency never pays for bookkeeping.
 
 ### The multiplexer — `erpc/multiplexer.go` + `erpc/networks.go`
 
-- `handleMultiplexing` (`networks.go:3050`): `LoadOrStore` on
+- `handleMultiplexing` (`networks.go:3583`): `LoadOrStore` on
   `n.inFlightRequests`. First request with a given key leads; identical later
   ones follow and block on `mlx.done`.
 - Keys: `req.CacheHash()` for EVM; SVM uses its own `svm.RequestKey` because
   CacheHash lowercases params, which would wrongly collapse case-sensitive
-  base58 addresses (`networks.go:3033`).
+  base58 addresses (`networks.go:3509`).
 - `Multiplexer.Close` (`multiplexer.go:36`) clones the leader's
   `JsonRpcResponse` once; followers copy it and rewrite the id.
-  `cleanupMultiplexer` (`networks.go:3149`) uses a `copyWg` wait group so no
+  `cleanupMultiplexer` (`networks.go:3688`) uses a `copyWg` wait group so no
   follower ever reads freed buffers.
 - Multiplexing runs **before** the cache read: N identical concurrent requests
   produce 1 upstream call *and* 1 cache fill. It is on by default
-  (`MultiplexingEnabled`, `common/config.go:2266`).
+  (`MultiplexingEnabled`, `common/config.go:2731`).
 
-### Bookkeeping that outlives the caller — `erpc/networks.go:2426`
+### Bookkeeping that outlives the caller — `erpc/networks.go:2670`
 
 - The cache write is fire-and-forget: a goroutine with a 10s timeout, the
   response held alive via `AddRef()/DoneRef()`. A client disconnect never

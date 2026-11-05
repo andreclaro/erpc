@@ -42,8 +42,8 @@ const blockNum = (i: number) => `0x${(0x3f9a20 + i).toString(16)}`;
 const STRIP: { step: string; l1: string; l2: string; sub: string }[] = [
 	{ step: "1 · request", l1: "eth_getBlockByNumber", l2: '("latest")', sub: "client request" },
 	{ step: "2 · tag → concrete hex", l1: 'params[0] := "0x3f9a29"', l2: "highest known tip", sub: "evm/json_rpc.go:92" },
-	{ step: "3 · finality computed", l1: "finality = realtime", l2: '"latest" is a moving tag', sub: "erpc/networks.go:2594" },
-	{ step: "4 · async write", l1: "SET · policy: realtime", l2: "ttl-bounded · after response", sub: "erpc/networks.go:2426" },
+	{ step: "3 · finality computed", l1: "finality = realtime", l2: '"latest" is a moving tag', sub: "erpc/networks.go:2596" },
+	{ step: "4 · async write", l1: "SET · policy: realtime", l2: "ttl-bounded · after response", sub: "erpc/networks.go:2670" },
 	{ step: "5 · after the re-org", l1: '"latest" → 0x3f9a29′', l2: "new key → MISS · refetch", sub: "stale entry dies with its TTL" },
 ];
 const STRIP_W = 205;

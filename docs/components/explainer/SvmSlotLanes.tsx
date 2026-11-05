@@ -67,8 +67,8 @@ const B2_STEPS: { step: string; l1: string; l2: string; sub: string; tone: strin
 	{ step: "1 · request", l1: "getBlock(93728460,", l2: '{commitment:"finalized"})', sub: "arrives · network pre-forward", tone: "blue" },
 	{ step: "2 · injection stamp", l1: "commitment stamped", l2: "CacheHash invalidated", sub: "hooks.go:188 · project layer", tone: "blue" },
 	{ step: "3 · slot-lag filter", l1: "ups-c root −130", l2: "lag > 100 → excluded", sub: "slot_lag.go:32 · fails open", tone: "crimson" },
-	{ step: "4 · availability gate", l1: "93728460 > tip + 3", l2: "-32014 missing data", sub: "hooks.go:542 · ups-b indexed low", tone: "crimson" },
-	{ step: "5 · reroute", l1: "ups-a serves block", l2: "context.slot harvested", sub: "hooks.go:700 · ups-a", tone: "green" },
+	{ step: "4 · availability gate", l1: "93728460 > tip + 3", l2: "-32014 missing data", sub: "hooks.go:564 · ups-b indexed low", tone: "crimson" },
+	{ step: "5 · reroute", l1: "ups-a serves block", l2: "context.slot harvested", sub: "hooks.go:722 · ups-a", tone: "green" },
 	{ step: "6 · poller skip", l1: "getSlot calls skip", l2: "traffic gate 1 / 4", sub: "max 4 consecutive skips", tone: "amber" },
 ];
 

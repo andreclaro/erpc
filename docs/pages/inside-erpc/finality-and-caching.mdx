@@ -78,7 +78,7 @@ with their TTLs.
 
 ## In the source
 
-### Computing finality — `erpc/networks.go:2594` (`Network.GetFinality`)
+### Computing finality — `erpc/networks.go:2840` (`Network.GetFinality`)
 
 - The cascade: method-config override (`finalized`/`realtime` flags) →
   architecture switch (SVM resolves via commitment levels) → block reference
@@ -88,12 +88,12 @@ with their TTLs.
 - A non-numeric block ref (`latest`, `pending`, …) short-circuits to
   `realtime`. A numeric one is checked with `EvmIsBlockFinalized` against the
   response's upstream first, then the request's last upstream, then the
-  network-wide heuristic: `EvmLowestFinalizedBlockNumber` (`networks.go:1655`),
+  network-wide heuristic: `EvmLowestFinalizedBlockNumber` (`networks.go:1932`),
   which skips syncing upstreams and uses each upstream's *effective* finalized
   block (honoring `blockAvailability.upper`).
 - Results are memoized on the request and response — but only when definitive;
-  `unknown` is recomputed every time (`common/request.go:1123`,
-  `common/response.go:144`). `finalized` is deliberately `0` in the enum so an
+  `unknown` is recomputed every time (`common/request.go:1236`,
+  `common/response.go:170`). `finalized` is deliberately `0` in the enum so an
   unspecified finality defaults to the safest bucket (`common/data.go:11`).
 
 ### Tag interpolation — `architecture/evm/json_rpc.go:92` (`NormalizeHttpJsonRpc`)
@@ -104,43 +104,43 @@ with their TTLs.
   honestly. Opt out per method (`translateLatestTag`/`translateFinalizedTag`)
   or per request (`skipInterpolation`).
 - Why it exists: identical logical reads must produce identical cache keys.
-  The range key is `method:sha256(params)` (`common/json_rpc.go:1398`),
+  The range key is `method:sha256(params)` (`common/json_rpc.go:1443`),
   computed *after* interpolation, while the partition key keeps the tag
-  (`generateKeysForJsonRpcRequest`, `json_rpc_cache.go:1235`). A new block ⇒
+  (`generateKeysForJsonRpcRequest`, `json_rpc_cache.go:1269`). A new block ⇒
   a new hash ⇒ the old `"latest"` entry is unreachable ⇒ its TTL collects it.
 
-### Policy match: set vs get — `data/cache_policy.go:82` / `:124`
+### Policy match: set vs get — `data/cache_policy.go:91` / `:137`
 
-- `MatchesForSet` requires exact finality equality (`:121`). `MatchesForGet`
+- `MatchesForSet` requires exact finality equality (`:91`). `MatchesForGet`
   is asymmetric by design: `finalized` reads match finalized **and**
-  unfinalized policies (`:155` — the comment spells out why: the response may
+  unfinalized policies (`:168` — the comment spells out why: the response may
   have been written while still unfinalized); `unfinalized` and `realtime`
   reads match only their own bucket; `unknown` iterates *all* policies in
   config order, so put the fastest, most up-to-date storage first.
 - `empty` behavior (`ignore`/`allow`/`only`) and `appliesTo` (`read`/`write`/
   `both`) gate both directions; network/method patterns are wildcards.
 
-### Write guards — `architecture/evm/json_rpc_cache.go:1158` (`shouldCacheResponse`)
+### Write guards — `architecture/evm/json_rpc_cache.go:1190` (`shouldCacheResponse`)
 
 - Never cache responses containing an error; per-policy `minItemSize`/
   `maxItemSize` limits apply.
-- **Realtime sawtooth guard** (`:1187`): under `enforceHighestBlock`, a
+- **Realtime sawtooth guard** (`:1219`): under `enforceHighestBlock`, a
   realtime response already behind the network's known tip is never
   persisted — otherwise a lagging upstream's `eth_blockNumber` lands in the
   cache and is served for a full TTL window. The tip is resolved
   network-wide on purpose (the entry is shared across upstream selectors) and
   the guard fails open when no tip is known yet.
-- **Future-block empty never cached** (`:1210`, via
-  `emptyResultBeyondConfidence` in `architecture/evm/common.go:62`): if the
+- **Future-block empty never cached** (`:1242`, via
+  `EmptyResultBeyondConfidence` in `architecture/evm/common.go:62`): if the
   request's block number is beyond the head — by `latest` or `finalized`
   depending on `emptyResultConfidence` (default `blockHead`,
-  `common/defaults.go:2569`) — a null is never stored, regardless of the
+  `common/defaults.go:2661`) — a null is never stored, regardless of the
   policy's `empty` behavior. The block will exist later; a cached null would
   be served as a wrong answer until the TTL expires.
 - Only then does the policy's `empty` switch decide: `ignore` → store only
   non-empty, `allow` → store both, `only` → store only empty.
 
-### Read guard — `shouldAcceptCachedResult` (`json_rpc_cache.go:926`)
+### Read guard — `shouldAcceptCachedResult` (`json_rpc_cache.go:951`)
 
 - Applies to `realtime` entries only: `age = now − block timestamp`, rejected
   when `age > TTL`. The timestamp comes from the response body; for methods
@@ -150,15 +150,15 @@ with their TTLs.
 - The TTL can be fixed or block-time-derived (`ttlBlockTimeMultiplier` × EMA
   block time); when the block time isn't known yet the guard never accepts an
   unbounded-stale head — cold-start bound `defaultRealtimeColdStartTTL = 2s`
-  (`:917`). `ResolveTTL` (`data/cache_policy.go:293`) is shared by the write
+  (`:948`). `ResolveTTL` (`data/cache_policy.go:306`) is shared by the write
   expiry and this guard, so an entry's stored lifetime always matches the
   window it could be served for.
 - Finalized, unfinalized, and unknown entries are always accepted regardless
   of age — a block from 2022 is still valid today.
 
-### The async write — `erpc/networks.go:2426`
+### The async write — `erpc/networks.go:2670`
 
-- Fire-and-forget goroutine on the app context with a 10s budget (`:2449`),
+- Fire-and-forget goroutine on the app context with a 10s budget (`:2842`),
   the response held alive via `AddRef()`/`DoneRef()`. A client disconnect
   never aborts the write, and caller latency never pays for it.
 

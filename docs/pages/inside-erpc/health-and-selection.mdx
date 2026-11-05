@@ -71,24 +71,24 @@ shadow-probe samples. No timers, no manual intervention.
 - One `TrackedMetrics` per (upstream × method × finality). Counters and the
   latency sketch are sliding-window: `rollingBuckets = 10` sub-buckets
   (`health/rolling.go:18`), rotated every `windowSize / 10`
-  (`health/tracker.go:535`) — every 6s at the default 1m window
+  (`health/tracker.go:650`) — every 6s at the default 1m window
   (`ScoreMetricsWindowSize`, `erpc/projects_registry.go:51`; per-project
-  override `scoreMetricsWindowSize`, `common/config.go:643`). A degradation
+  override `scoreMetricsWindowSize`, `common/config.go:717`). A degradation
   shows up within one sub-bucket instead of a full window tumble.
 - Latency quantiles are DDSketches at 1% relative accuracy
   (`ddsketch.NewDefaultDDSketch(0.01)`, `health/quantile.go:37`), read as
-  the fixed set p50/p70/p90/p95/p99 (`internal/policy/eval.go:113`).
+  the fixed set p50/p70/p90/p95/p99 (`internal/policy/eval.go:114`).
 - **Success-only durations** (`RecordUpstreamDuration`,
-  `health/tracker.go:974`): the quantile is fed only when `isSuccess` —
+  `health/tracker.go:1303`): the quantile is fed only when `isSuccess` —
   responses, EVM reverts (the upstream did real work), and canceled-by-hedge
   observations (a lower bound on completion time). Hard errors stay out, so
   an upstream failing *fast* is never crowned "fastest in the pool".
 - `BlockHeadLag` is a state metric, not a counter: each state-poller head
   update stores `networkHighest − upstreamHighest` (`SetLatestBlockNumber`,
-  `health/tracker.go:1488`). The same update feeds an EMA of the chain's
+  `health/tracker.go:2125`). The same update feeds an EMA of the chain's
   block time built from on-chain `block.timestamp` values
-  (`health/tracker.go:1424`), which the engine uses to express lag in
-  wall-clock seconds (`BlockHeadLagSeconds`, `internal/policy/eval.go:97`) —
+  (`health/tracker.go:2061`), which the engine uses to express lag in
+  wall-clock seconds (`BlockHeadLagSeconds`, `internal/policy/eval.go:100`) —
   0 until enough samples exist, so time-based lag gates stay quiet on a
   fresh boot by design.
 
@@ -96,27 +96,27 @@ shadow-probe samples. No timers, no manual intervention.
 
 - A `Slot` owns one goroutine per (network, method, finality, boundary)
   (`internal/policy/slot.go:15`). Its ticker fires every
-  **`evalInterval`, default 15s** (`common/defaults.go:3057`); the eval gets
-  **`evalTimeout`, default 100ms** (`common/defaults.go:3060`), and config
-  validation requires timeout < interval (`common/validation.go:1664`).
-- `tickOnce` (`internal/policy/slot.go:172`): snapshot metrics for every
+  **`evalInterval`, default 15s** (`common/defaults.go:3359`); the eval gets
+  **`evalTimeout`, default 100ms** (`common/defaults.go:3376`), and config
+  validation requires timeout < interval (`common/validation.go:2090`).
+- `tickOnce` (`internal/policy/slot.go:177`): snapshot metrics for every
   upstream (`snapshotMetrics` — the JS sees one consistent view:
   `u.metrics` slot-local, `u.metricsAcrossMethods` wildcard aggregate,
   `u.metricsByMethod` per-method), build cross-tick state (previous order,
   excluded set, last switch time), run the JS on a pooled sobek runtime,
   then **atomically swap** `cache` and `excludedCache`
-  (`internal/policy/slot.go:318`). On error or timeout the previous cache
+  (`internal/policy/slot.go:319`). On error or timeout the previous cache
   is retained (`internal/policy/slot.go:256`).
 - Requests never touch this machinery. `Engine.GetOrdered`
   (`internal/policy/engine.go:354`) is a wait-free `atomic.Pointer` load of
   the published slice; `Network.Forward` calls it via `GetOrderedInLane`
-  (`erpc/networks.go:1843`) and falls back to registration order only until
+  (`erpc/networks.go:2087`) and falls back to registration order only until
   the first tick lands — which happens synchronously at registration
   (`internal/policy/engine.go:316`).
 - Failed evals are visible, not silent: `consecutiveFails` plus
   `erpc_selection_eval_errors_total{kind}` (timeout / throw /
   invalid_return), and the slot keeps a bounded ring of the last 64
-  decisions (`decisionsRingSize`, `internal/policy/slot.go:169`) for the
+  decisions (`decisionsRingSize`, `internal/policy/slot.go:174`) for the
   admin/simulator diagnostic views.
 
 ### The default policy walk — `internal/policy/default_policy.js`
@@ -170,7 +170,7 @@ with the default `network` scope, scoring uses the wildcard
 the same verdict (`stdlib.js:844`). Each active hold sets
 `__policyStickyHeld` (`stdlib.js:901`), which the Go side turns into
 `erpc_selection_sticky_hold_total` for the held upstream
-(`internal/policy/slot.go:578`).
+(`internal/policy/slot.go:592`).
 
 ### The prober — `internal/policy/prober.go`
 

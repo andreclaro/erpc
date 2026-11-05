@@ -14,12 +14,12 @@ import type { TimelineScenario } from "../TimelineRace";
  *   vote each, so no rule resolves and the caller gets ErrConsensusDispute
  *   (HTTP 409). Dissent is logged against the plurality group, but no cordon:
  *   shouldPunishUpstream requires a group holding >50% of valid participants
- *   (consensus/executor.go:1442).
+ *   (consensus/executor.go:2149).
  * - "Punishment": with punishMisbehavior {disputeThreshold: 2,
  *   disputeWindow: 5m, sitOutPenalty: 10m}, repeat data dissenter C burns its
  *   token bucket across three rapid rounds (refill negligible); the third
  *   Allow() fails and C is cordoned until the sit-out timer uncordons it
- *   (consensus/executor.go:1477, :1468). Axis is compressed minutes.
+ *   (consensus/executor.go:2210, :2197). Axis is compressed minutes.
  */
 export const consensusScenarios: Record<string, TimelineScenario> = {
 	"Unassailable lead": {
@@ -85,7 +85,7 @@ export const consensusScenarios: Record<string, TimelineScenario> = {
 		timeLabel: "compressed time →",
 		lanes: [
 			{ id: "rounds", label: "Consensus rounds", sub: "winner: A,B (data-1)" },
-			{ id: "tracker", label: "Misbehavior scan", sub: "executor.go:1017" },
+			{ id: "tracker", label: "Misbehavior scan", sub: "executor.go:2037" },
 			{ id: "limiter", label: "Dispute limiter", sub: "2 tokens per 5m" },
 			{ id: "cordon", label: "Upstream C", sub: "selection state" },
 		],

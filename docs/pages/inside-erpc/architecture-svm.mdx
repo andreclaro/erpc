@@ -80,28 +80,28 @@ system where "finalized" means one thing to a cache and another to a router.
 
 ### The state poller — `architecture/svm/svm_state_poller.go`
 
-- Static payloads for the four RPCs (`:67-73`); the ticker fires every 400ms
-  (`DefaultPollInterval`, `:21-23`) with a configurable debounce gate on top;
-  `getHealth` runs every 5th eligible poll (`:33-65`).
-- Rollback tolerance is 1024 slots (`DefaultToleratedSlotRollback`, `:19`); a deeper
+- Static payloads for the four RPCs (`:71-77`); the ticker fires every 400ms
+  (`DefaultPollInterval`, `:23-25`) with a configurable debounce gate on top;
+  poller health is poll-derived — two consecutive all-failed polls cordon the upstream (`deadPollsBeforeUnhealthy`, `:35-37`, `:57`), and `healthy` flips back true on the first live poll (`:139-143`).
+- Rollback tolerance is 1024 slots (`DefaultToleratedSlotRollback`, `:21`); a deeper
   backward jump is the non-canonical/wrong-node signal and is recorded per head axis.
 - Accepted slots feed the same health tracker EVM uses (`SetLatestBlockNumber` /
-  `SetFinalizedBlockNumber`, `:172-182`), so selection scoring sees slots as block
+  `SetFinalizedBlockNumber`, `:236-246`), so selection scoring sees slots as block
   numbers. Shred-insert lag over 100 slots marks an upstream degraded
-  (`MaxShredInsertSlotLagThreshold`, `common/architecture_svm.go:53-56`).
+  (`MaxShredInsertSlotLagThreshold`, `common/architecture_svm.go:65-68`).
 - The traffic gate: externally suggested slots (`SuggestLatestSlot` /
-  `SuggestFinalizedSlot` from the post-forward harvest, `architecture/svm/hooks.go:700-739`)
+  `SuggestFinalizedSlot` from the post-forward harvest, `architecture/svm/hooks.go:722-761`)
   suppress the two `getSlot` polls while fresh, bounded at 4 consecutive skips
-  (`:25-31`).
+  (`:27-33`).
 
 ### Majority vs max — `erpc/networks.go`
 
-- Majority tips via `evm.PickServedTip` (`:1369-1390`) — "a single fast/rogue
+- Majority tips via `evm.PickServedTip` (`:1640-1661`) — "a single fast/rogue
   upstream cannot inflate the served tip".
-- `SvmHighestFinalizedSlotMax` (`:1392-1424`) and `SvmHighestIndexedSlot`
-  (`:1435-1460`) are pool maxima for rejection gates: "never reject a block the
+- `SvmHighestFinalizedSlotMax` (`:1662-1694`) and `SvmHighestIndexedSlot`
+  (`:1708-1733`) are pool maxima for rejection gates: "never reject a block the
   most-ahead upstream actually has".
-- The advertise/serve asymmetry is stated inline (`architecture/svm/hooks.go:504-514`):
+- The advertise/serve asymmetry is stated inline (`architecture/svm/hooks.go:526-536`):
   advertise no more than `min(finalizedMajority, indexedTip)`, serve up to
   `min(finalizedMax, indexedTip)`.
 
@@ -109,39 +109,39 @@ system where "finalized" means one thing to a cache and another to a router.
 
 - `resolveCommitment` (`hooks.go:265`) is the single predicate for "what commitment
   does eRPC pin"; the injection hook stamps it into the options object and calls
-  `InvalidateCacheHash` (`hooks.go:188-215`, `common/json_rpc.go:1433-1442`). It runs
+  `InvalidateCacheHash` (`hooks.go:188-215`, `common/json_rpc.go:1545-1554`). It runs
   at the *project* layer so the cache read and write key identically.
 - An injected `processed` default is clamped to `confirmed` for methods that reject
   it (`hooks.go:130-138`, Agave `-32602`); a caller-supplied level is never rewritten.
   Write methods get their commitment via per-method config fields —
   `preflightCommitment` for `sendTransaction`, `commitment` for
-  `simulateTransaction` / `requestAirdrop` (`hooks.go:388-404`).
+  `simulateTransaction` / `requestAirdrop` (`hooks.go:414-425`).
 - `GetFinality` (`finality.go:158-185`) answers "cacheable?": never-cache methods →
   Realtime (`:32-51`), always-finalized methods → Finalized (`:67-70`), slot-pinned
   methods (`getBlock`, `getConfirmedBlock`, `getTransaction`) → Finalized only at
-  commitment `finalized` (`:106-115`), and **everything else → Realtime**
+  commitment `finalized` (`:110-119`), and **everything else → Realtime**
   (`:174-177`) — because `commitment: finalized` on Solana is a moving rooted head
   (~400ms), not an immutability guarantee.
 - `IsFinalizedCommitment` (`finality.go:208-213`) answers "which slot does the node
   evaluate at": it follows `effectiveCommitment`, which falls back to Solana's
   documented node default `finalized` when nothing is pinned
-  (`architecture/svm/hooks.go:361-378`). Routing uses the latter; caching uses the
+  (`architecture/svm/hooks.go:360-377`). Routing uses the latter; caching uses the
   former. Splitting them is the load-bearing decision.
 
 ### Special methods — `architecture/svm/hooks.go`
 
 - `getGenesisHash` is answered from a hardcoded table with zero upstream calls
-  (`hooks.go:140-167`; table at `common/architecture_svm.go:81-87`), mirroring EVM's
+  (`hooks.go:140-167`; table at `common/architecture_svm.go:93-99`), mirroring EVM's
   `eth_chainId` short-circuit.
-- The `getBlock` availability guard (`hooks.go:542-618`): commitment-dependent bound,
+- The `getBlock` availability guard (`hooks.go:564-640`): commitment-dependent bound,
   `-32014` short-circuit, fails open when the indexed frontier is unknown. Margin =
-  2 + debounce/400ms (`hooks.go:620-636`). Enabled by default
-  (`erpc/networks.go:1426-1433`).
+  2 + debounce/400ms (`hooks.go:642-658`). Enabled by default
+  (`erpc/networks.go:1699-1706`).
 - `getSlot` responses are floored *and capped* post-forward, including cache hits
-  (`hooks.go:792-945`): stale values are upgraded to the known tip, fresh values
+  (`hooks.go:814-967`): stale values are upgraded to the known tip, fresh values
   above the indexed finalized head are capped down, so clients never see a slot no
   provider can serve a block for.
-- `getBlockHeight` is deliberately excluded from that correction (`handler.go:70-81`)
+- `getBlockHeight` is deliberately excluded from that correction (`handler.go:72-83`)
   — height trails slot by every skipped slot, and rewriting it would make the
   canonical tx-expiry check see every transaction as expired.
 - Writes: `sendTransaction` / `sendRawTransaction` / `requestAirdrop` are
@@ -152,30 +152,30 @@ system where "finalized" means one thing to a cache and another to a router.
 ### Cache keying — `architecture/svm/json_rpc_cache.go`
 
 - `SvmJsonRpcCache` derives the request key from `svmRequestKey`, not
-  `req.CacheHash()` (`:25-29`, `:456-498`): the shared hasher lowercases string
+  `req.CacheHash()` (`:25-29`, `:508-550`): the shared hasher lowercases string
   params — right for EVM hex, catastrophic for case-sensitive base58. Case is
   preserved exactly, with `encoding/json` as the deterministic encoder.
-- Partition key `<networkId>:<slotRef>` (`:551-577`), slotRef = `minContextSlot` or
+- Partition key `<networkId>:<slotRef>` (`:603-629`), slotRef = `minContextSlot` or
   `*`. No block-timestamp age guard exists for SVM — TTL on the realtime policy
   bounds staleness instead.
-- The same `RequestKey` (`:500-517`) serves in-flight multiplexing: any
+- The same `RequestKey` (`:554-571`) serves in-flight multiplexing: any
   "are these the same request?" decision on SVM must never use `CacheHash()`.
 
 ### Clients, selection, bootstrap
 
 - SVM upstreams are HTTP-only — any other scheme errors at client registration
-  (`clients/registry.go:122-142`); WebSocket is unimplemented everywhere
-  (`clients/registry.go:100-101`).
+  (`clients/registry.go:131-151`); WebSocket is unimplemented everywhere
+  (`clients/registry.go:113-114`).
 - gRPC BDS reaches SVM as a *cache connector* (`driver: grpc`), allowlisting exactly
-  one SVM method, `getBlock` (`data/grpc.go:58-72`). `networkId` is required in the
+  one SVM method, `getBlock` (`data/grpc.go:78-92`). `networkId` is required in the
   connector config because `eth_chainId` is unimplemented on BDS readers
-  (`common/config.go:384-397`); json/jsonParsed encodings only, and skipped slots
-  fall through to live upstreams (`clients/grpc_bds_client.go:1525-1534`).
+  (`common/config.go:458-471`); json/jsonParsed encodings only, and skipped slots
+  fall through to live upstreams (`clients/grpc_bds_client.go:1249-1258`).
 - Genesis validation is fail-closed at bootstrap against the known-cluster table;
   unknown clusters run only with `svm.checkGenesisHash: true`
-  (`upstream/upstream.go:354-368`).
+  (`upstream/upstream.go:384-398`).
 - The two architecture-only selection prefilters
-  (`erpc/networks.go:1907-1966`): `FilterByFinalizedSlotLag` (`slot_lag.go:32-54`,
+  (`erpc/networks.go:2182-2241`): `FilterByFinalizedSlotLag` (`slot_lag.go:32-54`,
   reference = second-highest clamp `slot_lag.go:107-133`) and `FilterByMinContextSlot`
   (`slot_lag.go:142-157`). Both fail open.
 
@@ -236,57 +236,57 @@ the fields with architecture-specific semantics:
 
 | Field | Default | Semantics |
 |---|---|---|
-| `networks[].svm.chain` | `"solana"` when empty | Selects the genesis-hash table + networkId form (`svm:<cluster>` vs `svm:<chain>:<cluster>`) — `common/architecture_svm.go:92-97` |
+| `networks[].svm.chain` | `"solana"` when empty | Selects the genesis-hash table + networkId form (`svm:<cluster>` vs `svm:<chain>:<cluster>`) — `common/architecture_svm.go:104-109` |
 | `networks[].svm.cluster` | — | Cluster name, e.g. `mainnet-beta`; must match each upstream's cluster |
-| `networks[].svm.commitment` | **no default** | Injected into requests that pin none; empty = each upstream's server default governs — `common/defaults.go:2526-2530` |
-| `networks[].svm.statePollerDebounce` | `400ms` | Minimum poll interval per upstream — `common/defaults.go:2535-2540` |
-| `networks[].svm.maxFinalizedSlotLag` | `100` (explicit `0` disables) | Consensus slot-lag filter bound — `common/defaults.go:2541-2550` |
-| `networks[].svm.enforceBlockAvailability` | `true` | The getBlock availability guard — `erpc/networks.go:1426-1433` |
-| `upstreams[].svm.checkGenesisHash` | `false` | Runtime getGenesisHash validation for clusters outside the known table — `common/config.go:2465-2473` |
-| `connectors[].grpc.networkId` | **required for SVM** | Skips the `eth_chainId` probe (unimplemented on BDS) — `common/config.go:384-397` |
+| `networks[].svm.commitment` | **no default** | Injected into requests that pin none; empty = each upstream's server default governs — `common/defaults.go:2611-2615` |
+| `networks[].svm.statePollerDebounce` | `400ms` | Minimum poll interval per upstream — `common/defaults.go:2620-2625` |
+| `networks[].svm.maxFinalizedSlotLag` | `100` (explicit `0` disables) | Consensus slot-lag filter bound — `common/defaults.go:2633-2642` |
+| `networks[].svm.enforceBlockAvailability` | `true` | The getBlock availability guard — `erpc/networks.go:1700-1707` |
+| `upstreams[].svm.checkGenesisHash` | `false` | Runtime getGenesisHash validation for clusters outside the known table — `common/config.go:2893-2901` |
+| `connectors[].grpc.networkId` | **required for SVM** | Skips the `eth_chainId` probe (unimplemented on BDS) — `common/config.go:461-474` |
 
 ### Edge cases & gotchas
 
 1. Commitment injection runs at the **project layer, before the cache read**
    (`handler.go:31-45`) and invalidates the memoized `CacheHash`
-   (`common/json_rpc.go:1433-1442`). Running it after the GET would key the read on
+   (`common/json_rpc.go:1545-1554`). Running it after the GET would key the read on
    pre-injection params and the write on post-injection params — a permanent cache
    miss for commitment-defaulted requests.
 2. Only the **injected default** is clamped (`processed → confirmed` for
    at-least-confirmed methods, `hooks.go:130-138`). A caller who explicitly asks for
    `processed` gets the upstream's honest `-32602` — never silently upgraded.
 3. The getBlock guard **fails open** when the indexed frontier is unknown
-   (`hooks.go:572-578`): a cold poller or a vendor without
+   (`hooks.go:594-600`): a cold poller or a vendor without
    `getMaxShredInsertSlot` must not cost requests every upstream could serve.
 4. `getSlot` at commitment `confirmed` is **never corrected** — no confirmed tip is
    tracked, and flooring with the processed tip would hand back an unconfirmed slot
-   (`hooks.go:869-879`).
+   (`hooks.go:891-901`).
 5. Both selection prefilters fail open: if the filter would empty the pool, the
    original list is returned (`slot_lag.go:46-53`, `slot_lag.go:153-156`) — stale
    data beats a deadlocked consensus, and the `-32016` failover path still reports
    the truth when every upstream trails `minContextSlot`.
 6. Non-retryable-write protection yields for **pre-dispatch** failures (selection
-   rejection, rate limit, open breaker — `hooks.go:773-790`): a write that never
+   rejection, rate limit, open breaker — `hooks.go:795-812`): a write that never
    reached the wire can safely fail over; a write that may have landed must not be
    re-broadcast (and `requestAirdrop` must never be fanned out at all,
    `util.go:46-48`).
 7. Solana skipped slots are reported by Agave as JSON-RPC **errors** (`-32007` /
    `-32009`), so the gRPC BDS cache connector cannot serve them — they fall through
-   to live upstreams (TODO BDA-3110, `clients/grpc_bds_client.go:1525-1534`).
+   to live upstreams (TODO BDA-3110, `clients/grpc_bds_client.go:1249-1258`).
 8. Any request-identity decision on SVM (cache, in-flight multiplexing) must use
    `svm.RequestKey`, never `req.CacheHash()` — the shared hasher lowercases params
-   and would collapse case-distinct base58 pubkeys (`json_rpc_cache.go:456-463`,
-   `json_rpc_cache.go:500-517`).
+   and would collapse case-distinct base58 pubkeys (`json_rpc_cache.go:508-515`,
+   `json_rpc_cache.go:552-569`).
 
 ### Observability
 
 | Metric | Type | Labels | When it fires |
 |---|---|---|---|
-| `erpc_upstream_stale_latest_block_total` | counter | `project`, `vendor`, `network`, `upstream`, `category` | A `getSlot` answer was corrected up to the known processed tip (`telemetry/metrics.go:342-346`, hook at `hooks.go:915-925`) |
-| `erpc_upstream_stale_finalized_block_total` | counter | `project`, `vendor`, `network`, `upstream` | A finalized-slot answer was corrected (`telemetry/metrics.go:348-352`) |
-| `erpc_upstream_block_head_large_rollback` | gauge (sticky) | `project`, `vendor`, `network`, `upstream`, `finality` (`latest`/`finalized`) | Size of the last >1024-slot rollback; `> 0` latches for the process lifetime, so `rate()` is meaningless (`telemetry/metrics.go:569-577`, recorded at `svm_state_poller.go:184-192`) |
+| `erpc_upstream_stale_latest_block_total` | counter | `project`, `vendor`, `network`, `upstream`, `category` | A `getSlot` answer was corrected up to the known processed tip (`telemetry/metrics.go:343-347`, hook at `hooks.go:937-947`) |
+| `erpc_upstream_stale_finalized_block_total` | counter | `project`, `vendor`, `network`, `upstream` | A finalized-slot answer was corrected (`telemetry/metrics.go:350-354`) |
+| `erpc_upstream_block_head_large_rollback` | gauge (sticky) | `project`, `vendor`, `network`, `upstream`, `finality` (`latest`/`finalized`) | Size of the last >1024-slot rollback; `> 0` latches for the process lifetime, so `rate()` is meaningless (`telemetry/metrics.go:684-692`, recorded at `svm_state_poller.go:239-247`) |
 
-Slots feed the same health tracker as EVM (`svm_state_poller.go:172-182`), so the
+Slots feed the same health tracker as EVM (`svm_state_poller.go:227-237`), so the
 `erpc_selection_*` and `erpc_upstream_request_*` families work unchanged; there are
 no SVM-specific failsafe metrics. For the catch-up retry panels that a busy Solana
 deployment will trip, read

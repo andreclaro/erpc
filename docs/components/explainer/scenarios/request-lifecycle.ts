@@ -17,7 +17,7 @@ export const requestLifecycleScenario: TimelineScenario = {
 		{ id: "cache", label: "Cache", sub: "evmJsonRpcCache" },
 		{ id: "exec", label: "Executor", sub: "network_executor.go" },
 		{ id: "upstream", label: "Upstream", sub: "alchemy" },
-		{ id: "writer", label: "Async writer", sub: "networks.go:2426" },
+		{ id: "writer", label: "Async writer", sub: "networks.go:2670" },
 	],
 	bars: [
 		{ lane: "client", start: 0.08, end: 0.4, label: "R2 in flight", tone: "blue" },

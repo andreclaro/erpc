@@ -75,13 +75,13 @@ below).
 
 ## In the source
 
-### The availability gate — `checkUpstreamBlockAvailability` (`erpc/networks.go:2869`)
+### The availability gate — `checkUpstreamBlockAvailability` (`erpc/networks.go:3329`)
 
 - Runs per upstream, inside the sweep loop right before dispatch
-  (`networks.go:2194`). A skip just `continue`s to the next upstream — it never
+  (`networks.go:2524`). A skip just `continue`s to the next upstream — it never
   fails the request by itself.
 - Enforces **only the upstream's configured serving range**
-  (`EvmBlockAvailabilityBounds`, `upstream/upstream.go:1166`): explicit
+  (`EvmBlockAvailabilityBounds`, `upstream/upstream.go:1239`): explicit
   `evm.blockAvailability.lower/upper`, with the deprecated
   `maxAvailableRecentBlocks` folded in as a lower bound. Unbounded on both
   sides → nothing to enforce.
@@ -98,11 +98,11 @@ below).
   they enforce availability through their own range-aware hook — and operators
   can opt out per method or network with `enforceBlockAvailability: false`.
 
-### The retry horizon — `maxRetryableBlockDistance` (`erpc/networks.go:1324`)
+### The retry horizon — `maxRetryableBlockDistance` (`erpc/networks.go:1598`)
 
 - Default: **max(128, 60s of chain progress)** — a 128-block floor
   (`defaultMaxRetryableBlockDistance`) versus `retryableBlockHorizon` (60s)
-  divided by the network's EMA block time (`networks.go:1343`). On a 2s chain:
+  divided by the network's EMA block time (`networks.go:1617`). On a 2s chain:
   max(128, 30) = **128**; on a 0.25s chain: max(128, 240) = **240**.
 - Why chain progress: 128 blocks is ~25 minutes on a 12s chain but ~30 seconds
   at 4 blocks/s — *a minute of chain progress means the same thing everywhere.*
@@ -112,11 +112,11 @@ below).
 - Operator override: `networks[].evm.maxRetryableBlockDistance` — an explicit
   value is returned untouched.
 
-### The future-block short-circuit — `tryShortCircuitFutureBlock` (`erpc/networks.go:853`)
+### The future-block short-circuit — `tryShortCircuitFutureBlock` (`erpc/networks.go:1081`)
 
 - A concrete-numbered `eth_getBlockByNumber` beyond **every** eligible
   upstream's head gets a synthesized `null` returned directly from `Forward`
-  (call site `networks.go:2005`) — never dispatched, never cached, and it runs
+  (call site `networks.go:2303`) — never dispatched, never cached, and it runs
   before rate limiting so it consumes no permit.
 - The comparison uses the **MAX observed head** across eligible upstreams (at
   the network's `emptyResultConfidence`, default `blockHead`) — not the
@@ -126,7 +126,7 @@ below).
   head trustworthy; the default max mode sweeps instead. Unknown head → fail
   open.
 
-### The catch-up wait — `shouldRetryWithReason` + `computeDelay` (`erpc/network_executor.go:396`, `:554`)
+### The catch-up wait — `shouldRetryWithReason` + `computeDelay` (`erpc/network_executor.go:474`, `:637`)
 
 - Three retry reasons share the catch-up path: `block_unavailable` (the gate),
   `empty_result` (emptyish result + `retryEmpty`), and `missing_data` (the
@@ -135,13 +135,13 @@ below).
   backoff instead.
 - The delay is `dynamicBlockUnavailableDelay()` — **EMA block time ×
   `blockUnavailableDelayMultiplier` (default 1.0)**, wired from the health
-  tracker's per-network block time in `erpc/networks_registry.go:105`. Before
+  tracker's per-network block time in `erpc/networks_registry.go:107`. Before
   the EMA warms up it falls back to the fixed `retry.emptyResultDelay` (no
   hardcoded default — set it per chain).
 - All catch-up retries share one cap: `retry.emptyResultMaxAttempts`
   (**default 2** — one original + one retry), a separate budget from
   `maxAttempts`, which governs genuine-error failover.
-- `retryEmpty` defaults **off** (`common/request.go:142`): empty responses pass
+- `retryEmpty` defaults **off** (`common/request.go:165`): empty responses pass
   through as-is unless the network sets `directiveDefaults.retryEmpty: true` or
   the caller sends `X-ERPC-Retry-Empty: true`. Bounds-gated skips need no
   directive — their retryable classification comes from the gate itself.
@@ -154,7 +154,7 @@ below).
   catching-up node can't poison the gate's "live head".
 - The skip-triggered `PollLatestBlockNumber` runs with a 10s timeout and
   respects the poller debounce (`DefaultEvmStatePollerDebounce = 5s`,
-  `common/defaults.go:2364`), so concurrent triggers from many requests
+  `common/defaults.go:2468`), so concurrent triggers from many requests
   coalesce into one poll.
 
 ## First principles

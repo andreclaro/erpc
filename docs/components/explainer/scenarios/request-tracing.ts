@@ -26,10 +26,10 @@ export const tracingScenarios: Record<string, TimelineScenario> = {
 		lanes: [
 			{ id: "http", label: "HTTP handler", sub: "http_server.go" },
 			{ id: "auth", label: "Auth + Project", sub: "projects.go · no span" },
-			{ id: "network", label: "Network", sub: "networks.go:1743" },
+			{ id: "network", label: "Network", sub: "networks.go:2044" },
 			{ id: "cache", label: "Cache", sub: "Cache.Get span" },
 			{ id: "response", label: "Response", sub: "WriteResponse" },
-			{ id: "writer", label: "Async writer", sub: "networks.go:2426" },
+			{ id: "writer", label: "Async writer", sub: "networks.go:2670" },
 		],
 		bars: [
 			{ lane: "http", start: 0.0005, end: 0.027, label: "createRequestHandler → goroutine", tone: "blue" },
@@ -55,7 +55,7 @@ export const tracingScenarios: Record<string, TimelineScenario> = {
 		lanes: [
 			{ id: "http", label: "HTTP handler", sub: "Request.Handle span" },
 			{ id: "network", label: "Network", sub: "cache + ordering" },
-			{ id: "exec", label: "Failsafe executor", sub: "network_executor.go:164" },
+			{ id: "exec", label: "Failsafe executor", sub: "network_executor.go:223" },
 			{ id: "upa", label: "Upstream A", sub: "primary attempt" },
 			{ id: "upb", label: "Upstream B", sub: "hedge leg" },
 			{ id: "cachew", label: "Async writer", sub: "Cache.Set" },

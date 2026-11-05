@@ -87,32 +87,32 @@ data can win.
 
 ## In the source
 
-### The nesting doll — `erpc/network_executor.go:164`
+### The nesting doll — `erpc/network_executor.go:223`
 
 - `networkExecutor.Run` first wraps the whole invocation in the lifecycle
   **timeout** (a `context.WithTimeoutCause`, so it bounds *all* retries and
   hedges, not individual attempts), then branches: with consensus configured,
   `consensus.Run(ctx, req, slotInner)` where each slot is
   `retry(hedge(tryOneUpstream))`; otherwise `runRetryHedge` =
-  `retry(hedge(runUpstreamSweep))` (`:205-225`).
+  `retry(hedge(runUpstreamSweep))` (`:264-284`).
 - The scope boundaries are enforced at construction: a **circuit breaker is
-  rejected at network scope** (`NewNetworkExecutor`, `:71`), and **consensus is
+  rejected at network scope** (`NewNetworkExecutor`, `:61`), and **consensus is
   rejected at upstream scope** (`upstream/upstream_executor.go:47`).
-- The two closures come from `Network.Forward` (`erpc/networks.go:2350-2357`):
+- The two closures come from `Network.Forward` (`erpc/networks.go:2690-2697`):
   `tryOneUpstream` for consensus slots, `runUpstreamSweep` for the standard
   path. Within one sweep, a retryable error does not stop the loop — the next
-  upstream is tried in the same attempt (`networks.go:2294`); only a
+  upstream is tried in the same attempt (`networks.go:2629`); only a
   non-retryable verdict breaks early.
 
-### Policy match — `erpc/networks.go:1708`
+### Policy match — `erpc/networks.go:1928`
 
 `getFailsafeExecutor` walks the network's `failsafe` array **in config order**
 and returns the first entry whose `matchMethod` (wildcard-aware),
 `matchFinality`, and `matchRequestKind` all match the request. A catch-all
-no-op executor is appended at build time (`erpc/networks_registry.go:141-143`),
+no-op executor is appended at build time (`erpc/networks_registry.go:143-145`),
 so an unmatched request still runs — just with no policies.
 
-### The retry classifier — `shouldRetryWithReason` (`erpc/network_executor.go:396`)
+### The retry classifier — `shouldRetryWithReason` (`erpc/network_executor.go:474`)
 
 One function maps every (resp, err) outcome to a reason string that becomes the
 `reason` label of `network_retry_attempt_total`:
@@ -130,18 +130,18 @@ One function maps every (resp, err) outcome to a reason string that becomes the
   retryable toward the network.
 
 The first three share the data-unavailable cap: `dataUnavailableCapReached`
-(`:385`) compares the attempt index against `emptyResultMaxAttempts` (default
-**2**, `common/defaults.go:2412`) — deliberately separate from `maxAttempts`
-(default **3**, `common/defaults.go:2724`), which governs genuine-error
+(`:445`) compares the attempt index against `emptyResultMaxAttempts` (default
+**2**, `common/defaults.go:2506-2510`) — deliberately separate from `maxAttempts`
+(default **3**, `common/defaults.go:2834-2836`), which governs genuine-error
 failover. Deterministic errors (client faults, execution reverts) return `""`:
 no retry, the answer is the answer.
 
-### Two delay regimes — `computeDelay` (`erpc/network_executor.go:554`)
+### Two delay regimes — `computeDelay` (`erpc/network_executor.go:637`)
 
 - **Catch-up waits** (`block_unavailable` / `empty_result` / `missing_data`):
   the dynamic delay — EMA block time × `blockUnavailableDelayMultiplier`
-  (default **1.0**, `common/defaults.go:2366`; wired per network in
-  `erpc/networks_registry.go:105-115`) — with the static `emptyResultDelay` as
+  (default **1.0**, `common/defaults.go:2470`; wired per network in
+  `erpc/networks_registry.go:107-117`) — with the static `emptyResultDelay` as
   cold-start fallback. One mechanism: the data usually appears within one
   block.
 - **Genuine errors**: `failsafe.ComputeBackoff` (`failsafe/backoff.go:21`) —
@@ -149,40 +149,40 @@ no retry, the answer is the answer.
   **1.2**, cap **3s**, base delay **0** — retry immediately unless configured).
 - The catch-up wait is also measured:
   `MetricNetworkDataUnavailableWaitSeconds` is observed right next to the sleep
-  (`network_executor.go:344-353`), so operators can split retry latency into
+  (`network_executor.go:404-413`), so operators can split retry latency into
   "chain catching up" vs "upstream failing".
 
-### The hedge race — `runHedge` (`erpc/network_executor.go:589`) + `failsafe/hedge.go`
+### The hedge race — `runHedge` (`erpc/network_executor.go:673`) + `failsafe/hedge.go`
 
 - Write methods (`eth_sendRawTransaction`, SVM `sendTransaction`, …) are never
-  hedged — non-idempotent broadcasts must not fan out (`:604-608`).
+  hedged — non-idempotent broadcasts must not fan out (`:689-693`).
 - The delay is one `AdaptiveDuration` (`common/adaptive_duration.go:83`):
   scalar `base` for fixed delays; `quantile` for adaptive — the per-method pXX
   from the network's `QuantileTracker`, clamped to `[min, max]` (defaults
-  **100ms / 999s**; `maxCount` default **1**, `common/defaults.go:2801-2831`).
+  **100ms / 999s**; `maxCount` default **1**, `common/defaults.go:2894-2924`).
   Cold start (no latency data) falls back to `min`.
 - `RunHedged` fires the primary immediately, arms a pooled `time.Timer` per
   hedge (pool added after `time.NewTimer` showed up in prod heap profiles), and
   races all legs for the first result `keep()` accepts. `keep()` rejects
   retryable errors and — unless the method is in `emptyResultAccept`
-  (`common/defaults.go:2441`: `eth_getLogs`, `eth_call`, `eth_getBalance`, …) —
+  (`common/defaults.go:2521`: `eth_getLogs`, `eth_call`, `eth_getBalance`, …) —
   emptyish responses. Winner selection cancels the siblings' `siblingCtx`;
   losers are `Release()`d; if nothing is kept, the last result is returned.
 - Kept winners are counted per upstream:
-  `MetricNetworkHedgeWinnerTotal` (`network_executor.go:638-644`) — skew here
+  `MetricNetworkHedgeWinnerTotal` (`network_executor.go:723-729`) — skew here
   means your primary ordering is wrong.
 
 ### The breaker lives one scope down — `failsafe/breaker.go` + `upstream/upstream_executor.go`
 
 The circuit breaker runs per upstream, not per network
-(`upstream/upstream_executor.go:361-371`): before the call it takes a permit,
-after the call `upstreamBreakerOutcome` (`:398`) records **failure** for 5xx /
+(`upstream/upstream_executor.go:369-379`): before the call it takes a permit,
+after the call `upstreamBreakerOutcome` (`upstream/upstream_executor.go:406`) records **failure** for 5xx /
 transport / unauthorized / billing (and syncing-and-empty success), **ignore**
 for cancellations and skips — hedges, internal probes, and composite requests
 never move the counters. The breaker itself is a policy-free state machine: a
 ring buffer of the last **80** outcomes opens the circuit at **20** failures;
 after `halfOpenAfter` (**5m**) a limited trial (8 of 200 capacity successes)
-closes it again (defaults: `common/defaults.go:2836-2879`). Transitions fire
+closes it again (defaults: `common/defaults.go:2929-2972`). Transitions fire
 `OnTransition` without holding the breaker mutex.
 
 ## First principles
