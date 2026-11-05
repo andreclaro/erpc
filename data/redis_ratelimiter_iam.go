@@ -1,6 +1,7 @@
 package data
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net/url"
@@ -25,9 +26,9 @@ type iamRateLimitClient struct {
 func NewIAMRateLimitClient(cfg *common.RedisConnectorConfig) (envoyratelimitredis.Client, error) {
 	iam := cfg.IAMAuth
 
-	sess, err := createAWSSession(iam.Auth, iam.Region)
+	awsCfg, err := createAWSConfig(context.Background(), iam.Auth, iam.Region)
 	if err != nil {
-		return nil, fmt.Errorf("elasticache iam rate-limiter: create AWS session: %w", err)
+		return nil, fmt.Errorf("elasticache iam rate-limiter: create AWS config: %w", err)
 	}
 
 	var tlsConfig *tls.Config
@@ -44,7 +45,7 @@ func NewIAMRateLimitClient(cfg *common.RedisConnectorConfig) (envoyratelimitredi
 	}
 
 	df := func(network, addr string) (radix.Conn, error) {
-		token, tokenErr := generateElastiCacheIAMToken(sess, iam)
+		token, tokenErr := generateElastiCacheIAMToken(context.Background(), awsCfg, iam)
 		if tokenErr != nil {
 			return nil, fmt.Errorf("elasticache iam rate-limiter: generate token: %w", tokenErr)
 		}

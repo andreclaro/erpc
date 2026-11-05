@@ -1,42 +1,63 @@
 package data
 
 import (
+	"context"
 	"fmt"
+	"os"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/erpc/erpc/common"
 )
 
-// createAWSSession builds an AWS session for the given region using the
+// createAWSConfig builds an AWS config for the given region using the
 // credential source described by auth. Pass auth=nil to use the default
-// credential chain (EC2/ECS instance role, env vars, shared credentials file).
-// Pass an empty region to let the SDK resolve it from AWS_REGION / IMDS.
+// credential chain (env vars, shared credentials file, EC2/ECS instance role,
+// IRSA). Pass an empty region to let the SDK resolve it from AWS_REGION / IMDS.
 //
-// The returned session caches credentials internally — for EC2/ECS instance
+// The returned config caches credentials internally — for EC2/ECS instance
 // roles, IMDS calls are cached for ~6h with proactive refresh.
-func createAWSSession(auth *common.AwsAuthConfig, region string) (*session.Session, error) {
-	cfg := &aws.Config{}
+func createAWSConfig(ctx context.Context, auth *common.AwsAuthConfig, region string) (aws.Config, error) {
+	optFns := []func(*config.LoadOptions) error{}
 	if region != "" {
-		cfg.Region = aws.String(region)
+		optFns = append(optFns, config.WithRegion(region))
 	}
 
 	if auth == nil {
-		return session.NewSession(cfg)
+		return config.LoadDefaultConfig(ctx, optFns...)
 	}
 
-	var creds *credentials.Credentials
 	switch auth.Mode {
 	case "file":
-		creds = credentials.NewSharedCredentials(auth.CredentialsFile, auth.Profile)
+		if auth.CredentialsFile != "" {
+			// An empty file path must not be passed through: v1 treated it as
+			// "use the default ~/.aws/credentials", v2 would read a bogus path.
+			optFns = append(optFns, config.WithSharedCredentialsFiles([]string{auth.CredentialsFile}))
+		}
+		if auth.Profile != "" {
+			optFns = append(optFns, config.WithSharedConfigProfile(auth.Profile))
+		}
 	case "env":
-		creds = credentials.NewEnvCredentials()
+		optFns = append(optFns, config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
+			id := os.Getenv("AWS_ACCESS_KEY_ID")
+			secret := os.Getenv("AWS_SECRET_ACCESS_KEY")
+			if id == "" || secret == "" {
+				return aws.Credentials{}, fmt.Errorf("env credentials require AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to be set")
+			}
+			return aws.Credentials{
+				AccessKeyID:     id,
+				SecretAccessKey: secret,
+				SessionToken:    os.Getenv("AWS_SESSION_TOKEN"),
+				Source:          "EnvCredentials",
+			}, nil
+		})))
 	case "secret":
-		creds = credentials.NewStaticCredentials(auth.AccessKeyID, auth.SecretAccessKey, "")
+		optFns = append(optFns, config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(auth.AccessKeyID, auth.SecretAccessKey, ""),
+		))
 	default:
-		return nil, fmt.Errorf("unsupported auth.mode: %q (must be file, env, or secret)", auth.Mode)
+		return aws.Config{}, fmt.Errorf("unsupported auth.mode: %q (must be file, env, or secret)", auth.Mode)
 	}
-	cfg.Credentials = creds
-	return session.NewSession(cfg)
+	return config.LoadDefaultConfig(ctx, optFns...)
 }

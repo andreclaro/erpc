@@ -194,14 +194,14 @@ func (r *RedisConnector) connectTask(ctx context.Context) error {
 	}
 
 	if iam := r.cfg.IAMAuth; iam != nil && iam.Enabled {
-		sess, err := createAWSSession(iam.Auth, iam.Region)
+		awsCfg, err := createAWSConfig(ctx, iam.Auth, iam.Region)
 		if err != nil {
-			return common.NewTaskFatal(fmt.Errorf("elasticache iam: failed to create AWS session: %w", err))
+			return common.NewTaskFatal(fmt.Errorf("elasticache iam: failed to create AWS config: %w", err))
 		}
 
 		// CredentialsProviderContext is called on every new physical connection,
 		// ensuring each connection gets a fresh (<15 min old) token.
-		options.CredentialsProviderContext = newElastiCacheCredentialsProvider(sess, iam)
+		options.CredentialsProviderContext = newElastiCacheCredentialsProvider(awsCfg, iam)
 		// Clear any credentials that may have been embedded in the URI.
 		options.Username = iam.UserID
 		options.Password = ""

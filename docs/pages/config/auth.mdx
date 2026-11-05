@@ -341,7 +341,7 @@ Negative cache: hardcoded 5-second TTL, 1 MiB MaxCost. Not configurable. Disable
 |---|---|---|
 | `mode` | `""` (SDK default chain) | Valid values: `"file"` (reads credentials file), `"env"` (reads `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`), `"secret"` (uses `accessKeyID`/`secretAccessKey` fields directly). Empty = AWS SDK default chain (env → shared credentials file → EC2 instance profile). <SourceLink file="common/config.go" lines="479-485" /> |
 | `credentialsFile` | `""` | Path to AWS credentials file (used when `mode="file"`). |
-| `profile` | `""` | AWS named profile. Only meaningful when `mode="file"` — passed to `credentials.NewSharedCredentials`. Ignored for `mode="env"`, `mode="secret"`, and the SDK default chain. <SourceLink file="data/dynamodb.go" lines="177-187" /> |
+| `profile` | `""` | AWS named profile. Only meaningful when `mode="file"` — passed to the v2 config loader's `WithSharedConfigProfile`. Ignored for `mode="env"`, `mode="secret"`, and the SDK default chain. <SourceLink file="data/aws_auth.go" lines="32-38" /> |
 | `accessKeyID` | `""` | AWS access key ID (used when `mode="secret"`). |
 | `secretAccessKey` | `""` | AWS secret access key (used when `mode="secret"`). Redacted in JSON marshal. <SourceLink file="common/config.go" lines="487-495" /> |
 

@@ -4,9 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/rds/rdsutils"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/rds/auth"
 	"github.com/erpc/erpc/common"
 	"github.com/jackc/pgx/v5"
 )
@@ -19,15 +18,16 @@ import (
 // MaxConnLifetime (currently 5h in postgresql.go) naturally rotates connections,
 // and each new connection calls this hook to mint a fresh token.
 func newRDSBeforeConnect(
-	sess *session.Session,
+	awsCfg aws.Config,
 	cfg *common.PostgreSQLIAMAuthConfig,
 ) func(ctx context.Context, cc *pgx.ConnConfig) error {
-	return func(_ context.Context, cc *pgx.ConnConfig) error {
-		token, err := rdsutils.BuildAuthToken(
+	return func(ctx context.Context, cc *pgx.ConnConfig) error {
+		token, err := auth.BuildAuthToken(
+			ctx,
 			cfg.Endpoint, // host:port
-			aws.StringValue(sess.Config.Region),
+			awsCfg.Region,
 			cfg.DBUser,
-			sess.Config.Credentials,
+			awsCfg.Credentials,
 		)
 		if err != nil {
 			return fmt.Errorf("rds iam: build auth token: %w", err)

@@ -4,24 +4,23 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/request"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/smithy-go"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
-	"golang.org/x/net/http2"
 )
 
 const (
@@ -34,8 +33,8 @@ type DynamoDBConnector struct {
 	id                string
 	logger            *zerolog.Logger
 	initializer       *util.Initializer
-	writeClient       *dynamodb.DynamoDB
-	readClient        *dynamodb.DynamoDB
+	writeClient       *dynamodb.Client
+	readClient        *dynamodb.Client
 	table             string
 	ttlAttributeName  string
 	partitionKeyName  string
@@ -66,6 +65,8 @@ var sharedReadClient = &http.Client{
 		MaxIdleConnsPerHost: 2048,
 		MaxConnsPerHost:     0, // unlimited, let MaxIdle… guard memory
 		IdleConnTimeout:     120 * time.Second,
+		// The transport negotiates HTTP/2 automatically for https endpoints,
+		// so no manual http2.ConfigureTransport (v1 needed it; v2 does not).
 	},
 }
 var sharedWriteClient = &http.Client{
@@ -76,11 +77,6 @@ var sharedWriteClient = &http.Client{
 		MaxConnsPerHost:     0, // unlimited, let MaxIdle… guard memory
 		IdleConnTimeout:     120 * time.Second,
 	},
-}
-
-func init() {
-	_ = http2.ConfigureTransport(sharedReadClient.Transport.(*http.Transport))
-	_ = http2.ConfigureTransport(sharedWriteClient.Transport.(*http.Transport))
 }
 
 func NewDynamoDBConnector(
@@ -124,24 +120,28 @@ func NewDynamoDBConnector(
 }
 
 func (d *DynamoDBConnector) connectTask(ctx context.Context, cfg *common.DynamoDBConnectorConfig) error {
-	sess, err := createSession(cfg)
+	if cfg == nil || cfg.Region == "" {
+		return common.NewTaskFatal(fmt.Errorf("missing region for store.dynamodb"))
+	}
+
+	awsCfg, err := createAWSConfig(ctx, cfg.Auth, cfg.Region)
 	if err != nil {
 		return common.NewTaskFatal(err)
 	}
 
-	d.writeClient = dynamodb.New(sess, &aws.Config{
-		Endpoint:   aws.String(cfg.Endpoint),
-		HTTPClient: sharedWriteClient,
-		MaxRetries: aws.Int(cfg.MaxRetries),
-		Region:     aws.String(cfg.Region),
-	})
+	clientOpts := func(httpClient *http.Client) func(*dynamodb.Options) {
+		return func(o *dynamodb.Options) {
+			o.BaseEndpoint = aws.String(cfg.Endpoint)
+			o.HTTPClient = httpClient
+			// v1 applied MaxRetries verbatim (0 = no retries). v2's MaxAttempts
+			// is the TOTAL attempt count, and 0 means "unlimited" — map
+			// maxRetries+1 so 0 retries becomes exactly one attempt.
+			o.Retryer = retry.AddWithMaxAttempts(retry.NewStandard(), max(cfg.MaxRetries+1, 1))
+		}
+	}
 
-	d.readClient = dynamodb.New(sess, &aws.Config{
-		Endpoint:   aws.String(cfg.Endpoint),
-		HTTPClient: sharedReadClient,
-		MaxRetries: aws.Int(cfg.MaxRetries),
-		Region:     aws.String(cfg.Region),
-	})
+	d.writeClient = dynamodb.NewFromConfig(awsCfg, clientOpts(sharedWriteClient))
+	d.readClient = dynamodb.NewFromConfig(awsCfg, clientOpts(sharedReadClient))
 
 	if cfg.Table == "" {
 		return common.NewTaskFatal(fmt.Errorf("missing table name for dynamodb connector"))
@@ -160,107 +160,72 @@ func (d *DynamoDBConnector) connectTask(ctx context.Context, cfg *common.DynamoD
 	return nil
 }
 
-func createSession(cfg *common.DynamoDBConnectorConfig) (*session.Session, error) {
-	if cfg == nil || cfg.Region == "" {
-		return nil, fmt.Errorf("missing region for store.dynamodb")
-	}
-
-	if cfg.Auth == nil {
-		return session.NewSession(&aws.Config{
-			Region:   aws.String(cfg.Region),
-			Endpoint: aws.String(cfg.Endpoint),
-			HTTPClient: &http.Client{
-				Timeout: cfg.InitTimeout.Duration(),
-			},
-		})
-	}
-	var creds *credentials.Credentials
-
-	switch cfg.Auth.Mode {
-	case "file":
-		creds = credentials.NewSharedCredentials(cfg.Auth.CredentialsFile, cfg.Auth.Profile)
-	case "env":
-		creds = credentials.NewEnvCredentials()
-	case "secret":
-		creds = credentials.NewStaticCredentials(cfg.Auth.AccessKeyID, cfg.Auth.SecretAccessKey, "")
-	default:
-		return nil, fmt.Errorf("unsupported auth.mode for store.dynamodb: %s", cfg.Auth.Mode)
-	}
-
-	return session.NewSession(&aws.Config{
-		Region:      aws.String(cfg.Region),
-		Credentials: creds,
-		HTTPClient: &http.Client{
-			Timeout: cfg.InitTimeout.Duration(),
-		},
-	})
-}
-
 func createTableIfNotExists(
 	ctx context.Context,
 	logger *zerolog.Logger,
-	client *dynamodb.DynamoDB,
+	client *dynamodb.Client,
 	cfg *common.DynamoDBConnectorConfig,
 ) error {
 	logger.Debug().Msgf("creating dynamodb table '%s' if not exists with partition key '%s' and range key %s", cfg.Table, cfg.PartitionKeyName, cfg.RangeKeyName)
-	_, err := client.CreateTableWithContext(ctx, &dynamodb.CreateTableInput{
+	_, err := client.CreateTable(ctx, &dynamodb.CreateTableInput{
 		TableName: aws.String(cfg.Table),
-		KeySchema: []*dynamodb.KeySchemaElement{
+		KeySchema: []types.KeySchemaElement{
 			{
 				AttributeName: aws.String(cfg.PartitionKeyName),
-				KeyType:       aws.String("HASH"),
+				KeyType:       types.KeyTypeHash,
 			},
 			{
 				AttributeName: aws.String(cfg.RangeKeyName),
-				KeyType:       aws.String("RANGE"),
+				KeyType:       types.KeyTypeRange,
 			},
 		},
-		AttributeDefinitions: []*dynamodb.AttributeDefinition{
+		AttributeDefinitions: []types.AttributeDefinition{
 			{
 				AttributeName: aws.String(cfg.PartitionKeyName),
-				AttributeType: aws.String("S"),
+				AttributeType: types.ScalarAttributeTypeS,
 			},
 			{
 				AttributeName: aws.String(cfg.RangeKeyName),
-				AttributeType: aws.String("S"),
+				AttributeType: types.ScalarAttributeTypeS,
 			},
 		},
-		BillingMode: aws.String("PAY_PER_REQUEST"),
-		GlobalSecondaryIndexes: []*dynamodb.GlobalSecondaryIndex{
+		BillingMode: types.BillingModePayPerRequest,
+		GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{
 			{
 				IndexName: aws.String(cfg.ReverseIndexName),
-				KeySchema: []*dynamodb.KeySchemaElement{
+				KeySchema: []types.KeySchemaElement{
 					{
 						AttributeName: aws.String(cfg.RangeKeyName),
-						KeyType:       aws.String("HASH"),
+						KeyType:       types.KeyTypeHash,
 					},
 					{
 						AttributeName: aws.String(cfg.PartitionKeyName),
-						KeyType:       aws.String("RANGE"),
+						KeyType:       types.KeyTypeRange,
 					},
 				},
-				Projection: &dynamodb.Projection{
-					ProjectionType: aws.String("ALL"),
+				Projection: &types.Projection{
+					ProjectionType: types.ProjectionTypeAll,
 				},
 			},
 		},
 	})
 
-	if err != nil && !strings.Contains(err.Error(), dynamodb.ErrCodeResourceInUseException) {
+	var resourceInUse *types.ResourceInUseException
+	if err != nil && !errors.As(err, &resourceInUse) {
 		logger.Error().Err(err).Msgf("failed to create dynamodb table %s", cfg.Table)
 		return err
 	}
 
-	if err := client.WaitUntilTableExistsWithContext(ctx, &dynamodb.DescribeTableInput{
+	if err := dynamodb.NewTableExistsWaiter(client).Wait(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(cfg.Table),
-	}); err != nil {
+	}, 5*time.Minute); err != nil {
 		logger.Error().Err(err).Msgf("failed to wait for dynamodb table %s to be created", cfg.Table)
 		return err
 	}
 
-	_, err = client.UpdateTimeToLive(&dynamodb.UpdateTimeToLiveInput{
+	_, err = client.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
 		TableName: aws.String(cfg.Table),
-		TimeToLiveSpecification: &dynamodb.TimeToLiveSpecification{
+		TimeToLiveSpecification: &types.TimeToLiveSpecification{
 			AttributeName: aws.String(cfg.TTLAttributeName),
 			Enabled:       aws.Bool(true),
 		},
@@ -279,7 +244,7 @@ func createTableIfNotExists(
 func ensureGlobalSecondaryIndexes(
 	ctx context.Context,
 	logger *zerolog.Logger,
-	client *dynamodb.DynamoDB,
+	client *dynamodb.Client,
 	cfg *common.DynamoDBConnectorConfig,
 ) error {
 	if cfg.ReverseIndexName == "" {
@@ -288,7 +253,7 @@ func ensureGlobalSecondaryIndexes(
 
 	logger.Debug().Msgf("ensuring global secondary index '%s' for table '%s'", cfg.ReverseIndexName, cfg.Table)
 
-	currentTable, err := client.DescribeTableWithContext(ctx, &dynamodb.DescribeTableInput{
+	currentTable, err := client.DescribeTable(ctx, &dynamodb.DescribeTableInput{
 		TableName: aws.String(cfg.Table),
 	})
 
@@ -297,40 +262,40 @@ func ensureGlobalSecondaryIndexes(
 	}
 
 	for _, gsi := range currentTable.Table.GlobalSecondaryIndexes {
-		if *gsi.IndexName == cfg.ReverseIndexName {
+		if aws.ToString(gsi.IndexName) == cfg.ReverseIndexName {
 			logger.Debug().Msgf("global secondary index '%s' already exists", cfg.ReverseIndexName)
 			return nil
 		}
 	}
 
-	_, err = client.UpdateTableWithContext(ctx, &dynamodb.UpdateTableInput{
+	_, err = client.UpdateTable(ctx, &dynamodb.UpdateTableInput{
 		TableName: aws.String(cfg.Table),
-		AttributeDefinitions: []*dynamodb.AttributeDefinition{
+		AttributeDefinitions: []types.AttributeDefinition{
 			{
 				AttributeName: aws.String(cfg.PartitionKeyName),
-				AttributeType: aws.String("S"),
+				AttributeType: types.ScalarAttributeTypeS,
 			},
 			{
 				AttributeName: aws.String(cfg.RangeKeyName),
-				AttributeType: aws.String("S"),
+				AttributeType: types.ScalarAttributeTypeS,
 			},
 		},
-		GlobalSecondaryIndexUpdates: []*dynamodb.GlobalSecondaryIndexUpdate{
+		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{
 			{
-				Create: &dynamodb.CreateGlobalSecondaryIndexAction{
+				Create: &types.CreateGlobalSecondaryIndexAction{
 					IndexName: aws.String(cfg.ReverseIndexName),
-					KeySchema: []*dynamodb.KeySchemaElement{
+					KeySchema: []types.KeySchemaElement{
 						{
 							AttributeName: aws.String(cfg.RangeKeyName),
-							KeyType:       aws.String("HASH"),
+							KeyType:       types.KeyTypeHash,
 						},
 						{
 							AttributeName: aws.String(cfg.PartitionKeyName),
-							KeyType:       aws.String("RANGE"),
+							KeyType:       types.KeyTypeRange,
 						},
 					},
-					Projection: &dynamodb.Projection{
-						ProjectionType: aws.String("ALL"),
+					Projection: &types.Projection{
+						ProjectionType: types.ProjectionTypeAll,
 					},
 					// TODO Add capacity unit configuration based on the table's capacity type
 				},
@@ -375,15 +340,15 @@ func (d *DynamoDBConnector) Set(ctx context.Context, partitionKey, rangeKey stri
 		d.logger.Debug().Int("len", len(value)).Str("partitionKey", partitionKey).Str("rangeKey", rangeKey).Interface("ttl", ttl).Msg("putting item in dynamodb")
 	}
 
-	item := map[string]*dynamodb.AttributeValue{
-		d.partitionKeyName: {
-			S: aws.String(partitionKey),
+	item := map[string]types.AttributeValue{
+		d.partitionKeyName: &types.AttributeValueMemberS{
+			Value: partitionKey,
 		},
-		d.rangeKeyName: {
-			S: aws.String(rangeKey),
+		d.rangeKeyName: &types.AttributeValueMemberS{
+			Value: rangeKey,
 		},
-		"value": {
-			B: value, // Using Binary attribute type
+		"value": &types.AttributeValueMemberB{
+			Value: value, // Using Binary attribute type
 		},
 	}
 
@@ -393,12 +358,12 @@ func (d *DynamoDBConnector) Set(ctx context.Context, partitionKey, rangeKey stri
 	// Add TTL if provided
 	if ttl != nil && *ttl > 0 {
 		expirationTime := time.Now().Add(*ttl).Unix()
-		item[d.ttlAttributeName] = &dynamodb.AttributeValue{
-			N: aws.String(fmt.Sprintf("%d", expirationTime)),
+		item[d.ttlAttributeName] = &types.AttributeValueMemberN{
+			Value: fmt.Sprintf("%d", expirationTime),
 		}
 	}
 
-	_, err := d.writeClient.PutItemWithContext(ctx, &dynamodb.PutItemInput{
+	_, err := d.writeClient.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(d.table),
 		Item:      item,
 	})
@@ -437,12 +402,12 @@ func (d *DynamoDBConnector) Get(ctx context.Context, index, partitionKey, rangeK
 			return nil, err
 		}
 		var keyCondition string = "#pkey = :pkey"
-		var exprAttrNames map[string]*string = map[string]*string{
-			"#pkey": aws.String(d.rangeKeyName),
+		var exprAttrNames map[string]string = map[string]string{
+			"#pkey": d.rangeKeyName,
 		}
-		var exprAttrValues map[string]*dynamodb.AttributeValue = map[string]*dynamodb.AttributeValue{
-			":pkey": {
-				S: aws.String(rangeKey),
+		var exprAttrValues map[string]types.AttributeValue = map[string]types.AttributeValue{
+			":pkey": &types.AttributeValueMemberS{
+				Value: rangeKey,
 			},
 		}
 
@@ -453,9 +418,9 @@ func (d *DynamoDBConnector) Get(ctx context.Context, index, partitionKey, rangeK
 			} else {
 				keyCondition += " AND #rkey = :rkey"
 			}
-			exprAttrNames["#rkey"] = aws.String(d.partitionKeyName)
-			exprAttrValues[":rkey"] = &dynamodb.AttributeValue{
-				S: aws.String(strings.TrimSuffix(partitionKey, "*")),
+			exprAttrNames["#rkey"] = d.partitionKeyName
+			exprAttrValues[":rkey"] = &types.AttributeValueMemberS{
+				Value: strings.TrimSuffix(partitionKey, "*"),
 			}
 		}
 
@@ -469,34 +434,39 @@ func (d *DynamoDBConnector) Get(ctx context.Context, index, partitionKey, rangeK
 			ExpressionAttributeNames:  exprAttrNames,
 			ExpressionAttributeValues: exprAttrValues,
 			ScanIndexForward:          aws.Bool(false), // newest first
-			Limit:                     aws.Int64(10),   // examine a handful to avoid pagination
+			Limit:                     aws.Int32(10),   // examine a handful to avoid pagination
 			ProjectionExpression:      aws.String("#val, #ttl"),
-			Select:                    aws.String("SPECIFIC_ATTRIBUTES"),
+			Select:                    types.SelectSpecificAttributes,
 			FilterExpression:          aws.String("attribute_not_exists(#ttl) OR #ttl = :zero OR #ttl > :now"),
 		}
 		// Add aliases required by Projection/Filter
-		qi.ExpressionAttributeNames["#val"] = aws.String("value")
-		qi.ExpressionAttributeNames["#ttl"] = aws.String(d.ttlAttributeName)
-		qi.ExpressionAttributeValues[":now"] = &dynamodb.AttributeValue{N: aws.String(strconv.FormatInt(now, 10))}
-		qi.ExpressionAttributeValues[":zero"] = &dynamodb.AttributeValue{N: aws.String("0")}
+		qi.ExpressionAttributeNames["#val"] = "value"
+		qi.ExpressionAttributeNames["#ttl"] = d.ttlAttributeName
+		qi.ExpressionAttributeValues[":now"] = &types.AttributeValueMemberN{Value: strconv.FormatInt(now, 10)}
+		qi.ExpressionAttributeValues[":zero"] = &types.AttributeValueMemberN{Value: "0"}
 
 		ctx, cancel := context.WithTimeout(ctx, d.getTimeout)
 		defer cancel()
 
 		d.logger.Debug().Str("index", d.reverseIndexName).Str("partitionKey", partitionKey).Str("rangeKey", rangeKey).Msg("getting item from dynamodb")
-		result, err := d.readClient.QueryWithContext(ctx, qi, request.WithResponseReadTimeout(d.getTimeout))
+		// v1 applied request.WithResponseReadTimeout(getTimeout) here; v2 has
+		// no response-read-timeout option, so the deadline on this Query call
+		// is the equivalent bound.
+		result, err := d.readClient.Query(ctx, qi)
 		if err != nil {
 			common.SetTraceSpanError(span, err)
 			return nil, err
 		}
 		// Find the first non-expired item from the page (FilterExpression already helps)
-		var chosen map[string]*dynamodb.AttributeValue
+		var chosen map[string]types.AttributeValue
 		for _, it := range result.Items {
 			// Extra safeguard: client-side TTL validation
-			if ttl, exists := it[d.ttlAttributeName]; exists && ttl.N != nil && *ttl.N != "" && *ttl.N != "0" {
-				expirationTime, perr := strconv.ParseInt(*ttl.N, 10, 64)
-				if perr == nil && now > expirationTime {
-					continue // skip expired
+			if ttlAttr, exists := it[d.ttlAttributeName]; exists {
+				if ttl, ok := ttlAttr.(*types.AttributeValueMemberN); ok && ttl.Value != "" && ttl.Value != "0" {
+					expirationTime, perr := strconv.ParseInt(ttl.Value, 10, 64)
+					if perr == nil && now > expirationTime {
+						continue // skip expired
+					}
 				}
 			}
 			chosen = it
@@ -510,25 +480,25 @@ func (d *DynamoDBConnector) Get(ctx context.Context, index, partitionKey, rangeK
 		}
 
 		// Backward compatibility: check both B and S attributes
-		if chosen["value"].B != nil {
-			value = chosen["value"].B
-		} else if chosen["value"].S != nil {
+		if b, ok := chosen["value"].(*types.AttributeValueMemberB); ok {
+			value = b.Value
+		} else if s, ok := chosen["value"].(*types.AttributeValueMemberS); ok {
 			// Legacy string value - treat as final decompressed value
-			value = []byte(*chosen["value"].S)
+			value = []byte(s.Value)
 		} else {
 			return nil, fmt.Errorf("value attribute is neither binary nor string")
 		}
 	} else {
-		ky := map[string]*dynamodb.AttributeValue{
-			d.partitionKeyName: {
-				S: aws.String(partitionKey),
+		ky := map[string]types.AttributeValue{
+			d.partitionKeyName: &types.AttributeValueMemberS{
+				Value: partitionKey,
 			},
-			d.rangeKeyName: {
-				S: aws.String(rangeKey),
+			d.rangeKeyName: &types.AttributeValueMemberS{
+				Value: rangeKey,
 			},
 		}
 		d.logger.Debug().Str("index", "n/a").Str("partitionKey", partitionKey).Str("rangeKey", rangeKey).Msg("getting item from dynamodb")
-		result, err := d.readClient.GetItemWithContext(ctx, &dynamodb.GetItemInput{
+		result, err := d.readClient.GetItem(ctx, &dynamodb.GetItemInput{
 			TableName: aws.String(d.table),
 			Key:       ky,
 		})
@@ -545,22 +515,24 @@ func (d *DynamoDBConnector) Get(ctx context.Context, index, partitionKey, rangeK
 		}
 
 		// Check if the item has expired
-		if ttl, exists := result.Item[d.ttlAttributeName]; exists && ttl.N != nil && *ttl.N != "" && *ttl.N != "0" {
-			expirationTime, err := strconv.ParseInt(*ttl.N, 10, 64)
-			now := time.Now().Unix()
-			if err == nil && now > expirationTime {
-				err := common.NewErrRecordExpired(partitionKey, rangeKey, DynamoDBDriverName, now, expirationTime)
-				common.SetTraceSpanError(span, err)
-				return nil, err
+		if ttlAttr, exists := result.Item[d.ttlAttributeName]; exists {
+			if ttl, ok := ttlAttr.(*types.AttributeValueMemberN); ok && ttl.Value != "" && ttl.Value != "0" {
+				expirationTime, err := strconv.ParseInt(ttl.Value, 10, 64)
+				now := time.Now().Unix()
+				if err == nil && now > expirationTime {
+					err := common.NewErrRecordExpired(partitionKey, rangeKey, DynamoDBDriverName, now, expirationTime)
+					common.SetTraceSpanError(span, err)
+					return nil, err
+				}
 			}
 		}
 
 		// Backward compatibility: check both B and S attributes
-		if result.Item["value"].B != nil {
-			value = result.Item["value"].B
-		} else if result.Item["value"].S != nil {
+		if b, ok := result.Item["value"].(*types.AttributeValueMemberB); ok {
+			value = b.Value
+		} else if s, ok := result.Item["value"].(*types.AttributeValueMemberS); ok {
 			// Legacy string value - treat as final decompressed value
-			value = []byte(*result.Item["value"].S)
+			value = []byte(s.Value)
 		} else {
 			return nil, fmt.Errorf("value attribute is neither binary nor string")
 		}
@@ -616,22 +588,22 @@ func (d *DynamoDBConnector) Lock(ctx context.Context, key string, ttl time.Durat
 		// If 'ctx' finishes, PutItemWithContext will be interrupted.
 		putAttemptCtx, putAttemptCancel := context.WithTimeout(ctx, d.setTimeout)
 
-		_, err := d.writeClient.PutItemWithContext(putAttemptCtx, &dynamodb.PutItemInput{
+		_, err := d.writeClient.PutItem(putAttemptCtx, &dynamodb.PutItemInput{
 			TableName: aws.String(d.table),
-			Item: map[string]*dynamodb.AttributeValue{
-				d.partitionKeyName: {S: aws.String(lockKey)},
-				d.rangeKeyName:     {S: aws.String("lock")}, // Using a fixed value for the range key of lock items
-				"expiry":           {N: aws.String(fmt.Sprintf("%d", lockItemExpiryTime))},
+			Item: map[string]types.AttributeValue{
+				d.partitionKeyName: &types.AttributeValueMemberS{Value: lockKey},
+				d.rangeKeyName:     &types.AttributeValueMemberS{Value: "lock"}, // Using a fixed value for the range key of lock items
+				"expiry":           &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", lockItemExpiryTime)},
 			},
 			ConditionExpression: aws.String(
 				"attribute_not_exists(#pk) OR #expiry < :now",
 			),
-			ExpressionAttributeNames: map[string]*string{
-				"#pk":     aws.String(d.partitionKeyName),
-				"#expiry": aws.String("expiry"),
+			ExpressionAttributeNames: map[string]string{
+				"#pk":     d.partitionKeyName,
+				"#expiry": "expiry",
 			},
-			ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-				":now": {N: aws.String(fmt.Sprintf("%d", time.Now().Unix()))},
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":now": &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", time.Now().Unix())},
 			},
 		})
 		putAttemptCancel() // Release resources for this attempt's context immediately
@@ -647,22 +619,23 @@ func (d *DynamoDBConnector) Lock(ctx context.Context, key string, ttl time.Durat
 
 		// If an error occurred, check if it's a known AWS error we should retry on
 		retryableError := false
-		if aerr, ok := err.(awserr.Error); ok {
-			switch aerr.Code() {
-			case dynamodb.ErrCodeConditionalCheckFailedException:
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) {
+			switch apiErr.ErrorCode() {
+			case "ConditionalCheckFailedException":
 				d.logger.Debug().Str("lockKey", lockKey).Dur("retryInterval", d.lockRetryInterval).
 					Msg("lock currently held or contention, will retry")
 				retryableError = true
-			case dynamodb.ErrCodeProvisionedThroughputExceededException,
-				dynamodb.ErrCodeInternalServerError,    // Often retryable for DynamoDB
-				dynamodb.ErrCodeLimitExceededException: // Covers various limits, potentially including some throttling
-				d.logger.Warn().Err(aerr).Str("lockKey", lockKey).Str("errorCode", aerr.Code()).
+			case "ProvisionedThroughputExceededException",
+				"InternalServerError",    // Often retryable for DynamoDB
+				"LimitExceededException": // Covers various limits, potentially including some throttling
+				d.logger.Warn().Err(err).Str("lockKey", lockKey).Str("errorCode", apiErr.ErrorCode()).
 					Dur("retryInterval", d.lockRetryInterval).
 					Msg("DynamoDB capacity/limit/server error during lock acquisition, will retry")
 				retryableError = true
 			default:
 				// Non-retryable AWS error for lock acquisition logic
-				d.logger.Error().Err(aerr).Str("lockKey", lockKey).Str("errorCode", aerr.Code()).
+				d.logger.Error().Err(err).Str("lockKey", lockKey).Str("errorCode", apiErr.ErrorCode()).
 					Msg("non-retryable AWS error during lock acquisition attempt")
 			}
 		}
@@ -695,11 +668,11 @@ func (l *dynamoLock) Unlock(ctx context.Context) error {
 	)
 	defer span.End()
 
-	_, err := l.connector.writeClient.DeleteItemWithContext(ctx, &dynamodb.DeleteItemInput{
+	_, err := l.connector.writeClient.DeleteItem(ctx, &dynamodb.DeleteItemInput{
 		TableName: aws.String(l.connector.table),
-		Key: map[string]*dynamodb.AttributeValue{
-			l.connector.partitionKeyName: {S: aws.String(l.lockKey)},
-			l.connector.rangeKeyName:     {S: aws.String("lock")},
+		Key: map[string]types.AttributeValue{
+			l.connector.partitionKeyName: &types.AttributeValueMemberS{Value: l.lockKey},
+			l.connector.rangeKeyName:     &types.AttributeValueMemberS{Value: "lock"},
 		},
 	})
 
@@ -770,11 +743,11 @@ func (d *DynamoDBConnector) getSimpleValue(ctx context.Context, key string) (Cou
 	)
 	defer span.End()
 
-	result, err := d.readClient.GetItemWithContext(ctx, &dynamodb.GetItemInput{
+	result, err := d.readClient.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName: aws.String(d.table),
-		Key: map[string]*dynamodb.AttributeValue{
-			d.partitionKeyName: {S: aws.String(key)},
-			d.rangeKeyName:     {S: aws.String("value")},
+		Key: map[string]types.AttributeValue{
+			d.partitionKeyName: &types.AttributeValueMemberS{Value: key},
+			d.rangeKeyName:     &types.AttributeValueMemberS{Value: "value"},
 		},
 		ConsistentRead: aws.Bool(true),
 	})
@@ -794,21 +767,15 @@ func (d *DynamoDBConnector) getSimpleValue(ctx context.Context, key string) (Cou
 		return CounterInt64State{}, false, nil
 	}
 
-	// Handle nil AttributeValue
-	if v == nil {
-		d.logger.Debug().Str("key", key).Msg("counter value attribute is nil")
-		return CounterInt64State{}, false, nil
-	}
-
 	// Extract raw bytes (we store JSON in Binary; other types are treated as best-effort strings)
 	var raw []byte
-	switch {
-	case v.B != nil:
-		raw = v.B
-	case v.S != nil:
-		raw = []byte(*v.S)
-	case v.N != nil:
-		raw = []byte(*v.N)
+	switch tv := v.(type) {
+	case *types.AttributeValueMemberB:
+		raw = tv.Value
+	case *types.AttributeValueMemberS:
+		raw = []byte(tv.Value)
+	case *types.AttributeValueMemberN:
+		raw = []byte(tv.Value)
 	default:
 		return CounterInt64State{}, false, nil
 	}
@@ -851,14 +818,14 @@ func (d *DynamoDBConnector) Delete(ctx context.Context, partitionKey, rangeKey s
 	ctx, cancel := context.WithTimeout(ctx, d.setTimeout)
 	defer cancel()
 
-	_, err := d.writeClient.DeleteItemWithContext(ctx, &dynamodb.DeleteItemInput{
+	_, err := d.writeClient.DeleteItem(ctx, &dynamodb.DeleteItemInput{
 		TableName: aws.String(d.table),
-		Key: map[string]*dynamodb.AttributeValue{
-			d.partitionKeyName: {
-				S: aws.String(partitionKey),
+		Key: map[string]types.AttributeValue{
+			d.partitionKeyName: &types.AttributeValueMemberS{
+				Value: partitionKey,
 			},
-			d.rangeKeyName: {
-				S: aws.String(rangeKey),
+			d.rangeKeyName: &types.AttributeValueMemberS{
+				Value: rangeKey,
 			},
 		},
 	})
@@ -890,8 +857,10 @@ func (d *DynamoDBConnector) List(ctx context.Context, index string, limit int, p
 	ctx, cancel := context.WithTimeout(ctx, d.getTimeout)
 	defer cancel()
 
-	// Parse pagination token
-	var exclusiveStartKey map[string]*dynamodb.AttributeValue
+	// Parse pagination token. Tokens are produced and consumed within one
+	// connector only (never persisted), so the JSON encoding is free to
+	// differ from the v1 SDK's AttributeValue JSON shape.
+	var exclusiveStartKey map[string]string
 	if paginationToken != "" {
 		decoded, err := base64.StdEncoding.DecodeString(paginationToken)
 		if err != nil {
@@ -902,24 +871,28 @@ func (d *DynamoDBConnector) List(ctx context.Context, index string, limit int, p
 			return nil, "", fmt.Errorf("invalid pagination token format: %w", err)
 		}
 	}
+	exclusiveStartKeyAttr := make(map[string]types.AttributeValue, len(exclusiveStartKey))
+	for k, v := range exclusiveStartKey {
+		exclusiveStartKeyAttr[k] = &types.AttributeValueMemberS{Value: v}
+	}
 
 	var result *dynamodb.ScanOutput
 	var err error
 
 	if index == ConnectorReverseIndex {
 		// Use the reverse index (GSI)
-		result, err = d.readClient.ScanWithContext(ctx, &dynamodb.ScanInput{
+		result, err = d.readClient.Scan(ctx, &dynamodb.ScanInput{
 			TableName:         aws.String(d.table),
 			IndexName:         aws.String(d.reverseIndexName),
-			Limit:             aws.Int64(int64(limit)),
-			ExclusiveStartKey: exclusiveStartKey,
+			Limit:             aws.Int32(int32(limit)),
+			ExclusiveStartKey: exclusiveStartKeyAttr,
 		})
 	} else {
 		// Use the main table
-		result, err = d.readClient.ScanWithContext(ctx, &dynamodb.ScanInput{
+		result, err = d.readClient.Scan(ctx, &dynamodb.ScanInput{
 			TableName:         aws.String(d.table),
-			Limit:             aws.Int64(int64(limit)),
-			ExclusiveStartKey: exclusiveStartKey,
+			Limit:             aws.Int32(int32(limit)),
+			ExclusiveStartKey: exclusiveStartKeyAttr,
 		})
 	}
 
@@ -933,31 +906,31 @@ func (d *DynamoDBConnector) List(ctx context.Context, index string, limit int, p
 
 	for _, item := range result.Items {
 		// Check if item has expired
-		if ttl, exists := item[d.ttlAttributeName]; exists && ttl.N != nil && *ttl.N != "" && *ttl.N != "0" {
-			expirationTime, err := strconv.ParseInt(*ttl.N, 10, 64)
-			if err == nil && now > expirationTime {
-				continue // Skip expired items
+		if ttlAttr, exists := item[d.ttlAttributeName]; exists {
+			if ttl, ok := ttlAttr.(*types.AttributeValueMemberN); ok && ttl.Value != "" && ttl.Value != "0" {
+				expirationTime, err := strconv.ParseInt(ttl.Value, 10, 64)
+				if err == nil && now > expirationTime {
+					continue // Skip expired items
+				}
 			}
 		}
 
 		// Extract partition and range keys
 		partitionKey := ""
 		rangeKey := ""
-		if item[d.partitionKeyName] != nil && item[d.partitionKeyName].S != nil {
-			partitionKey = *item[d.partitionKeyName].S
+		if pk, ok := item[d.partitionKeyName].(*types.AttributeValueMemberS); ok {
+			partitionKey = pk.Value
 		}
-		if item[d.rangeKeyName] != nil && item[d.rangeKeyName].S != nil {
-			rangeKey = *item[d.rangeKeyName].S
+		if rk, ok := item[d.rangeKeyName].(*types.AttributeValueMemberS); ok {
+			rangeKey = rk.Value
 		}
 
 		// Extract value
 		var value []byte
-		if item["value"] != nil {
-			if item["value"].B != nil {
-				value = item["value"].B
-			} else if item["value"].S != nil {
-				value = []byte(*item["value"].S)
-			}
+		if b, ok := item["value"].(*types.AttributeValueMemberB); ok {
+			value = b.Value
+		} else if s, ok := item["value"].(*types.AttributeValueMemberS); ok {
+			value = []byte(s.Value)
 		}
 
 		if partitionKey != "" && rangeKey != "" {
@@ -971,12 +944,20 @@ func (d *DynamoDBConnector) List(ctx context.Context, index string, limit int, p
 
 	// Prepare next token
 	nextToken := ""
-	if result.LastEvaluatedKey != nil {
-		tokenData, err := json.Marshal(result.LastEvaluatedKey)
+	if len(result.LastEvaluatedKey) > 0 {
+		tokenData := make(map[string]string, len(result.LastEvaluatedKey))
+		for k, v := range result.LastEvaluatedKey {
+			sv, ok := v.(*types.AttributeValueMemberS)
+			if !ok {
+				return nil, "", fmt.Errorf("failed to create pagination token: last-evaluated key %q is not a string attribute", k)
+			}
+			tokenData[k] = sv.Value
+		}
+		tokenJSON, err := json.Marshal(tokenData)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to create pagination token: %w", err)
 		}
-		nextToken = base64.StdEncoding.EncodeToString(tokenData)
+		nextToken = base64.StdEncoding.EncodeToString(tokenJSON)
 	}
 
 	return results, nextToken, nil
@@ -995,27 +976,27 @@ func (d *DynamoDBConnector) DeleteByPattern(ctx context.Context, opts PatternDel
 	}
 
 	var matched, deleted int64
-	var startKey map[string]*dynamodb.AttributeValue
+	var startKey map[string]types.AttributeValue
 
 	for {
-		out, err := d.readClient.ScanWithContext(ctx, &dynamodb.ScanInput{
+		out, err := d.readClient.Scan(ctx, &dynamodb.ScanInput{
 			TableName:         aws.String(d.table),
 			ExclusiveStartKey: startKey,
-			Limit:             aws.Int64(100),
+			Limit:             aws.Int32(100),
 		})
 		if err != nil {
 			common.SetTraceSpanError(span, err)
 			return matched, deleted, fmt.Errorf("dynamodb scan: %w", err)
 		}
 
-		var batch []*dynamodb.WriteRequest
+		var batch []types.WriteRequest
 		for _, item := range out.Items {
-			pkAttr := item[d.partitionKeyName]
-			rkAttr := item[d.rangeKeyName]
-			if pkAttr == nil || pkAttr.S == nil || rkAttr == nil || rkAttr.S == nil {
+			pkAttr, pkOk := item[d.partitionKeyName].(*types.AttributeValueMemberS)
+			rkAttr, rkOk := item[d.rangeKeyName].(*types.AttributeValueMemberS)
+			if !pkOk || !rkOk {
 				continue
 			}
-			pk, rk := *pkAttr.S, *rkAttr.S
+			pk, rk := pkAttr.Value, rkAttr.Value
 			if !partitionMatchesScope(pk, opts) || !rangeMatchesMethod(rk, opts.Method) {
 				continue
 			}
@@ -1023,11 +1004,11 @@ func (d *DynamoDBConnector) DeleteByPattern(ctx context.Context, opts PatternDel
 			if opts.DryRun {
 				continue
 			}
-			batch = append(batch, &dynamodb.WriteRequest{
-				DeleteRequest: &dynamodb.DeleteRequest{
-					Key: map[string]*dynamodb.AttributeValue{
-						d.partitionKeyName: {S: aws.String(pk)},
-						d.rangeKeyName:     {S: aws.String(rk)},
+			batch = append(batch, types.WriteRequest{
+				DeleteRequest: &types.DeleteRequest{
+					Key: map[string]types.AttributeValue{
+						d.partitionKeyName: &types.AttributeValueMemberS{Value: pk},
+						d.rangeKeyName:     &types.AttributeValueMemberS{Value: rk},
 					},
 				},
 			})
@@ -1058,9 +1039,9 @@ func (d *DynamoDBConnector) DeleteByPattern(ctx context.Context, opts PatternDel
 	return matched, deleted, nil
 }
 
-func (d *DynamoDBConnector) flushDeleteBatch(ctx context.Context, batch []*dynamodb.WriteRequest) (int64, error) {
-	req := map[string][]*dynamodb.WriteRequest{d.table: batch}
-	out, err := d.writeClient.BatchWriteItemWithContext(ctx, &dynamodb.BatchWriteItemInput{
+func (d *DynamoDBConnector) flushDeleteBatch(ctx context.Context, batch []types.WriteRequest) (int64, error) {
+	req := map[string][]types.WriteRequest{d.table: batch}
+	out, err := d.writeClient.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{
 		RequestItems: req,
 	})
 	if err != nil {

@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -8,7 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/erpc/erpc/common"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
@@ -23,14 +25,14 @@ type fakeS3 struct {
 	err    error
 }
 
-func (f *fakeS3) PutObject(in *s3.PutObjectInput) (*s3.PutObjectOutput, error) {
+func (f *fakeS3) PutObject(_ context.Context, in *s3.PutObjectInput, _ ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return nil, f.err
 	}
 	body, _ := io.ReadAll(in.Body)
-	f.keys = append(f.keys, *in.Key)
+	f.keys = append(f.keys, aws.ToString(in.Key))
 	f.bodies = append(f.bodies, string(body))
 	return &s3.PutObjectOutput{}, nil
 }

@@ -7,8 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/util"
 	"github.com/rs/zerolog/log"
@@ -322,12 +323,12 @@ func TestDynamoDBDistributedLocking(t *testing.T) {
 		formattedLockKey := fmt.Sprintf("%s:lock", lockKey)
 		lockExpiryTime := time.Now().Add(lockExpiry).Unix()
 
-		_, err := connector.writeClient.PutItem(&dynamodb.PutItemInput{
+		_, err := connector.writeClient.PutItem(ctx, &dynamodb.PutItemInput{
 			TableName: aws.String(connector.table),
-			Item: map[string]*dynamodb.AttributeValue{
-				connector.partitionKeyName: {S: aws.String(formattedLockKey)},
-				connector.rangeKeyName:     {S: aws.String("lock")},
-				"expiry":                   {N: aws.String(fmt.Sprintf("%d", lockExpiryTime))},
+			Item: map[string]types.AttributeValue{
+				connector.partitionKeyName: &types.AttributeValueMemberS{Value: formattedLockKey},
+				connector.rangeKeyName:     &types.AttributeValueMemberS{Value: "lock"},
+				"expiry":                   &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", lockExpiryTime)},
 			},
 		})
 		require.NoError(t, err, "should create mock lock record")
@@ -354,12 +355,12 @@ func TestDynamoDBDistributedLocking(t *testing.T) {
 		formattedLockKey := fmt.Sprintf("%s:lock", lockKey)
 		lockExpiryTime := time.Now().Add(100 * time.Second).Unix() // Won't expire during our test
 
-		_, err := connector.writeClient.PutItem(&dynamodb.PutItemInput{
+		_, err := connector.writeClient.PutItem(ctx, &dynamodb.PutItemInput{
 			TableName: aws.String(connector.table),
-			Item: map[string]*dynamodb.AttributeValue{
-				connector.partitionKeyName: {S: aws.String(formattedLockKey)},
-				connector.rangeKeyName:     {S: aws.String("lock")},
-				"expiry":                   {N: aws.String(fmt.Sprintf("%d", lockExpiryTime))},
+			Item: map[string]types.AttributeValue{
+				connector.partitionKeyName: &types.AttributeValueMemberS{Value: formattedLockKey},
+				connector.rangeKeyName:     &types.AttributeValueMemberS{Value: "lock"},
+				"expiry":                   &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", lockExpiryTime)},
 			},
 		})
 		require.NoError(t, err, "should create mock lock record")
@@ -386,12 +387,12 @@ func TestDynamoDBDistributedLocking(t *testing.T) {
 		formattedLockKey := fmt.Sprintf("%s:lock", lockKey)
 		lockExpiryTime := time.Now().Add(5 * time.Second).Unix()
 
-		_, err := connector.writeClient.PutItem(&dynamodb.PutItemInput{
+		_, err := connector.writeClient.PutItem(ctx, &dynamodb.PutItemInput{
 			TableName: aws.String(connector.table),
-			Item: map[string]*dynamodb.AttributeValue{
-				connector.partitionKeyName: {S: aws.String(formattedLockKey)},
-				connector.rangeKeyName:     {S: aws.String("lock")},
-				"expiry":                   {N: aws.String(fmt.Sprintf("%d", lockExpiryTime))},
+			Item: map[string]types.AttributeValue{
+				connector.partitionKeyName: &types.AttributeValueMemberS{Value: formattedLockKey},
+				connector.rangeKeyName:     &types.AttributeValueMemberS{Value: "lock"},
+				"expiry":                   &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", lockExpiryTime)},
 			},
 		})
 		require.NoError(t, err, "should create mock lock record")
@@ -426,12 +427,12 @@ func TestDynamoDBDistributedLocking(t *testing.T) {
 		formattedLockKey := fmt.Sprintf("%s:lock", lockKey)
 		expiredLockTime := time.Now().Add(-60 * time.Second).Unix() // Expired 1 minute ago
 
-		_, err := connector.writeClient.PutItem(&dynamodb.PutItemInput{
+		_, err := connector.writeClient.PutItem(ctx, &dynamodb.PutItemInput{
 			TableName: aws.String(connector.table),
-			Item: map[string]*dynamodb.AttributeValue{
-				connector.partitionKeyName: {S: aws.String(formattedLockKey)},
-				connector.rangeKeyName:     {S: aws.String("lock")},
-				"expiry":                   {N: aws.String(fmt.Sprintf("%d", expiredLockTime))},
+			Item: map[string]types.AttributeValue{
+				connector.partitionKeyName: &types.AttributeValueMemberS{Value: formattedLockKey},
+				connector.rangeKeyName:     &types.AttributeValueMemberS{Value: "lock"},
+				"expiry":                   &types.AttributeValueMemberN{Value: fmt.Sprintf("%d", expiredLockTime)},
 			},
 		})
 		require.NoError(t, err, "should create expired lock record")
