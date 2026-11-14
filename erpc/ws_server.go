@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/erpc/erpc/architecture/svm"
 	"github.com/erpc/erpc/auth"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/indexer/adapters/wsclient"
@@ -384,7 +385,10 @@ func (wsc *WsConnection) handleRequest(ctx context.Context, raw []byte, startedA
 	if !allowed {
 		return unsupported(fmt.Sprintf("method not supported: %s", method)), notification, nil
 	}
-	if inBatch && IsSubscriptionMethod(method) {
+	if notification && IsSubscriptionMethodForArchitecture(wsc.architecture, method) {
+		return nil, true, nil
+	}
+	if inBatch && wsc.architecture != common.ArchitectureSvm && IsSubscriptionMethod(method) {
 		return unsupported("subscription methods (eth_subscribe, eth_unsubscribe) are not supported in batch requests"), notification, nil
 	}
 
@@ -410,10 +414,18 @@ func (wsc *WsConnection) handleRequest(ctx context.Context, raw []byte, startedA
 
 	var resp *common.NormalizedResponse
 	switch {
-	case IsSubscribeMethod(method):
-		resp, open, err = wsc.server.subscriptionManager.Subscribe(requestCtx, wsc, nq, project, wsc.networkId)
-	case IsSubscriptionMethod(method):
-		resp, err = wsc.server.subscriptionManager.Unsubscribe(requestCtx, wsc, nq, project, wsc.networkId)
+	case IsSubscribeMethodForArchitecture(wsc.architecture, method):
+		if wsc.architecture == common.ArchitectureSvm {
+			resp, open, err = wsc.server.subscriptionManager.SubscribeSvm(requestCtx, wsc, nq, project, wsc.networkId)
+		} else {
+			resp, open, err = wsc.server.subscriptionManager.Subscribe(requestCtx, wsc, nq, project, wsc.networkId)
+		}
+	case IsSubscriptionMethodForArchitecture(wsc.architecture, method):
+		if wsc.architecture == common.ArchitectureSvm {
+			resp, err = wsc.server.subscriptionManager.UnsubscribeSvm(requestCtx, wsc, nq, project, wsc.networkId)
+		} else {
+			resp, err = wsc.server.subscriptionManager.Unsubscribe(requestCtx, wsc, nq, project, wsc.networkId)
+		}
 	default:
 		resp, err = project.Forward(requestCtx, wsc.networkId, nq)
 	}
@@ -439,6 +451,12 @@ func (wsc *WsConnection) handleBatch(ctx context.Context, raw []byte, startedAt 
 		wsc.writeError(int(common.JsonRpcErrorClientSideException), "invalid request: empty batch")
 		return
 	}
+	if wsc.architecture == common.ArchitectureSvm {
+		if batchErr := svm.BatchParseError(requests); batchErr != nil {
+			wsc.writeError(int(common.JsonRpcErrorParseException), batchErr.(common.StandardError).DeepestMessage())
+			return
+		}
+	}
 	// The connection is bound to one network, so its limit covers the batch.
 	if nw, err := wsc.project.GetNetwork(ctx, wsc.networkId); err == nil {
 		if _, capErr := networkBatchCapError(nw, len(requests)); capErr != nil {
@@ -451,11 +469,26 @@ func (wsc *WsConnection) handleBatch(ctx context.Context, raw []byte, startedAt 
 	notifications := make([]bool, len(requests))
 	var wg sync.WaitGroup
 
+	subscriptionItems := make([]bool, len(requests))
+	if wsc.architecture == common.ArchitectureSvm {
+		for i, raw := range requests {
+			nq := common.NewNormalizedRequest(raw)
+			method, err := nq.Method()
+			subscriptionItems[i] = err == nil && IsSubscriptionMethodForArchitecture(wsc.architecture, method)
+		}
+	}
+
 	for i, reqBody := range requests {
+		if subscriptionItems[i] {
+			// SVM lifecycle items run synchronously so each item sees the
+			// previous item's state and ordering is preserved.
+			responses[i], notifications[i], _ = wsc.handleRequest(ctx, reqBody, startedAt, true)
+			continue
+		}
 		wg.Add(1)
 		go func(index int, reqRaw json.RawMessage) {
 			defer wg.Done()
-			// Batches refuse subscribe, so nothing opens here.
+			// Batches refuse EVM subscribe, so nothing opens here.
 			responses[index], notifications[index], _ = wsc.handleRequest(ctx, reqRaw, startedAt, true)
 		}(i, reqBody)
 	}

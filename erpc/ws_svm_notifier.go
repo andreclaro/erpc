@@ -25,6 +25,7 @@ type svmDelivery struct {
 
 	mu            sync.Mutex
 	open          bool
+	closed        bool
 	pending       []wsOut
 	pendingWeight int64
 }
@@ -72,6 +73,11 @@ func (d *svmDelivery) Offer(n clients.WsSubscriptionNotification, terminal bool)
 	}
 
 	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		releaseMessage(msg)
+		return nil, errWsConnClosed
+	}
 	if d.open {
 		d.mu.Unlock()
 		err := d.wsc.tryQueue(out)
@@ -106,6 +112,19 @@ func (d *svmDelivery) Open() error {
 		}
 	}
 	return firstErr
+}
+
+// Close stops the delivery from accepting new frames and drops pending ones.
+func (d *svmDelivery) Close() {
+	d.mu.Lock()
+	d.closed = true
+	pending := d.pending
+	d.pending = nil
+	d.pendingWeight = 0
+	d.mu.Unlock()
+	for _, out := range pending {
+		releaseMessage(out.msg)
+	}
 }
 
 // rewrite replaces only params.subscription with the downstream id.

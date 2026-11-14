@@ -21,6 +21,7 @@ import (
 	"github.com/erpc/erpc/architecture/evm"
 	"github.com/erpc/erpc/architecture/evm/logfilter"
 	"github.com/erpc/erpc/architecture/svm"
+	"github.com/erpc/erpc/clients"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/data"
 	"github.com/erpc/erpc/health"
@@ -4664,6 +4665,45 @@ func servesMethod(u common.Upstream, method string) bool {
 	}
 	ok, err := u.ShouldHandleMethod(method)
 	return ok || err != nil
+}
+
+// selectDirectUpstream picks exactly one WebSocket upstream for a stateful
+// subscription request. It applies the request's use-upstream directive, method
+// eligibility for both the subscribe and its paired unsubscribe method, and
+// prefers WebSocket candidates over other client types.
+func (n *Network) selectDirectUpstream(ctx context.Context, req *common.NormalizedRequest, pairedMethod string) (common.Upstream, error) {
+	req.ApplyDirectiveDefaults(n.cfg.DirectiveDefaults)
+	method, err := req.Method()
+	if err != nil {
+		return nil, err
+	}
+	candidates := n.selectionOrder(ctx, req, method)
+	candidates = n.preferUpstreams(ctx, req, method, candidates, 0, false)
+	if d := req.Directives(); d != nil && d.UseUpstream != "" {
+		targeted := make([]common.Upstream, 0, len(candidates))
+		for _, u := range candidates {
+			if match, matchErr := common.UpstreamMatchesSelector(d.UseUpstream, u); matchErr == nil && match {
+				targeted = append(targeted, u)
+			}
+		}
+		candidates = targeted
+	}
+	candidates, _ = filterMethodEligible(candidates, method)
+	candidates, _ = filterMethodEligible(candidates, pairedMethod)
+	wsCandidates := make([]common.Upstream, 0, len(candidates))
+	for _, u := range candidates {
+		concrete, ok := u.(*upstream.Upstream)
+		if ok && concrete.Client != nil && concrete.Client.GetType() == clients.ClientTypeWsJsonRpc {
+			wsCandidates = append(wsCandidates, u)
+		}
+	}
+	candidates = wsCandidates
+	if len(candidates) == 0 {
+		return nil, common.NewErrNoUpstreamsFound(n.projectId, n.networkId)
+	}
+	selected := candidates[0]
+	req.SetUpstreams([]common.Upstream{selected})
+	return selected, nil
 }
 
 // evmTargetBlock is the block a request targets: the response's, or the
