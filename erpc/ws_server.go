@@ -388,8 +388,8 @@ func (wsc *WsConnection) handleRequest(ctx context.Context, raw []byte, startedA
 	if notification && IsSubscriptionMethodForArchitecture(wsc.architecture, method) {
 		return nil, true, nil
 	}
-	if inBatch && wsc.architecture != common.ArchitectureSvm && IsSubscriptionMethod(method) {
-		return unsupported("subscription methods (eth_subscribe, eth_unsubscribe) are not supported in batch requests"), notification, nil
+	if inBatch && IsSubscriptionMethodForArchitecture(wsc.architecture, method) {
+		return unsupported("subscription methods are not supported in batch requests"), notification, nil
 	}
 
 	ap, err := auth.NewPayloadFromHttp(method, wsc.httpReq.RemoteAddr, headers, queryArgs)
