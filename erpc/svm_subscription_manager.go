@@ -42,12 +42,16 @@ type svmUpstreamClientState struct {
 // svmUpstreamRoute is one upstream subscription ID shared by 1 or more local
 // subscribers. It stays pinned to the epoch that created it.
 type svmUpstreamRoute struct {
-	client      *clients.WsJsonRpcClient
-	upstreamID  string
-	epoch       uint64
-	key         string
-	subscribers map[string]*svmSubscriptionState
-	terminal    atomic.Bool
+	client       *clients.WsJsonRpcClient
+	upstreamID   string
+	epoch        uint64
+	key          string
+	subscribers  map[string]*svmSubscriptionState
+	terminal     atomic.Bool
+	projectID    string
+	networkLabel string
+	upstreamId   string
+	metricKind   string
 }
 
 // deliveryRef lets the adapter stop closure close the delivery that is created
@@ -200,6 +204,11 @@ func (sm *SubscriptionManager) SubscribeSvm(
 		UnsubscribeMethod:  desc.UnsubscribeMethod,
 		NotificationMethod: desc.NotificationMethod,
 		Handler:            func(n clients.WsSubscriptionNotification) { sm.handleSvmNotification(state, n, desc) },
+		OnEvent: func(n clients.WsSubscriptionNotification) {
+			labels := []string{project.Config.Id, nw.Label(), up.Id(), desc.MetricKind}
+			telemetry.MetricUpstreamSubscriptionEventsTotal.WithLabelValues(labels...).Inc()
+			telemetry.MetricUpstreamSubscriptionEventBytesTotal.WithLabelValues(labels...).Add(float64(len(n.Raw)))
+		},
 	}
 	if desc.TerminalSignature {
 		wsSub.TerminalCheck = func(params json.RawMessage) bool {
@@ -238,13 +247,18 @@ func (sm *SubscriptionManager) SubscribeSvm(
 	route, exists := clientState.routes[routeKey]
 	if !exists {
 		route = &svmUpstreamRoute{
-			client:      wsClient,
-			upstreamID:  wsSub.ID,
-			epoch:       wsSub.Epoch,
-			key:         routeKey,
-			subscribers: make(map[string]*svmSubscriptionState),
+			client:       wsClient,
+			upstreamID:   wsSub.ID,
+			epoch:        wsSub.Epoch,
+			key:          routeKey,
+			subscribers:  make(map[string]*svmSubscriptionState),
+			projectID:    project.Config.Id,
+			networkLabel: nw.Label(),
+			upstreamId:   up.Id(),
+			metricKind:   desc.MetricKind,
 		}
 		clientState.routes[routeKey] = route
+		telemetry.MetricUpstreamSubscriptionsActive.WithLabelValues(route.projectID, route.networkLabel, route.upstreamId, route.metricKind).Inc()
 	}
 	if route.terminal.Load() {
 		clientState.lifecycleMu.Unlock()
@@ -421,6 +435,10 @@ func (sm *SubscriptionManager) finishSvmSubscription(state *svmSubscriptionState
 			delete(clientState.routes, route.key)
 		}
 		clientState.lifecycleMu.Unlock()
+
+		if final {
+			telemetry.MetricUpstreamSubscriptionsActive.WithLabelValues(route.projectID, route.networkLabel, route.upstreamId, route.metricKind).Dec()
+		}
 
 		if final && unsubscribeUpstream && route.epoch == route.client.Epoch() {
 			go route.client.UnsubscribeOrphanMethod(route.upstreamID, state.unsubscribeMethod, route.epoch, clients.WsSubscriptionIDUint64)
