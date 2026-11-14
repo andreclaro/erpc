@@ -138,14 +138,15 @@ Use `IsFinalizedCommitment` semantics when reasoning about which upstream can se
 
 Deliberately excluded: **write/effectful methods** (they use a method-specific field, see below); **no-parameter methods** (`getGenesisHash`, `getVersion`, `getHealth`, `getIdentity`, `getInflationRate`, `getBlockTime`, …) where appending an options object yields `-32602` "No parameters were expected"; and **methods whose config carries no commitment field** (`getSignatureStatuses`, whose only option is `searchTransactionHistory`).
 
-**Clamping, not skipping.** Five methods reject `commitment: processed` outright — agave answers `-32602` "Method does not support commitment below `confirmed`", because a processed slot can sit on a minority fork that is later abandoned:
+**Clamping, not skipping.** Several methods reject `commitment: processed` outright — agave answers `-32602`, because a processed slot can sit on a minority fork that is later abandoned. Since Alpenglow Solana has only two commitment levels, `processed` and `finalized` (`confirmed` is an alias for `finalized` and is deprecated), so the nearest legal level is `finalized`:
 
 ```
-atLeastConfirmedMethods = getBlock, getBlocks, getBlocksWithLimit,
-                          getSignaturesForAddress, getTransaction
+atLeastFinalizedMethods = getBlock, getBlocks, getBlocksWithLimit,
+                          getSignaturesForAddress, getTransaction,
+                          blockSubscribe
 ```
 
-When the configured default is `processed` and the target method is in that set, eRPC injects `confirmed` instead. Clamping rather than skipping is deliberate: skipping would leave each upstream on its own server-side default — precisely the divergence injection exists to eliminate — and would make `resolveCommitment` report `""`, so finality classification and the cache key would lose the commitment too.
+When the configured default is `processed` and the target method is in that set, eRPC injects `finalized` instead. Clamping rather than skipping is deliberate: skipping would leave each upstream on its own server-side default — precisely the divergence injection exists to eliminate — and would make `resolveCommitment` report `""`, so finality classification and the cache key would lose the commitment too.
 
 **Clamping applies only to the injected default.** A caller-supplied commitment is classified explicit and never rewritten. If a client explicitly asks `getBlock` for `processed`, the upstream's `-32602` is the honest answer; silently upgrading it would hand back data the client did not ask for.
 
@@ -204,7 +205,7 @@ The upstream pre-filter is defensive: unknown state (no poller, zero slot, non-S
 }]`}
 />
 
-**2. Pin `processed` for a latency-sensitive frontend, and understand the clamp.** `processed` is the freshest level, but `getBlock`/`getTransaction`/`getBlocks`/`getBlocksWithLimit`/`getSignaturesForAddress` refuse it, so those five silently receive `confirmed` — which is what you want, and is why no `-32602` appears:
+**2. Pin `processed` for a latency-sensitive frontend, and understand the clamp.** `processed` is the freshest level, but `getBlock`/`getTransaction`/`getBlocks`/`getBlocksWithLimit`/`getSignaturesForAddress`/`blockSubscribe` refuse it, so those six silently receive `finalized` — which is what you want, and is why no `-32602` appears:
 
 <ConfigTabs
   path="projects[].networkDefaults.svm"
@@ -279,7 +280,7 @@ The upstream pre-filter is defensive: unknown state (no poller, zero slot, non-S
 ### Edge cases & gotchas
 
 1. **`svm.commitment` has no default.** An SVM network with no `commitment` injects nothing, and two upstreams can return different data for one request. This is the documented behavior, not an oversight — but it is rarely what an operator wants for a multi-upstream pool.
-2. **`processed` is silently clamped to `confirmed` for five methods.** No warning is logged. If you need to know which level actually reached the upstream, that is the value the cache key and finality classification used.
+2. **`processed` is silently clamped to `finalized` for six methods.** No warning is logged. If you need to know which level actually reached the upstream, that is the value the cache key and finality classification used.
 3. **A caller's explicit `processed` on `getBlock` is *not* clamped** and will surface the upstream's `-32602`. That asymmetry is deliberate: eRPC will not hand back data the client did not ask for.
 4. **The legacy encoding-string form blocks injection.** `getBlock(slot, "base64")` and `getTransaction(sig, "json")` put a string where the config object would go; injection skips rather than corrupt the shape, and the response is classified `unfinalized` rather than trusting the network default.
 5. **The options-index table is hand-maintained.** New Solana or vendor-specific methods are not commitment-injected until added. Safe by default (unknown methods are skipped) but requires upkeep.
@@ -299,7 +300,7 @@ Commitment injection emits no metrics of its own — it is a params rewrite. Its
 
 ### Source code entry points
 
-- [`architecture/svm/hooks.go`](https://github.com/erpc/erpc/blob/main/architecture/svm/hooks.go) — `resolveCommitment`, `effectiveCommitment`, `FailsafeCommitment` (the level failsafe `matchCommitment` compares), `solanaDefaultCommitment`, `commitmentOptionsIndex`, `atLeastConfirmedMethods`, `clampCommitmentForMethod`, `writeCommitmentField`, `networkPreForward_injectCommitment`, `networkPreForward_injectWriteCommitment`, `projectPreForward_getGenesisHash`.
+- [`architecture/svm/hooks.go`](https://github.com/erpc/erpc/blob/main/architecture/svm/hooks.go) — `resolveCommitment`, `effectiveCommitment`, `FailsafeCommitment` (the level failsafe `matchCommitment` compares), `solanaDefaultCommitment`, `commitmentOptionsIndex`, `atLeastFinalizedMethods`, `clampCommitmentForMethod`, `writeCommitmentField`, `networkPreForward_injectCommitment`, `networkPreForward_injectWriteCommitment`, `projectPreForward_getGenesisHash`.
 - [`architecture/svm/finality.go`](https://github.com/erpc/erpc/blob/main/architecture/svm/finality.go) — `GetFinality`, `IsFinalizedCommitment`, and the moving-head rationale.
 - [`architecture/svm/slot_lag.go`](https://github.com/erpc/erpc/blob/main/architecture/svm/slot_lag.go) — `FilterByMinContextSlot`, `MinContextSlotOf`, `isAtOrAheadOfSlot`.
 - <SourceLink file="common/config.go" lines="2336-2342" label="common/config.go — SvmNetworkConfig.Commitment" />

@@ -315,7 +315,7 @@ func TestEffectiveCommitment(t *testing.T) {
 
 		// Pinned network default applies when the caller says nothing.
 		{"pinned confirmed", pinnedConfirmed, "getBlock", `[100]`, "confirmed"},
-		{"pinned processed clamps for getBlock", pinnedProcessed, "getBlock", `[100]`, "confirmed"},
+		{"pinned processed clamps for getBlock", pinnedProcessed, "getBlock", `[100]`, "finalized"},
 		{"pinned processed stays on getSlot", pinnedProcessed, "getSlot", `[]`, "processed"},
 
 		// Nothing pinned → the node's own default, per method shape.

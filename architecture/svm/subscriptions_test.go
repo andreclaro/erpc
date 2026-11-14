@@ -148,7 +148,7 @@ func TestInjectSubscriptionCommitment(t *testing.T) {
 			want:   `"processed"`,
 		},
 		{
-			name:   "block processed clamped to confirmed",
+			name:   "block subscribe injects network default",
 			method: "blockSubscribe",
 			params: []byte(`["all"]`),
 			want:   `"confirmed"`,
@@ -185,6 +185,33 @@ func TestInjectSubscriptionCommitment(t *testing.T) {
 				t.Fatalf("got %s, want substring %s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestInjectSubscriptionCommitment_ClampProcessedToFinalized(t *testing.T) {
+	// Since Alpenglow, Solana has only processed and finalized; confirmed is an
+	// alias for finalized. blockSubscribe rejects processed, so a network default
+	// of processed must be clamped to finalized.
+	net := &fakeNetwork{cfg: &common.NetworkConfig{
+		Architecture: common.ArchitectureSvm,
+		Svm:          &common.SvmNetworkConfig{Cluster: "mainnet-beta", Commitment: "processed"},
+	}}
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"blockSubscribe","params":["all"]}`)
+	nq := common.NewNormalizedRequest(body)
+	_, d, _ := DescribeSubscriptionMethod("blockSubscribe")
+	if err := InjectSubscriptionCommitment(net, nq, d); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	jr, err := nq.JsonRpcRequest(context.Background())
+	if err != nil {
+		t.Fatalf("jsonrpc request: %v", err)
+	}
+	m, ok := jr.Params[1].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected options object at index 1, got %+v", jr.Params)
+	}
+	if m["commitment"] != "finalized" {
+		t.Fatalf("expected commitment clamped to finalized, got %v", m["commitment"])
 	}
 }
 

@@ -223,10 +223,12 @@ func (sm *SubscriptionManager) SubscribeSvm(
 		wsc.stopAsync(websocket.CloseTryAgainLater, "upstream subscription disconnected; reconnect and resubscribe")
 	})
 
-	clientState.lifecycleMu.Lock()
+	// Forward is performed outside lifecycleMu so a slow upstream cannot stall
+	// subscribe/unsubscribe/finish operations for every other route on this
+	// client. The route table is updated only after the upstream subscription id
+	// is known and the epoch is verified to still match.
 	upstreamResp, fwdErr := up.Forward(subCtx, subReq, false, false)
 	if fwdErr != nil {
-		clientState.lifecycleMu.Unlock()
 		sm.finishSvmSubscription(state, false)
 		sm.recordFailureMetrics(project, nw, method, reqFinality, start, nq, fwdErr)
 		return nil, nil, fwdErr
@@ -236,7 +238,6 @@ func (sm *SubscriptionManager) SubscribeSvm(
 	}
 
 	if wsSub.ID == "" {
-		clientState.lifecycleMu.Unlock()
 		sm.finishSvmSubscription(state, false)
 		err := common.NewErrJsonRpcExceptionInternal(0, common.JsonRpcErrorInvalidArgument, "upstream returned an invalid subscription id", nil, nil)
 		sm.recordFailureMetrics(project, nw, method, reqFinality, start, nq, err)
@@ -244,6 +245,16 @@ func (sm *SubscriptionManager) SubscribeSvm(
 	}
 
 	routeKey := strconv.FormatUint(wsSub.Epoch, 10) + "/" + wsSub.ID
+
+	clientState.lifecycleMu.Lock()
+	if wsSub.Epoch != wsClient.Epoch() {
+		clientState.lifecycleMu.Unlock()
+		sm.finishSvmSubscription(state, false)
+		err := common.NewErrJsonRpcExceptionInternal(0, common.JsonRpcErrorInvalidArgument, "upstream connection changed before subscription could start", nil, nil)
+		sm.recordFailureMetrics(project, nw, method, reqFinality, start, nq, err)
+		return nil, nil, err
+	}
+
 	route, exists := clientState.routes[routeKey]
 	if !exists {
 		route = &svmUpstreamRoute{
@@ -452,18 +463,16 @@ func (sm *SubscriptionManager) handleSvmNotification(state *svmSubscriptionState
 	}
 	terminal := desc.TerminalSignature && svm.IsTerminalSignatureNotification(desc, n.Params)
 	done, err := state.delivery.Offer(n, terminal)
-	if err != nil {
+	if err != nil && !terminal {
 		return
 	}
 	if terminal {
 		state.terminal.Store(true)
 		go func() {
-			if done == nil {
-				return
+			if done != nil {
+				<-done
 			}
-			if err := <-done; err == nil {
-				sm.finishSvmSubscription(state, false)
-			}
+			sm.finishSvmSubscription(state, false)
 		}()
 	}
 }

@@ -91,17 +91,16 @@ var commitmentOptionsIndex = map[string]int{
 	"getLeaderSchedule": optionsTrailing,
 }
 
-// atLeastConfirmedMethods are the methods whose config rejects
-// commitment=processed outright — agave answers -32602 "Method does not
-// support commitment below `confirmed`". The Solana JSON-RPC reference
-// documents their commitment field as `confirmed | finalized` only
-// (https://solana.com/docs/rpc/http): a processed slot can sit on a minority
-// fork that is later abandoned, so block/transaction lookups refuse it.
+// atLeastFinalizedMethods are the methods whose config rejects
+// commitment=processed outright. Since Alpenglow Solana has only two
+// commitment levels: processed and finalized (confirmed is an alias for
+// finalized and is deprecated). Agave answers -32602 for processed on these
+// methods, so the nearest legal level is finalized.
 //
 // Deliberately NOT in this set (all three accept processed per the same
 // reference, verified field-by-field): getBlockProduction, getLeaderSchedule,
 // and every write method in writeCommitmentField.
-var atLeastConfirmedMethods = map[string]struct{}{
+var atLeastFinalizedMethods = map[string]struct{}{
 	"getBlock": {},
 	// Deprecated alias of getBlock, and agave applies the same restriction to
 	// it. Without this the clamp is skipped and a network defaulting to
@@ -113,6 +112,10 @@ var atLeastConfirmedMethods = map[string]struct{}{
 	"getBlocksWithLimit":      {},
 	"getSignaturesForAddress": {},
 	"getTransaction":          {},
+	// WebSocket block subscription follows the same commitment rules as
+	// getBlock: processed is rejected and the only legal higher level is
+	// finalized.
+	"blockSubscribe": {},
 }
 
 // clampCommitmentForMethod narrows the commitment we are about to INJECT to a
@@ -122,9 +125,9 @@ var atLeastConfirmedMethods = map[string]struct{}{
 // each upstream on its own server-side default — precisely the cross-upstream
 // divergence injection exists to eliminate — and would make resolveCommitment
 // report "" so the finality classification and cache key lose the commitment
-// as well. Clamping to the nearest legal level (processed → confirmed) keeps
-// every upstream in lockstep and stays as close as legally possible to the
-// operator's "freshest data" intent.
+// as well. Since Alpenglow the only legal non-processed level is finalized
+// (confirmed is an alias for finalized and is deprecated), so processed is
+// clamped to finalized for narrow methods.
 //
 // This applies ONLY to the injected network default. A caller-supplied
 // commitment is classified commitmentExplicit and never rewritten: if a client
@@ -135,8 +138,8 @@ func clampCommitmentForMethod(method, commitment string) string {
 	if commitment != "processed" {
 		return commitment
 	}
-	if _, narrow := atLeastConfirmedMethods[method]; narrow {
-		return "confirmed"
+	if _, narrow := atLeastFinalizedMethods[method]; narrow {
+		return "finalized"
 	}
 	return commitment
 }
@@ -451,7 +454,7 @@ func projectPreForward_getGenesisHash(ctx context.Context, n common.Network, r *
 //
 // The value injected is never blindly the configured default: methods whose
 // commitment field is narrower than the configured level get the nearest legal
-// level instead (see clampCommitmentForMethod — processed → confirmed for
+// level instead (see clampCommitmentForMethod — processed → finalized for
 // getBlock and friends). Injecting an unaccepted level would turn a valid
 // request into an upstream -32602. Clamping, rather than skipping injection,
 // is the deliberate choice; the rationale is on clampCommitmentForMethod.
@@ -544,9 +547,9 @@ const (
 // and no injectable network default, so the node's own default governs), the
 // action injection should take, and the options index for commitmentSet. The
 // returned default is CLAMPED to a level the method accepts (see
-// clampCommitmentForMethod), so the value reported here is always the one that
-// will really reach the upstream — never one the upstream would answer -32602
-// to.
+// clampCommitmentForMethod — processed is clamped to finalized for narrow
+// methods), so the value reported here is always the one that will really
+// reach the upstream — never one the upstream would answer -32602 to.
 //
 // "" is deliberately NOT "the level the node will apply": that is
 // effectiveCommitment, which folds in Solana's documented default. Serving and

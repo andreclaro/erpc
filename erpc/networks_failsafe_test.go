@@ -1422,7 +1422,7 @@ func TestGetFailsafeExecutor_MatchCommitment(t *testing.T) {
 		// so it must take the same rule.
 		{"omitted takes the injected default", "confirmed", `{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["pk"]}`, true},
 		{"omitted takes a processed default", "processed", `{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["pk"]}`, false},
-		// getBlock rejects processed, so injection writes confirmed.
+		// getBlock rejects processed, so injection writes finalized.
 		{"omitted takes the clamped default", "processed", `{"jsonrpc":"2.0","id":1,"method":"getBlock","params":[100]}`, true},
 		// Nothing is injected, so the bytes differ from an explicit finalized request.
 		{"omitted without a default is none", "", `{"jsonrpc":"2.0","id":1,"method":"getAccountInfo","params":["pk"]}`, false},

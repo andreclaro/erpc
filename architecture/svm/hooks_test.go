@@ -383,9 +383,10 @@ func TestNetworkPreForward_InjectCommitment_ShapeAware(t *testing.T) {
 
 // TestNetworkPreForward_InjectCommitment_ClampsToLegalCommitment pins the
 // clamp policy: a network default of "processed" must never be injected into a
-// method whose commitment field only accepts confirmed|finalized, because the
-// upstream answers -32602. The nearest legal level is injected instead, so
-// every upstream still observes the same commitment.
+// method whose commitment field only accepts finalized (confirmed is an alias
+// for finalized since Alpenglow and is deprecated), because the upstream
+// answers -32602. The nearest legal level is injected instead, so every
+// upstream still observes the same commitment.
 func TestNetworkPreForward_InjectCommitment_ClampsToLegalCommitment(t *testing.T) {
 	t.Parallel()
 	net := &fakeNetwork{cfg: &common.NetworkConfig{
@@ -410,7 +411,7 @@ func TestNetworkPreForward_InjectCommitment_ClampsToLegalCommitment(t *testing.T
 		return m["commitment"]
 	}
 
-	// Narrow methods: processed is illegal → clamped up to confirmed.
+	// Narrow methods: processed is illegal → clamped up to finalized.
 	for _, tc := range []struct {
 		method string
 		params string
@@ -422,8 +423,8 @@ func TestNetworkPreForward_InjectCommitment_ClampsToLegalCommitment(t *testing.T
 		{"getTransaction", `["sig"]`, 1},
 		{"getSignaturesForAddress", `["pubkey"]`, 1},
 	} {
-		if got := commitmentOf(tc.method, tc.params, tc.idx); got != "confirmed" {
-			t.Errorf("%s: processed is not accepted, want clamp to confirmed, got %v", tc.method, got)
+		if got := commitmentOf(tc.method, tc.params, tc.idx); got != "finalized" {
+			t.Errorf("%s: processed is not accepted, want clamp to finalized, got %v", tc.method, got)
 		}
 	}
 
@@ -1500,31 +1501,43 @@ func TestNetworkPreForwardGetBlock_UnpinnedCommitment_ZeroFinalizedTipIsUnknown(
 	}
 }
 
-// A pinned weaker commitment keeps the indexed bound even when the request
+// A pinned confirmed commitment keeps the indexed bound even when the request
 // itself names nothing: slots between the finalized and indexed frontiers ARE
-// held at confirmed/processed.
+// held at confirmed. A pinned processed default is clamped to finalized for
+// getBlock, so it uses the finalized bound instead.
 func TestNetworkPreForwardGetBlock_PinnedWeakerCommitment_KeepsIndexedBound(t *testing.T) {
 	t.Parallel()
-	for _, pinned := range []string{"confirmed", "processed"} {
-		net := &fakeNetwork{
-			cfg: &common.NetworkConfig{
-				Architecture: common.ArchitectureSvm,
-				Svm:          &common.SvmNetworkConfig{Commitment: pinned},
-			},
-			indexedSlot:   1060,
-			finalizedSlot: 1000,
-		}
-		handled, _, err := networkPreForward_getBlock(context.Background(), net, newReq("getBlock", `[1030]`))
-		if handled || err != nil {
-			t.Fatalf("pinned %s: slot 1030 is below indexedTip 1060 and must forward, got handled=%v err=%v", pinned, handled, err)
-		}
-		// getBlock rejects processed, so the injected level is clamped to
-		// confirmed — either way the bound stays the indexed frontier, and the
-		// indexed bound itself still fires.
-		handled2, _, err2 := networkPreForward_getBlock(context.Background(), net, newReq("getBlock", `[1063]`))
-		if !handled2 || !common.HasErrorCode(err2, common.ErrCodeEndpointMissingData) {
-			t.Fatalf("pinned %s: slot 1063 beyond indexedTip 1060 + margin 2: expected short-circuit, got handled=%v err=%v", pinned, handled2, err2)
-		}
+
+	// confirmed stays confirmed and is bounded by the indexed frontier.
+	confirmedNet := &fakeNetwork{
+		cfg: &common.NetworkConfig{
+			Architecture: common.ArchitectureSvm,
+			Svm:          &common.SvmNetworkConfig{Commitment: "confirmed"},
+		},
+		indexedSlot:   1060,
+		finalizedSlot: 1000,
+	}
+	handled, _, err := networkPreForward_getBlock(context.Background(), confirmedNet, newReq("getBlock", `[1030]`))
+	if handled || err != nil {
+		t.Fatalf("pinned confirmed: slot 1030 is below indexedTip 1060 and must forward, got handled=%v err=%v", handled, err)
+	}
+	handled2, _, err2 := networkPreForward_getBlock(context.Background(), confirmedNet, newReq("getBlock", `[1063]`))
+	if !handled2 || !common.HasErrorCode(err2, common.ErrCodeEndpointMissingData) {
+		t.Fatalf("pinned confirmed: slot 1063 beyond indexedTip 1060 + margin 2: expected short-circuit, got handled=%v err=%v", handled2, err2)
+	}
+
+	// processed is clamped to finalized, so the finalized bound applies.
+	processedNet := &fakeNetwork{
+		cfg: &common.NetworkConfig{
+			Architecture: common.ArchitectureSvm,
+			Svm:          &common.SvmNetworkConfig{Commitment: "processed"},
+		},
+		indexedSlot:   1060,
+		finalizedSlot: 1000,
+	}
+	handled, _, err = networkPreForward_getBlock(context.Background(), processedNet, newReq("getBlock", `[1030]`))
+	if !handled || !common.HasErrorCode(err, common.ErrCodeEndpointMissingData) {
+		t.Fatalf("pinned processed: slot 1030 beyond finalized tip 1000 + margin 2: expected short-circuit, got handled=%v err=%v", handled, err)
 	}
 }
 
