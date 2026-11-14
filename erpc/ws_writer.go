@@ -35,6 +35,10 @@ const (
 // it ends the connection, as a write that failed its deadline does.
 var errWsSendWait = errors.New("websocket send wait elapsed")
 
+// errWsQueueFull ends a producer that cannot queue without blocking; it
+// closes the connection so the client knows notification loss is possible.
+var errWsQueueFull = errors.New("websocket send queue full")
+
 // wsWriter is the state of a connection's writer.
 type wsWriter struct {
 	out    chan wsOut
@@ -57,9 +61,11 @@ type wsOut struct {
 	msg    *bytes.Buffer
 	weight int64
 	// note is set for a notification, skipped once its subscription is
-	// removed; size is its bytes for the sent metrics.
-	note *wsNotifier
-	size int
+	// removed unless preserveOnRemove is set; size is its bytes for the sent
+	// metrics.
+	note             *wsNotifier
+	size             int
+	preserveOnRemove bool
 	// done, when set, gets the write's outcome.
 	done chan error
 	// delivery times the block whose last message this is (§17).
@@ -111,7 +117,7 @@ func (wsc *WsConnection) writeOut(m wsOut) {
 	err := w.err
 	switch {
 	case err != nil:
-	case m.note != nil && m.note.sub.Removed():
+	case m.note != nil && m.note.sub.Removed() && !m.preserveOnRemove:
 	default:
 		deadline := time.Now().Add(wsWriteDeadline)
 		if by := w.drainBy.Load(); by != 0 && by < deadline.UnixNano() {
@@ -189,6 +195,37 @@ func (wsc *WsConnection) queue(m wsOut) error {
 	}
 	w.out <- m
 	return nil
+}
+
+// tryQueue offers m without waiting. It closes the connection with code 1013
+// when the queue or its weighted budget is full.
+func (wsc *WsConnection) tryQueue(m wsOut) error {
+	w := &wsc.w
+	if wsc.closed.Load() {
+		releaseMessage(m.msg)
+		return errWsConnClosed
+	}
+	select {
+	case <-w.ended:
+		releaseMessage(m.msg)
+		return w.err
+	default:
+	}
+	m.weight = min(max(int64(m.msg.Len()), wsOutBytes/wsOutCap), wsOutBytes)
+	if !w.budget.TryAcquire(m.weight) {
+		releaseMessage(m.msg)
+		wsc.stopAsync(websocket.CloseTryAgainLater, "subscription backpressure; reconnect and resubscribe")
+		return errWsQueueFull
+	}
+	select {
+	case w.out <- m:
+		return nil
+	default:
+		w.budget.Release(m.weight)
+		releaseMessage(m.msg)
+		wsc.stopAsync(websocket.CloseTryAgainLater, "subscription backpressure; reconnect and resubscribe")
+		return errWsQueueFull
+	}
 }
 
 // send queues msg and waits for its write.

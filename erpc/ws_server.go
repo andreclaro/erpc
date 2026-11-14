@@ -57,12 +57,13 @@ type WsConnection struct {
 
 	// stop records how the connection should end and stops the read loop;
 	// teardown (run by the read loop's goroutine) carries it out.
-	stopOnce    sync.Once
-	stopped     chan struct{}
-	closeCode   int
-	closeReason string
-	closeGrace  time.Duration
-	done        chan struct{}
+	stopOnce      sync.Once
+	asyncStopOnce sync.Once
+	stopped       chan struct{}
+	closeCode     int
+	closeReason   string
+	closeGrace    time.Duration
+	done          chan struct{}
 
 	closed     atomic.Bool // nothing more queues once set; the writer drains what did
 	peerClosed atomic.Bool // the peer's close frame was already answered
@@ -643,6 +644,14 @@ func (wsc *WsConnection) stop(code int, reason string, grace time.Duration) {
 		wsc.closeCode, wsc.closeReason, wsc.closeGrace = code, reason, grace
 		close(wsc.stopped)
 		_ = wsc.conn.SetReadDeadline(time.Now())
+	})
+}
+
+// stopAsync schedules stop from a path that must not wait for teardown,
+// such as an upstream notification callback.
+func (wsc *WsConnection) stopAsync(code int, reason string) {
+	wsc.asyncStopOnce.Do(func() {
+		go wsc.stop(code, reason, 0)
 	})
 }
 
