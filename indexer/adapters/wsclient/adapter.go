@@ -3,7 +3,10 @@
 package wsclient
 
 import (
+	"encoding/json"
 	"errors"
+	"math"
+	"strconv"
 	"sync"
 	"sync/atomic"
 )
@@ -15,17 +18,30 @@ var ErrClosed = errors.New("connection closed")
 // already holds the maximum number of subscriptions.
 var ErrLimitExceeded = errors.New("subscription limit exceeded")
 
+// ErrSubscriptionIDExhausted is returned by AddSvmSubscription when the
+// connection has allocated every u64 id.
+var ErrSubscriptionIDExhausted = errors.New("subscription id exhausted")
+
 // Adapter is the subscription set of one client connection.
 type Adapter struct {
-	mu      sync.RWMutex
-	drained bool
-	subs    map[string]*clientSub // clientSubId -> sub
+	mu              sync.RWMutex
+	drained         bool
+	subs            map[string]*clientSub // clientSubId -> sub
+	nextSvmID       uint64
+	svmIDsExhausted bool
 }
 
 type clientSub struct {
 	id        string
 	kind      EventKind
 	networkID string
+
+	// svm metadata, empty for EVM subscriptions.
+	family             string
+	metricKind         string
+	subscribeMethod    string
+	notificationMethod string
+	clientSubIDJSON    json.RawMessage
 
 	// opened is closed once the client has the subscription id: nothing is
 	// written before it, as geth sends the id first.
@@ -39,7 +55,17 @@ type clientSub struct {
 }
 
 func (s *clientSub) describe() Subscription {
-	return Subscription{ClientSubID: s.id, Kind: s.kind, NetworkID: s.networkID, removed: &s.removed}
+	return Subscription{
+		ClientSubID:        s.id,
+		ClientSubIDJSON:    s.clientSubIDJSON,
+		Kind:               s.kind,
+		NetworkID:          s.networkID,
+		Family:             s.family,
+		MetricKind:         s.metricKind,
+		SubscribeMethod:    s.subscribeMethod,
+		NotificationMethod: s.notificationMethod,
+		removed:            &s.removed,
+	}
 }
 
 // New creates the adapter of a client connection.
@@ -58,12 +84,61 @@ func (a *Adapter) Open(clientSubID string) {
 	}
 }
 
-// AddSubscription registers a subscription whose tap writes after opened
-// is closed by Open; stop ends that tap when the subscription is removed.
-// It fails with ErrLimitExceeded when the connection already holds
+// AddSubscription registers an EVM subscription whose tap writes after
+// opened is closed by Open; stop ends that tap when the subscription is
+// removed. It fails with ErrLimitExceeded when the connection already holds
 // maxSubs, and with ErrClosed once the adapter was drained.
 func (a *Adapter) AddSubscription(clientSubID, networkID string, kind EventKind, maxSubs int, stop func()) (Subscription, <-chan struct{}, error) {
-	sub := &clientSub{id: clientSubID, kind: kind, networkID: networkID, opened: make(chan struct{}), stop: stop}
+	return a.register(&clientSub{
+		id:        clientSubID,
+		kind:      kind,
+		networkID: networkID,
+		opened:    make(chan struct{}),
+		stop:      stop,
+	}, maxSubs)
+}
+
+// AddSvmSubscription registers an SVM subscription with a monotonic numeric
+// id. It fails with ErrClosed, ErrLimitExceeded, or ErrSubscriptionIDExhausted.
+func (a *Adapter) AddSvmSubscription(
+	networkID, family, metricKind, subscribeMethod, notificationMethod string,
+	maxSubs int,
+	stop func(),
+) (Subscription, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.drained {
+		return Subscription{}, ErrClosed
+	}
+	if len(a.subs) >= maxSubs {
+		return Subscription{}, ErrLimitExceeded
+	}
+	if a.svmIDsExhausted {
+		return Subscription{}, ErrSubscriptionIDExhausted
+	}
+	id := a.nextSvmID
+	if id == math.MaxUint64 {
+		a.svmIDsExhausted = true
+	} else {
+		a.nextSvmID++
+	}
+	idStr := strconv.FormatUint(id, 10)
+	sub := &clientSub{
+		id:                 idStr,
+		networkID:          networkID,
+		family:             family,
+		metricKind:         metricKind,
+		subscribeMethod:    subscribeMethod,
+		notificationMethod: notificationMethod,
+		clientSubIDJSON:    strconv.AppendUint(nil, id, 10),
+		opened:             make(chan struct{}),
+		stop:               stop,
+	}
+	a.subs[idStr] = sub
+	return sub.describe(), nil
+}
+
+func (a *Adapter) register(sub *clientSub, maxSubs int) (Subscription, <-chan struct{}, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.drained {
@@ -72,7 +147,7 @@ func (a *Adapter) AddSubscription(clientSubID, networkID string, kind EventKind,
 	if len(a.subs) >= maxSubs {
 		return Subscription{}, nil, ErrLimitExceeded
 	}
-	a.subs[clientSubID] = sub
+	a.subs[sub.id] = sub
 	return sub.describe(), sub.opened, nil
 }
 
@@ -112,9 +187,14 @@ func (a *Adapter) Drain() []Subscription {
 
 // Subscription describes one subscription.
 type Subscription struct {
-	ClientSubID string
-	Kind        EventKind
-	NetworkID   string
+	ClientSubID        string
+	ClientSubIDJSON    json.RawMessage
+	Kind               EventKind
+	NetworkID          string
+	Family             string
+	MetricKind         string
+	SubscribeMethod    string
+	NotificationMethod string
 
 	removed *atomic.Bool
 }

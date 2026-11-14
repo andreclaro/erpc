@@ -357,6 +357,17 @@ func newJsonRpcResultResponse(nq *common.NormalizedRequest, jrReq *common.JsonRp
 	return common.NewNormalizedResponse().WithRequest(nq).WithJsonRpcResponse(jrr)
 }
 
+func newSvmJsonRpcResultResponse(nq *common.NormalizedRequest, jrReq *common.JsonRpcRequest, result []byte) *common.NormalizedResponse {
+	jrr := &common.JsonRpcResponse{}
+	if raw := jrReq.IDRawBytes(); len(raw) > 0 {
+		_ = jrr.SetIDBytes(raw)
+	} else {
+		_ = jrr.SetID(jrReq.ResponseID(true))
+	}
+	jrr.SetResult(result)
+	return common.NewNormalizedResponse().WithRequest(nq).WithJsonRpcResponse(jrr)
+}
+
 func (sm *SubscriptionManager) recordSuccessMetrics(
 	project *PreparedProject,
 	nw *Network,
