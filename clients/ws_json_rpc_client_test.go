@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -159,7 +160,7 @@ func newTestWsClient(t *testing.T, u *url.URL) *WsJsonRpcClient {
 	return c
 }
 
-func subscribeNewHeads(t *testing.T, c *WsJsonRpcClient, handler func(params []byte)) string {
+func subscribeNewHeads(t *testing.T, c *WsJsonRpcClient, handler func(WsSubscriptionNotification)) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	sub := &WsSubscription{Handler: handler}
@@ -202,7 +203,7 @@ func TestWsClientDetectsSilentPeerAndReconnects(t *testing.T) {
 		t.Fatal("server never saw the initial connection")
 	}
 	heads := make(chan []byte, 16)
-	onHead := func(params []byte) { heads <- params }
+	onHead := func(n WsSubscriptionNotification) { heads <- n.Params }
 	subID1 := subscribeNewHeads(t, client, onHead)
 	conn1.sendNewHead(subID1, "0x1")
 	select {
@@ -353,7 +354,7 @@ func TestWsClientRedialsWhenConnDiesDuringHandler(t *testing.T) {
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	subID := subscribeNewHeads(t, client, func([]byte) {
+	subID := subscribeNewHeads(t, client, func(WsSubscriptionNotification) {
 		close(entered)
 		<-release
 	})
@@ -566,7 +567,7 @@ func TestWsClientDeliversNotificationRightAfterSubscribe(t *testing.T) {
 	client := newTestWsClient(t, newSubscribeServer(t, 0, requests))
 
 	got := make(chan string, 1)
-	sub := &WsSubscription{Handler: func(params []byte) { got <- string(params) }}
+	sub := &WsSubscription{Handler: func(n WsSubscriptionNotification) { got <- string(n.Params) }}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	require.NoError(t, sendSubscriptionRPC(ctx, client, sub, "eth_subscribe", `["logs",{}]`))
@@ -607,7 +608,7 @@ func TestWsClientUnsubscribesAbandonedSubscribe(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	sub := &WsSubscription{Handler: func([]byte) { t.Error("abandoned subscription delivered a notification") }}
+	sub := &WsSubscription{Handler: func(WsSubscriptionNotification) { t.Error("abandoned subscription delivered a notification") }}
 	require.Error(t, sendSubscriptionRPC(ctx, client, sub, "eth_subscribe", `["newHeads"]`))
 
 	assert.Equal(t, "eth_subscribe", (<-requests).Method)
@@ -631,7 +632,7 @@ func TestWsClientSubscriptionsAreConnectionScoped(t *testing.T) {
 	conn1 := <-server.newConn
 
 	old := make(chan struct{}, 1)
-	subID := subscribeNewHeads(t, client, func([]byte) { old <- struct{}{} })
+	subID := subscribeNewHeads(t, client, func(WsSubscriptionNotification) { old <- struct{}{} })
 	<-conn1.subscribeCh
 	oldEpoch := client.Epoch()
 
@@ -666,7 +667,7 @@ func TestWsClientSurvivesPanickingHandler(t *testing.T) {
 
 	var calls atomic.Int32
 	second := make(chan struct{})
-	subID := subscribeNewHeads(t, client, func([]byte) {
+	subID := subscribeNewHeads(t, client, func(WsSubscriptionNotification) {
 		if calls.Add(1) == 1 {
 			panic("handler bug")
 		}
@@ -717,7 +718,7 @@ func TestWsClientSubscribeClaimedThenCallerCancels(t *testing.T) {
 	client := newTestWsClient(t, newSubscribeServer(t, 0, requests))
 	require.Eventually(t, client.IsConnected, 2*time.Second, 5*time.Millisecond)
 
-	sub := &WsSubscription{Handler: func([]byte) {}}
+	sub := &WsSubscription{Handler: func(WsSubscriptionNotification) {}}
 	ctx, cancel := context.WithCancel(context.Background())
 	// Stall handleMessage right after it deleted the pending entry and
 	// before it registers the handler / pushes the result.
@@ -753,4 +754,134 @@ func TestWsClientSubscribeClaimedThenCallerCancels(t *testing.T) {
 	}
 	assert.Equal(t, "0x1", sub.ID, "a completed subscribe must reach its caller")
 	assert.True(t, registered())
+}
+
+
+func newTestSvmWsClient(t *testing.T, u *url.URL) *WsJsonRpcClient {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	logger := zerolog.New(zerolog.NewTestWriter(t)).Level(zerolog.WarnLevel)
+	up := common.NewFakeUpstream("test-svm-ws-upstream")
+	up.Config().Type = common.UpstreamTypeSvm
+	ci, err := NewWsJsonRpcClient(ctx, &logger, "test-project", up, u, nil, nil)
+	require.NoError(t, err)
+	c, ok := ci.(*WsJsonRpcClient)
+	require.True(t, ok)
+	return c
+}
+
+func newSvmSubscribeServer(t *testing.T, requests chan<- wsTestRequest, subID uint64) *url.URL {
+	return newWsTestServer(t, func(conn *websocket.Conn) {
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var req wsTestRequest
+			_ = common.SonicCfg.Unmarshal(msg, &req)
+			if requests != nil {
+				requests <- req
+			}
+			switch req.Method {
+			case "accountSubscribe":
+				_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":`+string(req.ID)+`,"result":`+strconv.FormatUint(subID, 10)+`}`))
+				_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","method":"accountNotification","params":{"subscription":`+strconv.FormatUint(subID, 10)+`,"result":{"lamports":9007199254740993}}}`))
+			case "accountUnsubscribe":
+				_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":`+string(req.ID)+`,"result":true}`))
+			default:
+				_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"jsonrpc":"2.0","id":`+string(req.ID)+`,"result":true}`))
+			}
+		}
+	})
+}
+
+func TestWsClientCorrelationAboveInt53(t *testing.T) {
+	requests := make(chan wsTestRequest, 16)
+	client := newTestWsClient(t, newSubscribeServer(t, 0, requests))
+	client.wireIDCounter.Store(9007199254740992)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, sendSubscriptionRPC(ctx, client, nil, "eth_chainId", `[]`))
+	req := <-requests
+	require.Equal(t, json.RawMessage(`9007199254740993`), req.ID)
+}
+
+func TestWsClientSvmNumericSubscriptionRouting(t *testing.T) {
+	requests := make(chan wsTestRequest, 16)
+	client := newTestSvmWsClient(t, newSvmSubscribeServer(t, requests, 0))
+
+	require.Eventually(t, client.IsConnected, 2*time.Second, 5*time.Millisecond)
+
+	got := make(chan string, 1)
+	sub := &WsSubscription{
+		Handler: func(n WsSubscriptionNotification) { got <- string(n.Raw) },
+		IDCodec: WsSubscriptionIDUint64,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, sendSubscriptionRPC(ctx, client, sub, "accountSubscribe", `["11111111111111111111111111111111",{}]`))
+	require.Equal(t, "accountSubscribe", (<-requests).Method)
+	require.Equal(t, "0", sub.ID)
+
+	select {
+	case raw := <-got:
+		require.Contains(t, raw, `"subscription":0`)
+		require.Contains(t, raw, `9007199254740993`)
+	case <-time.After(2 * time.Second):
+		t.Fatal("notification not delivered")
+	}
+
+	unsub := &WsSubscription{IDCodec: WsSubscriptionIDUint64, Epoch: client.Epoch()}
+	require.NoError(t, sendSubscriptionRPC(ctx, client, unsub, "accountUnsubscribe", `[0]`))
+	req := <-requests
+	require.Equal(t, "accountUnsubscribe", req.Method)
+	require.Len(t, req.Params, 1)
+	require.Equal(t, float64(0), req.Params[0])
+}
+
+func TestWsClientSvmDuplicateUpstreamIDFanout(t *testing.T) {
+	requests := make(chan wsTestRequest, 16)
+	client := newTestSvmWsClient(t, newSvmSubscribeServer(t, requests, 42))
+
+	require.Eventually(t, client.IsConnected, 2*time.Second, 5*time.Millisecond)
+
+	owner1 := make(chan string, 1)
+	owner2 := make(chan string, 1)
+	events := atomic.Int32{}
+	sub1 := &WsSubscription{
+		OwnerID: "a",
+		Handler: func(n WsSubscriptionNotification) { owner1 <- string(n.Raw) },
+		OnEvent: func(WsSubscriptionNotification) { events.Add(1) },
+		IDCodec: WsSubscriptionIDUint64,
+	}
+	sub2 := &WsSubscription{
+		OwnerID: "b",
+		Handler: func(n WsSubscriptionNotification) { owner2 <- string(n.Raw) },
+		OnEvent: func(WsSubscriptionNotification) { events.Add(1) },
+		IDCodec: WsSubscriptionIDUint64,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, sendSubscriptionRPC(ctx, client, sub1, "accountSubscribe", `["11111111111111111111111111111111",{}]`))
+	require.NoError(t, sendSubscriptionRPC(ctx, client, sub2, "accountSubscribe", `["11111111111111111111111111111111",{}]`))
+
+	require.Eventually(t, func() bool { return events.Load() >= 1 }, time.Second, 10*time.Millisecond)
+
+	select {
+	case <-owner1:
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner1 did not receive notification")
+	}
+	select {
+	case <-owner2:
+	case <-time.After(2 * time.Second):
+		t.Fatal("owner2 did not receive notification")
+	}
+
+	require.Equal(t, 2, client.SubscriptionHandlerCount("42", client.Epoch()))
+	client.UnregisterSubscriptionHandlerOwner("a", "42", client.Epoch())
+	require.Equal(t, 1, client.SubscriptionHandlerCount("42", client.Epoch()))
+	client.UnregisterSubscriptionHandlerOwner("b", "42", client.Epoch())
+	require.Equal(t, 0, client.SubscriptionHandlerCount("42", client.Epoch()))
 }

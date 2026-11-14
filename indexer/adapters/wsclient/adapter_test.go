@@ -2,6 +2,7 @@ package wsclient
 
 import (
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -61,4 +62,32 @@ func TestAdapter_SubscriptionLimitIsAtomic(t *testing.T) {
 	assert.EqualValues(t, 10, ok.Load())
 	assert.Equal(t, 10, a.Count())
 	a.Drain()
+}
+
+
+func TestAdapterSvmIDsNeverRepeat(t *testing.T) {
+	a := New()
+	first, err := a.AddSvmSubscription("svm:mainnet-beta", "account", "account", "accountSubscribe", "accountNotification", 2, func() {})
+	require.NoError(t, err)
+	require.Equal(t, "0", first.ClientSubID)
+	require.JSONEq(t, "0", string(first.ClientSubIDJSON))
+
+	_, existed := a.RemoveSubscription(first.ClientSubID)
+	require.True(t, existed)
+	second, err := a.AddSvmSubscription("svm:mainnet-beta", "slot", "slot", "slotSubscribe", "slotNotification", 2, func() {})
+	require.NoError(t, err)
+	require.Equal(t, "1", second.ClientSubID)
+}
+
+func TestAdapterSvmIDExhaustion(t *testing.T) {
+	a := New()
+	a.nextSvmID = math.MaxUint64
+	sub, err := a.AddSvmSubscription("svm:mainnet-beta", "account", "account", "accountSubscribe", "accountNotification", 2, func() {})
+	require.NoError(t, err)
+	require.Equal(t, "18446744073709551615", sub.ClientSubID)
+	require.True(t, a.svmIDsExhausted)
+
+	_, err = a.AddSvmSubscription("svm:mainnet-beta", "slot", "slot", "slotSubscribe", "slotNotification", 2, func() {})
+	require.ErrorIs(t, err, ErrSubscriptionIDExhausted)
+	require.Equal(t, 1, a.Count())
 }

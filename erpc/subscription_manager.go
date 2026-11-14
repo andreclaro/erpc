@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/erpc/erpc/architecture/evm/logfilter"
+	"github.com/erpc/erpc/architecture/svm"
 	"github.com/erpc/erpc/common"
 	"github.com/erpc/erpc/indexer"
 	"github.com/erpc/erpc/indexer/adapters/wsclient"
@@ -36,6 +37,11 @@ type SubscriptionManager struct {
 	// activeSubs counts client subscriptions on this instance for
 	// server.webSocket.maxSubscriptions.
 	activeSubs atomic.Int64
+
+	// svmSubs holds every live SVM subscription keyed by connId + "/" + localID.
+	svmSubs sync.Map // string -> *svmSubscriptionState
+	// svmUpstreamClients holds per-upstream-client route tables for SVM.
+	svmUpstreamClients sync.Map // *clients.WsJsonRpcClient -> *svmUpstreamClientState
 }
 
 func NewSubscriptionManager(logger *zerolog.Logger) *SubscriptionManager {
@@ -53,6 +59,26 @@ func IsSubscriptionMethod(method string) bool {
 
 func IsSubscribeMethod(method string) bool {
 	return method == MethodEthSubscribe
+}
+
+// IsSubscriptionMethodForArchitecture reports whether method is a lifecycle
+// method (subscribe or unsubscribe) for the given architecture.
+func IsSubscriptionMethodForArchitecture(arch common.NetworkArchitecture, method string) bool {
+	if arch == common.ArchitectureSvm {
+		_, _, ok := svm.DescribeSubscriptionMethod(method)
+		return ok
+	}
+	return IsSubscriptionMethod(method)
+}
+
+// IsSubscribeMethodForArchitecture reports whether method opens a subscription
+// for the given architecture.
+func IsSubscribeMethodForArchitecture(arch common.NetworkArchitecture, method string) bool {
+	if arch == common.ArchitectureSvm {
+		op, _, ok := svm.DescribeSubscriptionMethod(method)
+		return ok && op == svm.SubscriptionOperationSubscribe
+	}
+	return IsSubscribeMethod(method)
 }
 
 // Subscribe handles eth_subscribe: it opens a tap for a new client
@@ -272,7 +298,20 @@ func (sm *SubscriptionManager) CleanupConnection(wsc *WsConnection) {
 	if conn == nil {
 		return
 	}
-	sm.activeSubs.Add(-int64(len(conn.Drain())))
+	drained := conn.Drain()
+	evmCount := 0
+	for _, sub := range drained {
+		if sub.Family == "" {
+			evmCount++
+			continue
+		}
+		if state, ok := sm.svmSubs.Load(wsc.id + "/" + sub.ClientSubID); ok {
+			sm.finishSvmSubscription(state.(*svmSubscriptionState), true)
+		}
+	}
+	if evmCount > 0 {
+		sm.activeSubs.Add(-int64(evmCount))
+	}
 	sm.logger.Debug().Str("connId", wsc.id).Msg("cleaned up all subscriptions for connection")
 }
 
@@ -353,6 +392,17 @@ func acquireSubscribeRateLimits(
 func newJsonRpcResultResponse(nq *common.NormalizedRequest, jrReq *common.JsonRpcRequest, result []byte) *common.NormalizedResponse {
 	jrr := &common.JsonRpcResponse{}
 	_ = jrr.SetID(jrReq.ID)
+	jrr.SetResult(result)
+	return common.NewNormalizedResponse().WithRequest(nq).WithJsonRpcResponse(jrr)
+}
+
+func newSvmJsonRpcResultResponse(nq *common.NormalizedRequest, jrReq *common.JsonRpcRequest, result []byte) *common.NormalizedResponse {
+	jrr := &common.JsonRpcResponse{}
+	if raw := jrReq.IDRawBytes(); len(raw) > 0 {
+		_ = jrr.SetIDBytes(raw)
+	} else {
+		_ = jrr.SetID(jrReq.ResponseID(true))
+	}
 	jrr.SetResult(result)
 	return common.NewNormalizedResponse().WithRequest(nq).WithJsonRpcResponse(jrr)
 }

@@ -568,7 +568,7 @@ func (a *Adapter) subscribeLocked(ctx context.Context, sub *upstreamSub, params 
 	if sending != nil {
 		sending()
 	}
-	ws := &clients.WsSubscription{Handler: handler}
+	ws := &clients.WsSubscription{Handler: func(n clients.WsSubscriptionNotification) { handler(n.Params) }}
 	if err := a.send(clients.WithWsSubscription(ctx, ws), methodEthSubscribe, params); err != nil {
 		return err
 	}

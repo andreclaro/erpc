@@ -224,13 +224,13 @@ func TestGetConfirmedBlockAlias_CommitmentInjectionParity(t *testing.T) {
 }
 
 // TestGetConfirmedBlockAlias_ProcessedClampParity pins the THIRD method-name
-// table the alias has to appear in: atLeastConfirmedMethods, which drives
+// table the alias has to appear in: atLeastFinalizedMethods, which drives
 // clampCommitmentForMethod.
 //
 // getBlock and getConfirmedBlock both reject commitment=processed upstream
 // (agave: -32602 "Method does not support commitment below `confirmed`"), so an
-// operator-configured default of processed must be narrowed to confirmed for
-// BOTH names. With the alias missing from atLeastConfirmedMethods the clamp is
+// operator-configured default of processed must be narrowed to finalized for
+// BOTH names. With the alias missing from atLeastFinalizedMethods the clamp is
 // skipped and the raw processed default is injected, which means the deprecated
 // name is rejected outright by every upstream while getBlock beside it works.
 //
@@ -252,7 +252,7 @@ func TestGetConfirmedBlockAlias_ProcessedClampParity(t *testing.T) {
 			params: `[100]`,
 			want: []interface{}{
 				float64(100),
-				map[string]interface{}{"commitment": "confirmed"},
+				map[string]interface{}{"commitment": "finalized"},
 			},
 		},
 		// The clamp applies on the merge path too, not just the append path.
@@ -261,7 +261,7 @@ func TestGetConfirmedBlockAlias_ProcessedClampParity(t *testing.T) {
 			params: `[100, {"encoding":"json"}]`,
 			want: []interface{}{
 				float64(100),
-				map[string]interface{}{"encoding": "json", "commitment": "confirmed"},
+				map[string]interface{}{"encoding": "json", "commitment": "finalized"},
 			},
 		},
 		// The clamp covers only the INJECTED network default. A caller who
