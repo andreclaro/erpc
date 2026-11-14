@@ -47,3 +47,39 @@ func TestClientRegistryRejectsProxyPoolForWebSocket(t *testing.T) {
 	_, err = registry.GetOrCreateClient(ctx, up)
 	require.ErrorContains(t, err, "proxyPool is not supported for WebSocket")
 }
+
+func TestClientRegistrySvmWebSocket(t *testing.T) {
+	for _, scheme := range []string{"ws", "wss"} {
+		t.Run(scheme, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			logger := zerolog.Nop()
+			registry := NewClientRegistry(&logger, "test-project", nil, nil)
+			ups := common.NewFakeUpstream("svm-ws")
+			ups.Config().Type = common.UpstreamTypeSvm
+			ups.Config().Endpoint = scheme + "://127.0.0.1:1"
+			client, err := registry.CreateClient(ctx, ups)
+			require.NoError(t, err)
+			require.Equal(t, ClientTypeWsJsonRpc, client.GetType())
+		})
+	}
+}
+
+func TestClientRegistrySvmWebSocketRejectsProxyPool(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	logger := zerolog.Nop()
+	proxies, err := NewProxyPoolRegistry([]*common.ProxyPoolConfig{
+		{ID: "pool1", Urls: []string{"http://myproxy1:8080"}},
+	}, &logger)
+	require.NoError(t, err)
+	registry := NewClientRegistry(&logger, "test-project", proxies, nil)
+
+	up := common.NewFakeUpstream("svm-ws")
+	up.Config().Type = common.UpstreamTypeSvm
+	up.Config().Endpoint = "wss://rpc1.localhost"
+	up.Config().JsonRpc = &common.JsonRpcUpstreamConfig{ProxyPool: "pool1"}
+
+	_, err = registry.GetOrCreateClient(ctx, up)
+	require.ErrorContains(t, err, "proxyPool is not supported for WebSocket")
+}

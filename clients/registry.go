@@ -169,8 +169,25 @@ func (manager *ClientRegistry) CreateClient(appCtx context.Context, ups common.U
 					if err != nil {
 						clientErr = fmt.Errorf("failed to create HTTP client for upstream: %v: %w", cfg.Id, err)
 					}
+				} else if parsedUrl.Scheme == "ws" || parsedUrl.Scheme == "wss" {
+					if proxyPool != nil {
+						clientErr = fmt.Errorf("jsonRpc.proxyPool is not supported for WebSocket upstream %v", cfg.Id)
+					} else {
+						newClient, err = NewWsJsonRpcClient(
+							appCtx,
+							&lg,
+							manager.projectId,
+							ups,
+							parsedUrl,
+							cfg.JsonRpc,
+							manager.evmExtractor,
+						)
+						if err != nil {
+							clientErr = fmt.Errorf("failed to create WebSocket client for upstream %v: %w", cfg.Id, err)
+						}
+					}
 				} else {
-					clientErr = fmt.Errorf("unsupported endpoint scheme for svm upstream %v: %v (only http/https supported)", cfg.Id, parsedUrl.Scheme)
+					clientErr = fmt.Errorf("unsupported endpoint scheme for svm upstream %v: %v (only http/https/ws/wss supported)", cfg.Id, parsedUrl.Scheme)
 				}
 
 			default:
