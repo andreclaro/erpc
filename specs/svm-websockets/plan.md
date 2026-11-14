@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go, Gorilla WebSocket, Sonic JSON, existing eRPC selection and failsafe code, Prometheus, TypeScript, Nextra.
 
-**Status:** Proposed design. No production implementation is included yet.
+**Status:** Implemented in `feat/svm-websocket`. The plan was updated after implementation to reflect the Alpenglow commitment model.
 
 **Specification:** [feature.md](./feature.md) defines the behavioral contract and acceptance criteria.
 
@@ -264,7 +264,7 @@ Keep `IsSubscriptionMethod` and `IsSubscribeMethod` as EVM wrappers. Existing ca
 - Generic suffix classification preserves unknown parameters and derives expected pairs.
 - Exactly 5 known methods accept commitment injection.
 - Local ID parsing accepts the full `u64` range and rejects every other shape.
-- Only an injected `processed` block default becomes `confirmed`.
+- Only an injected `processed` block default becomes `finalized`.
 - Terminal detection excludes `"receivedSignature"`.
 
 - [ ] **Step 1: Write failing classification and commitment tests**
@@ -310,7 +310,7 @@ func TestDescribeSubscriptionMethod(t *testing.T) {
 }
 ```
 
-Add commitment cases for omitted, explicit, malformed, and missing required parameters. Add block cases for injected and explicit `processed`. Assert that generic params remain byte-equivalent after normalization.
+Add commitment cases for omitted, explicit, malformed, and missing required parameters. Add block cases for injected and explicit `processed` (injected `processed` clamps to `finalized` since Alpenglow; explicit `processed` is preserved). Assert that generic params remain byte-equivalent after normalization.
 
 - [ ] **Step 2: Write failing identifier and terminal tests**
 
@@ -1862,7 +1862,7 @@ projects:
       - architecture: svm
         svm:
           cluster: mainnet-beta
-          commitment: confirmed
+          commitment: finalized
 ```
 
 Run:

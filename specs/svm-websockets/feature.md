@@ -1,6 +1,6 @@
 # Solana Virtual Machine WebSocket Support — Specification
 
-**Status**: Proposed design. **No production implementation is included yet.**
+**Status**: Implemented in `feat/svm-websocket`. The specification was updated after implementation to reflect the Alpenglow commitment model.
 **Last revised**: 2026-11-14
 **Implementation plan**: [plan.md](plan.md), maintained in a separate deliverable.
 
@@ -114,7 +114,7 @@ projects:
       - architecture: svm
         svm:
           cluster: mainnet-beta
-          commitment: confirmed
+          commitment: finalized
 ```
 
 Configuration rules:
@@ -230,11 +230,11 @@ The official index currently documents 9 pairs. Every unsubscribe method takes 1
 
 | Family | Subscribe / unsubscribe | Subscribe parameters | Notification and `params.result` | Commitment | Availability |
 |---|---|---|---|---|---|
-| Account | [`accountSubscribe`](https://solana.com/docs/rpc/websocket/accountsubscribe) / [`accountUnsubscribe`](https://solana.com/docs/rpc/websocket/accountunsubscribe) | Account pubkey; optional config | `accountNotification`; `{context:{slot}, value:account}` | `processed`, `confirmed`, `finalized` | No unstable notice |
-| Program | [`programSubscribe`](https://solana.com/docs/rpc/websocket/programsubscribe) / [`programUnsubscribe`](https://solana.com/docs/rpc/websocket/programunsubscribe) | Program pubkey; optional config | `programNotification`; `{context:{slot}, value:{pubkey,account}}` | All 3 levels | No unstable notice |
-| Logs | [`logsSubscribe`](https://solana.com/docs/rpc/websocket/logssubscribe) / [`logsUnsubscribe`](https://solana.com/docs/rpc/websocket/logsunsubscribe) | Required filter; optional config | `logsNotification`; `{context:{slot}, value:{signature,err,logs}}` | All 3 levels | No unstable notice |
-| Signature | [`signatureSubscribe`](https://solana.com/docs/rpc/websocket/signaturesubscribe) / [`signatureUnsubscribe`](https://solana.com/docs/rpc/websocket/signatureunsubscribe) | Required signature; optional config | `signatureNotification`; `{context:{slot}, value}` | All 3 levels | Ends after terminal confirmation |
-| Block | [`blockSubscribe`](https://solana.com/docs/rpc/websocket/blocksubscribe) / [`blockUnsubscribe`](https://solana.com/docs/rpc/websocket/blockunsubscribe) | Required filter; optional config | `blockNotification`; `{context:{slot}, value:{slot,block,err}}` | `confirmed` or `finalized` | Unstable and validator-gated |
+| Account | [`accountSubscribe`](https://solana.com/docs/rpc/websocket/accountsubscribe) / [`accountUnsubscribe`](https://solana.com/docs/rpc/websocket/accountunsubscribe) | Account pubkey; optional config | `accountNotification`; `{context:{slot}, value:account}` | `processed` or `finalized` (`confirmed` is an alias for `finalized` and is deprecated) | No unstable notice |
+| Program | [`programSubscribe`](https://solana.com/docs/rpc/websocket/programsubscribe) / [`programUnsubscribe`](https://solana.com/docs/rpc/websocket/programunsubscribe) | Program pubkey; optional config | `programNotification`; `{context:{slot}, value:{pubkey,account}}` | `processed` or `finalized` (`confirmed` alias) | No unstable notice |
+| Logs | [`logsSubscribe`](https://solana.com/docs/rpc/websocket/logssubscribe) / [`logsUnsubscribe`](https://solana.com/docs/rpc/websocket/logsunsubscribe) | Required filter; optional config | `logsNotification`; `{context:{slot}, value:{signature,err,logs}}` | `processed` or `finalized` (`confirmed` alias) | No unstable notice |
+| Signature | [`signatureSubscribe`](https://solana.com/docs/rpc/websocket/signaturesubscribe) / [`signatureUnsubscribe`](https://solana.com/docs/rpc/websocket/signatureunsubscribe) | Required signature; optional config | `signatureNotification`; `{context:{slot}, value}` | `processed` or `finalized` (`confirmed` alias) | Ends after terminal confirmation |
+| Block | [`blockSubscribe`](https://solana.com/docs/rpc/websocket/blocksubscribe) / [`blockUnsubscribe`](https://solana.com/docs/rpc/websocket/blockunsubscribe) | Required filter; optional config | `blockNotification`; `{context:{slot}, value:{slot,block,err}}` | `finalized` only (`confirmed` alias) | Unstable and validator-gated |
 | Slot | [`slotSubscribe`](https://solana.com/docs/rpc/websocket/slotsubscribe) / [`slotUnsubscribe`](https://solana.com/docs/rpc/websocket/slotunsubscribe) | None | `slotNotification`; `{slot,parent,root}` | Not accepted | No unstable notice |
 | Slot updates | [`slotsUpdatesSubscribe`](https://solana.com/docs/rpc/websocket/slotsupdatessubscribe) / [`slotsUpdatesUnsubscribe`](https://solana.com/docs/rpc/websocket/slotsupdatesunsubscribe) | None | `slotsUpdatesNotification`; tagged object with `type` | Not accepted | Unstable; support can vary |
 | Root | [`rootSubscribe`](https://solana.com/docs/rpc/websocket/rootsubscribe) / [`rootUnsubscribe`](https://solana.com/docs/rpc/websocket/rootunsubscribe) | None | `rootNotification`; bare `u64` root slot | Not accepted | No unstable notice |
@@ -473,7 +473,7 @@ The rules are:
 7. Do not inject into slot, slot updates, root, or vote subscriptions.
 8. Do not inject into generic extension methods.
 
-For `blockSubscribe`, an injected `processed` default becomes `confirmed`. No other injected value changes.
+Since Alpenglow, Solana has only two commitment levels: `processed` and `finalized`. `confirmed` is an alias for `finalized` and is deprecated. For `blockSubscribe`, an injected `processed` default becomes `finalized`. No other injected value changes.
 
 An explicit `processed` value for `blockSubscribe` remains `processed`. The upstream must return its native invalid-parameter response.
 
@@ -799,7 +799,7 @@ Existing EVM WebSocket tests must remain unchanged and green.
 - [ ] **AC19**: Unknown local IDs return `-32602` with `Invalid subscription id.`.
 - [ ] **AC20**: Only the final local unsubscribe sends its actual method to the pinned upstream.
 - [ ] **AC21**: Commitment injection affects only the 5 documented methods.
-- [ ] **AC22**: Only an injected `processed` block default changes to `confirmed`.
+- [ ] **AC22**: Only an injected `processed` block default changes to `finalized`.
 - [ ] **AC23**: Unknown extension parameters receive no local transformation.
 - [ ] **AC24**: Terminal signature delivery precedes cleanup and count release.
 - [ ] **AC25**: The `receivedSignature` value does not complete a subscription.
