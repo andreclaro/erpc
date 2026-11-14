@@ -3,6 +3,7 @@ description: WebSocket support in eRPC for persistent connections and real-time 
 ---
 
 import { Callout, Tabs, Tab } from "nextra/components";
+import { AISection, SourceLink, PromptExample } from "../../components";
 
 # WebSocket
 
@@ -145,6 +146,49 @@ ws.send(JSON.stringify({
 - **Slow-client safety** — a slow reader never blocks other clients or the chain tracker. A `logs` subscription whose next block has waited more than `chainTracker.reorgWindow` × the block time closes the connection with `1013`, so the client knows it may have missed logs and can re-subscribe and backfill with `eth_getLogs`; a `newHeads` subscription restarts after the confirmed head, which the client sees as a jump in numbers.
 - **Connection-scoped IDs** — eRPC issues its own subscription IDs, so they stay the same across upstream reconnects and upstream switches. They belong to the connection that created them: `eth_unsubscribe` only works on that connection, and subscriptions end when it closes.
 - **Rate limiting** — subscribe/unsubscribe calls count against the same project and network rate limits as regular RPC.
+
+## SVM subscriptions
+
+Solana subscriptions use the same WebSocket path as EVM, but eRPC proxies them directly rather than rebuilding them from a chain tracker. Connect to an SVM network and send the standard Agave subscription methods:
+
+```javascript
+const ws = new WebSocket("ws://localhost:4000/main/svm/mainnet-beta");
+
+ws.onopen = () => {
+  ws.send(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "accountSubscribe",
+    params: ["11111111111111111111111111111111", { encoding: "base64" }]
+  }));
+};
+
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.id === 1) {
+    console.log("Subscription ID:", msg.result); // 0, 1, 2, ...
+  }
+  if (msg.method === "accountNotification") {
+    console.log("Account update:", msg.params.result);
+  }
+};
+```
+
+Supported subscription pairs:
+
+| Subscribe | Unsubscribe | Notification |
+|---|---|---|
+| `accountSubscribe` | `accountUnsubscribe` | `accountNotification` |
+| `programSubscribe` | `programUnsubscribe` | `programNotification` |
+| `logsSubscribe` | `logsUnsubscribe` | `logsNotification` |
+| `signatureSubscribe` | `signatureUnsubscribe` | `signatureNotification` |
+| `blockSubscribe` | `blockUnsubscribe` | `blockNotification` |
+| `slotSubscribe` | `slotUnsubscribe` | `slotNotification` |
+| `slotsUpdatesSubscribe` | `slotsUpdatesUnsubscribe` | `slotsUpdatesNotification` |
+| `rootSubscribe` | `rootUnsubscribe` | `rootNotification` |
+| `voteSubscribe` | `voteUnsubscribe` | `voteNotification` |
+
+SVM subscriptions follow the same connection-scoped ID rules as EVM: eRPC returns a per-connection monotonic integer starting at `0`, and `*Unsubscribe` must use that integer. SVM subscription lifecycle methods are rejected over HTTP and inside WebSocket batches, because they need a live WebSocket connection to deliver notifications. A failed subscribe leaves the connection open, and upstream loss or downstream overload closes the connection with `1013` so the client can reconnect and re-subscribe.
 
 ### `logs` subscriptions
 
@@ -412,3 +456,63 @@ const ws = new WebSocket("ws://localhost:4000/main/evm/1?useUpstream=my-preferre
 ```
 
 Subscriptions (`eth_subscribe`) read the network-wide chain feed whatever `useUpstream` says. On a connection with `useUpstream`, a subscription delivers a block only once that upstream group's `latest` reaches it.
+
+<AISection
+  title="WebSocket — full agent reference"
+  hint="Implementation details, exact defaults, edge cases, and observability for EVM and SVM WebSocket subscriptions."
+>
+
+### How subscriptions work
+
+**EVM.** Client `eth_subscribe` / `eth_unsubscribe` requests enter `erpc/ws_server.go`, which hands subscribe/unsubscribe to the architecture-specific subscription manager. The EVM path owns a set of `subscriptionOwner` objects keyed by upstream ID. Each owner keeps one upstream `eth_subscribe` for the requested type/filter and fans notifications out to every client route that maps to it. `clients/ws_json_rpc_client.go` parses upstream `eth_subscription` notifications by their `subscription` ID and routes them to the matching owner. Source: <SourceLink file="erpc/subscription_manager.go" lines="19-120" />, <SourceLink file="clients/ws_json_rpc_client.go" lines="669-720" />.
+
+**SVM.** SVM subscriptions are direct proxies, not chain-feed reconstructions. The SVM subscription manager in `erpc/svm_subscription_manager.go` creates one upstream subscription per distinct `(upstream, subscribe method, normalized params)` tuple and forwards every upstream notification to every client route that owns it. Upstream IDs are parsed as unsigned 64-bit integers, so the full Agave `u64` range is supported. Source: <SourceLink file="erpc/svm_subscription_manager.go" lines="1-80" />, <SourceLink file="architecture/svm/subscriptions.go" lines="32-153" />.
+
+### Config schema
+
+No new config fields are introduced. The existing `server.webSocket` block controls both EVM and SVM client connections, and SVM upstreams use the same `endpoint: ws://...` / `wss://...` values as EVM upstreams:
+
+| Field | Default | Notes |
+|---|---|---|
+| `server.webSocket.enabled` | `false` | Must be `true` to accept any WebSocket upgrade. Source: <SourceLink file="common/defaults.go" lines="184-186" /> |
+| `server.webSocket.maxSubscriptionsPerConnection` | `100` | Per-connection subscription cap for both architectures. |
+| `server.webSocket.maxConcurrentRequestsPerConnection` | `250` | In-flight messages per connection. |
+| `server.webSocket.maxConnections` | `0` | Instance-wide connection cap; `0` = unlimited. |
+| `server.webSocket.maxConnectionsPerIP` | `0` | Per-client-IP connection cap. |
+| `server.webSocket.maxSubscriptions` | `0` | Instance-wide subscription cap; `0` = unlimited. |
+
+### Edge cases & gotchas
+
+1. **SVM lifecycle methods are rejected outside a WebSocket.** `accountSubscribe`, `accountUnsubscribe`, and every other `*Subscribe` / `*Unsubscribe` method returns `-32601` over HTTP and is rejected for each matching item inside a WebSocket batch. Source: <SourceLink file="erpc/http_server.go" lines="697-720" />, <SourceLink file="erpc/ws_server.go" lines="430-483" />.
+2. **SVM downstream IDs are per-connection monotonic integers.** They start at `0` and are never reused on the same connection. The client must pass the same integer to `*Unsubscribe`. Source: <SourceLink file="erpc/svm_subscription_manager.go" lines="140-180" />.
+3. **Duplicate upstream IDs fan out.** Agave can return the same upstream subscription ID for equivalent subscribe calls. eRPC registers an owner route for each upstream ID and delivers every notification to all routes that share it. Source: <SourceLink file="clients/ws_json_rpc_client.go" lines="130-165" />.
+4. **Upstream loss closes the client connection.** If the upstream WebSocket drops or the downstream write path is overloaded, eRPC closes the client connection with `1013` (try again later). It does not silently re-subscribe on a different upstream; the client reconnects and re-subscribes. Source: <SourceLink file="erpc/svm_subscription_manager.go" lines="220-260" />.
+5. **Network commitment is injected into SVM subscribe params.** When the request omits a commitment option, eRPC injects the network's configured SVM commitment (default `finalized`). `processed` is clamped to `confirmed` for methods that do not accept `processed`. Source: <SourceLink file="architecture/svm/subscriptions.go" lines="199-247" />, <SourceLink file="architecture/svm/hooks.go" lines="134-142" />.
+6. **Terminal signature subscriptions clean themselves up.** A `signatureSubscribe` whose first notification indicates a terminal result (the `value` object contains `err`) is removed from the local route set; no unsubscribe request is sent upstream because Agave already removes the subscription. Source: <SourceLink file="architecture/svm/subscriptions.go" lines="249-266" />, <SourceLink file="erpc/svm_subscription_manager.go" lines="280-320" />.
+7. **Batch items are processed independently.** A WebSocket batch can contain ordinary RPCs and subscription lifecycle calls; subscription items are rejected before any ordinary item runs. Source: <SourceLink file="erpc/ws_server.go" lines="430-483" />.
+
+### Observability
+
+Shared WebSocket metrics cover both architectures. The `kind` label reflects the subscription type:
+
+| Metric | Type | Labels | Notes |
+|---|---|---|---|
+| `erpc_websocket_connections_active` | gauge | project | Open client WebSocket connections. |
+| `erpc_websocket_notifications_sent_total` | counter | project, network, kind | For SVM: `account`, `program`, `logs`, `signature`, `block`, `slot`, `slotsUpdates`, `root`, `vote`, or `custom`. |
+| `erpc_websocket_notification_bytes_total` | counter | project, network, kind | JSON bytes of notifications sent to clients. |
+| `erpc_websocket_rejected_total` | counter | project, reason | Connection/subscription refused by instance caps or during shutdown. |
+| `erpc_upstream_websocket_connected` | gauge | project, vendor, network, upstream | `1` while the upstream WebSocket is up. |
+| `erpc_upstream_subscriptions_active` | gauge | project, network, upstream, kind | Active upstream subscriptions. |
+| `erpc_upstream_subscription_events_total` | counter | project, network, upstream, kind | Notifications received from upstreams before fan-out. |
+| `erpc_upstream_subscription_event_bytes_total` | counter | project, network, upstream, kind | Bytes of those upstream notifications. |
+
+### Source code entry points
+
+- `erpc/ws_server.go` — WebSocket upgrade, request dispatch, batch handling.
+- `erpc/subscription_manager.go` — architecture-aware subscription classification.
+- `erpc/svm_subscription_manager.go` — SVM subscription owner, notification fan-out, cleanup.
+- `architecture/svm/subscriptions.go` — SVM method descriptors and commitment injection.
+- `clients/ws_json_rpc_client.go` — upstream WebSocket client, ID parsing, notification routing.
+- `clients/registry.go` — upstream client creation for `ws`/`wss` SVM endpoints.
+
+</AISection>
