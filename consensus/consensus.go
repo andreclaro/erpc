@@ -293,7 +293,8 @@ func buildPolicy(cfg *common.ConsensusPolicyConfig, logger *zerolog.Logger, poli
 		WithMaxWaitOnResult(cfg.MaxWaitOnResult).
 		WithMaxWaitOnEmpty(cfg.MaxWaitOnEmpty).
 		WithRequiredParticipants(cfg.RequiredParticipants).
-		WithPolicyName(policyName)
+		WithPolicyName(policyName).
+		WithKey(ParseConsensusKey(cfg.Key))
 
 	if cfg.MisbehaviorsDestination != nil {
 		b = b.WithMisbehaviorsDestination(cfg.MisbehaviorsDestination)

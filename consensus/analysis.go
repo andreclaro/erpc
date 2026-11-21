@@ -659,6 +659,23 @@ func resultOrErrorToHash(r *execResult, ctx context.Context, config *config) (st
 		return "", errNoJsonRpcResponse
 	}
 
+	// Fast-path consensus key: extract a short method-specific key instead of
+	// canonicalizing the entire response. If extraction fails for any reason,
+	// fall back to the canonical hash rather than rejecting the response.
+	if config.key != ConsensusKeyCanonical {
+		if method, ok := ctx.Value(common.RequestContextKey).(*common.NormalizedRequest); ok && method != nil {
+			if m, err := method.Method(); err == nil && m != "" {
+				if ex := methodKeyExtractor(config.key, m); ex != nil {
+					if raw := jr.GetResultBytes(); len(raw) > 0 {
+						if key, err := ex(ctx, raw); err == nil && key != "" {
+							return key, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if config.ignoreFields != nil {
 		if originalReq, ok := ctx.Value(common.RequestContextKey).(*common.NormalizedRequest); ok {
 			if method, err := originalReq.Method(); err == nil {

@@ -2054,10 +2054,16 @@ type ConsensusPolicyConfig struct {
 	LowParticipantsBehavior ConsensusLowParticipantsBehavior `yaml:"lowParticipantsBehavior,omitempty" json:"lowParticipantsBehavior"`
 	PunishMisbehavior       *PunishMisbehaviorConfig         `yaml:"punishMisbehavior,omitempty" json:"punishMisbehavior"`
 	DisputeLogLevel         string                           `yaml:"disputeLogLevel,omitempty" json:"disputeLogLevel"` // "trace", "debug", "info", "warn", "error"
-	IgnoreFields            map[string][]string              `yaml:"ignoreFields,omitempty" json:"ignoreFields"`
-	PreferNonEmpty          *bool                            `yaml:"preferNonEmpty,omitempty" json:"preferNonEmpty"`
-	PreferLargerResponses   *bool                            `yaml:"preferLargerResponses,omitempty" json:"preferLargerResponses"`
-	MisbehaviorsDestination *MisbehaviorsDestinationConfig   `yaml:"misbehaviorsDestination,omitempty" json:"misbehaviorsDestination"`
+	// Key selects how responses are compared for agreement. "canonical" (default)
+	// hashes the full normalized response. "blockhash" compares only the block
+	// hash. "blockhashWithLink" compares block hash plus chain-link fields
+	// (parent hash, parent slot/number, block height). Methods without a known
+	// fast-path extractor fall back to canonical.
+	Key                     string                         `yaml:"key,omitempty" json:"key,omitempty"`
+	IgnoreFields            map[string][]string            `yaml:"ignoreFields,omitempty" json:"ignoreFields"`
+	PreferNonEmpty          *bool                          `yaml:"preferNonEmpty,omitempty" json:"preferNonEmpty"`
+	PreferLargerResponses   *bool                          `yaml:"preferLargerResponses,omitempty" json:"preferLargerResponses"`
+	MisbehaviorsDestination *MisbehaviorsDestinationConfig `yaml:"misbehaviorsDestination,omitempty" json:"misbehaviorsDestination"`
 	// PreferHighestValueFor specifies methods that should use highest-value comparison
 	// instead of hash-based consensus. Map key is method name, value is array of field paths.
 	// Field paths: "result" for direct result value (e.g., eth_getTransactionCount returns hex),
