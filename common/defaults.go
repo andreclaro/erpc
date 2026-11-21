@@ -3073,6 +3073,9 @@ func (c *ConsensusPolicyConfig) SetDefaults() error {
 	if c.DisputeLogLevel == "" {
 		c.DisputeLogLevel = "warn"
 	}
+	if c.Key == "" {
+		c.Key = "canonical"
+	}
 	if c.IgnoreFields == nil {
 		c.IgnoreFields = map[string][]string{
 			"eth_getLogs": {

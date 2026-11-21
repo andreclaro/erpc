@@ -1451,6 +1451,14 @@ export interface ConsensusPolicyConfig {
   lowParticipantsBehavior?: ConsensusLowParticipantsBehavior;
   punishMisbehavior?: PunishMisbehaviorConfig;
   disputeLogLevel?: string; // "trace", "debug", "info", "warn", "error"
+  /**
+   * Key selects how responses are compared for agreement. "canonical" (default)
+   * hashes the full normalized response. "blockhash" compares only the block
+   * hash. "blockhashWithLink" compares block hash plus chain-link fields
+   * (parent hash, parent slot/number, block height). Methods without a known
+   * fast-path extractor fall back to canonical.
+   */
+  key?: string;
   ignoreFields?: { [key: string]: string[]};
   preferNonEmpty?: boolean;
   preferLargerResponses?: boolean;

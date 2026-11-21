@@ -74,6 +74,10 @@ type Network struct {
 	// forkDemoted are the voters on a minority fork (EvmForkDemoted): no
 	// number vote, last in routing. nil while none is.
 	forkDemoted atomic.Pointer[[]string]
+	// forked is, per voter whose hash vote is off the pins, the number of
+	// its newest pinned ancestor (EvmVotesForked): it holds no pinned block
+	// above it (mayHold). nil while no vote is off.
+	forked atomic.Pointer[map[string]int64]
 	// hashStale are the sources whose hash age exceeds W, or whose socket
 	// closed (setHashStale): tried after the rest, before forkDemoted. nil
 	// while none is.
@@ -2126,6 +2130,28 @@ func (n *Network) SvmHighestFinalizedSlotMax(ctx context.Context) int64 {
 	return maxSlot
 }
 
+// SvmHighestLatestSlotMax returns the MAX latest (processed) slot across SVM
+// upstreams, harvested context.slot answers included. The availability guards
+// read it next to SvmHighestIndexedSlot: a slot an upstream answered at is
+// proof that upstream holds it, often seconds before the next shred-insert
+// poll. Zero means UNKNOWN. Same MAX rationale as SvmHighestFinalizedSlotMax.
+func (n *Network) SvmHighestLatestSlotMax(ctx context.Context) int64 {
+	_, span := common.StartDetailSpan(ctx, "Network.SvmHighestLatestSlotMax")
+	defer span.End()
+	var maxSlot int64
+	for _, u := range n.upstreamsRegistry.GetNetworkUpstreams(ctx, n.networkId) {
+		sp := u.SvmStatePoller()
+		if sp == nil || sp.IsObjectNull() {
+			continue
+		}
+		if slot := sp.LatestSlot(); slot > maxSlot {
+			maxSlot = slot
+		}
+	}
+	span.SetAttributes(attribute.Int64("highest_latest_slot_max", maxSlot))
+	return maxSlot
+}
+
 // SvmEnforceBlockAvailability reports whether the networkPreForward_getBlock
 // guard is enabled. Defaults to true when unconfigured.
 func (n *Network) SvmEnforceBlockAvailability() bool {
@@ -2457,13 +2483,15 @@ func (n *Network) selectionOrder(ctx context.Context, req *common.NormalizedRequ
 // on a minority fork, and has finalized the highest block req names; then
 // every upstream of ups held lacks. ups unchanged when req does not qualify
 // or no frozen upstream joins, so a request never has fewer upstreams.
-// Consensus keeps its participants.
+// Consensus keeps its participants. The block must be at or below the
+// network-wide lane's Finalized, the chain's: a use-upstream selector that
+// names only held-only upstreams has no voter, so its own Head has none.
 func (n *Network) heldOrder(ctx context.Context, req *common.NormalizedRequest, ups, held []common.Upstream) []common.Upstream {
 	if n.cfg.Architecture != common.ArchitectureEvm || req.UpstreamPolicies() != common.UpstreamPoliciesConfigured {
 		return ups
 	}
 	bn, ok := common.EvmRequestedBlockNumber(ctx, req)
-	if !ok || bn <= 0 || bn > n.EvmHead(ctx, req).Finalized || n.RunsConsensus(ctx, req) {
+	if !ok || bn <= 0 || bn > n.servedTipAll.published().Finalized || n.RunsConsensus(ctx, req) {
 		return ups
 	}
 	list, added := make([]common.Upstream, 0, len(held)+len(ups)), false
@@ -3472,8 +3500,12 @@ func (n *Network) Forward(ctx context.Context, req *common.NormalizedRequest) (*
 				}
 
 				// Deterministic errors: client faults and execution reverts are the
-				// same on every upstream — no point trying others.
-				if common.IsClientError(err) || common.HasErrorCode(err, common.ErrCodeEndpointExecutionException) {
+				// same on every upstream — no point trying others. An execution
+				// exception marked retryable toward the network is only as fresh
+				// as this node's state, so the sweep asks the next upstream even
+				// when no network retry policy is configured.
+				if common.IsClientError(err) ||
+					(common.HasErrorCode(err, common.ErrCodeEndpointExecutionException) && !common.IsRetryableExecutionException(err)) {
 					common.SetTraceSpanError(loopSpan, err)
 					loopSpan.End()
 					return nil, err
@@ -4948,8 +4980,12 @@ func (n *Network) splitHolders(ups []common.Upstream, bn, credit int64, holds fu
 // mayHold reports whether u may hold block bn, the one predicate routing
 // and the availability gate read (spec §6.4): its reachedHead reaches bn,
 // or, when holds is set, holds says so (thinHolds). An upstream with no
-// known head may hold any block.
+// known head may hold any block; one whose hash vote left the pins holds
+// none above its fork point, however high its branch runs (EvmVotesForked).
 func (n *Network) mayHold(u common.Upstream, bn, credit int64, holds func(common.Upstream) bool) bool {
+	if n.forkedBelow(u, bn) {
+		return false
+	}
 	head := n.reachedHead(u, credit)
 	return head <= 0 || common.EvmHeadReaches(u, head, bn) || holds != nil && holds(u)
 }

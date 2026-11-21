@@ -893,7 +893,11 @@ func (t *ChainTracker) runClock() {
 	if waiting || len(c.sights) == 0 {
 		cand, ok := c.fastest(cands)
 		if !ok {
-			if edge != nil {
+			// A hedged edge fetch is still the edge's answer: on a lane
+			// whose every voter it holds busy, ending the edge here served
+			// the read the view from before the idle W, a moment before the
+			// fetch brought the head.
+			if edge != nil && (c.edge == nil || c.edge.done) {
 				c.edgeDone = true
 				c.nextAt = now
 			}
@@ -1388,11 +1392,11 @@ func (t *ChainTracker) holderVoters(cands []clockCandidate) []clockCandidate {
 		return nil
 	}
 	top := b.backs[len(b.backs)-1].i
-	pin := s.pinAt(b.base + uint64(top))
 	lacks := max(b.need, 1) - (len(b.backs) - b.atLeast(top))
-	if b.served >= top || pin == nil || lacks <= 0 {
+	if b.served >= top || top >= len(b.pins) || lacks <= 0 {
 		return nil
 	}
+	pin := b.pins[top]
 	seen := t.clock.sightOf(pin.number)
 	if seen.IsZero() {
 		return nil

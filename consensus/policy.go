@@ -49,6 +49,7 @@ type config struct {
 	timeout                 time.Duration
 	logger                  *zerolog.Logger
 	disputeLogLevel         zerolog.Level
+	key                     ConsensusKey
 	ignoreFields            map[string][]string
 	preferNonEmpty          bool
 	preferLargerResponses   bool
@@ -116,6 +117,7 @@ func (b *builder) WithIgnoreFields(m map[string][]string) *builder {
 	b.cfg.ignoreFields = m
 	return b
 }
+func (b *builder) WithKey(v ConsensusKey) *builder    { b.cfg.key = v; return b }
 func (b *builder) WithPreferNonEmpty(v bool) *builder { b.cfg.preferNonEmpty = v; return b }
 func (b *builder) WithPreferLargerResponses(v bool) *builder {
 	b.cfg.preferLargerResponses = v

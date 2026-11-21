@@ -83,6 +83,11 @@ type EvmHead struct {
 	// Latest is not the view's Head (a limit, a guarantee cap, the cache
 	// head's anchor lowered it) or unknown.
 	LatestAt time.Time
+	// Anchored is set when the read follows the cache's fresh head
+	// (evm.servedTip.followCacheHead): Latest is at most that head, and a
+	// read of latest is served from the cache or by number, never sent to
+	// an upstream as the tag. Unset with no cache head, or a stale one.
+	Anchored bool
 	// NextAt is the earliest time the lane's next block may come: LatestAt
 	// plus the shorter of half a block and the shortest recent step of the
 	// view; zero while LatestAt is, or too few steps or no block time are
@@ -251,6 +256,11 @@ type SvmNetwork interface {
 	// out a slot some upstream can already serve. Advertising a head to clients
 	// needs the majority one, so a lone rogue upstream cannot inflate it.
 	SvmHighestFinalizedSlotMax(ctx context.Context) int64
+	// SvmHighestLatestSlotMax is the latest (processed) slot of the
+	// MOST-ADVANCED upstream, harvested answers included. The availability
+	// guards raise the indexed frontier with it: an upstream that answered at
+	// a slot holds it, even before its next shred-insert poll.
+	SvmHighestLatestSlotMax(ctx context.Context) int64
 	SvmHighestIndexedSlot(ctx context.Context) int64
 	SvmEnforceBlockAvailability() bool
 }
