@@ -25,6 +25,39 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// writeQuotedKey writes a JSON object key with surrounding quotes to w.
+// It avoids SonicCfg.Marshal for the common string-key case, which saves one
+// allocation and one encoder call per key in canonicalizeTo.
+func writeQuotedKey(w io.Writer, s string) error {
+	if _, err := w.Write(quoteByte); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(w, s); err != nil {
+		return err
+	}
+	_, err := w.Write(quoteByte)
+	return err
+}
+
+var quoteByte = []byte{'"'}
+
+// canonicalHashBufPool holds reusable *bytes.Buffer values for canonicalization.
+// Buffers larger than 4 MiB are discarded so the pool does not retain oversized
+// memory for responses that happen once.
+var canonicalHashBufPool = sync.Pool{
+	New: func() any { return bytes.NewBuffer(make([]byte, 0, 64<<10)) },
+}
+
+const maxCanonicalHashBufCap = 4 << 20 // 4 MiB
+
+// returnCanonicalHashBuf returns a canonicalization buffer to the pool unless
+// it grew too large.
+func returnCanonicalHashBuf(buf *bytes.Buffer) {
+	if buf != nil && buf.Cap() <= maxCanonicalHashBufCap {
+		canonicalHashBufPool.Put(buf)
+	}
+}
+
 var defaultCanonicalHashPlaceholder = interface{}(0) // placeholder for canonical hash
 
 type JsonRpcResponse struct {
@@ -854,11 +887,17 @@ func (r *JsonRpcResponse) CanonicalHash(ctx ...context.Context) (string, error) 
 		return "", err
 	}
 
-	h := sha256.New()
-	_, err := canonicalizeTo(h, obj)
-	if err != nil {
+	buf := canonicalHashBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	buf.Grow(len(resultCopy))
+	defer returnCanonicalHashBuf(buf)
+
+	if _, err := canonicalizeTo(buf, obj); err != nil {
 		return "", err
 	}
+
+	h := sha256.New()
+	_, _ = h.Write(buf.Bytes())
 	hash := hex.EncodeToString(h.Sum(nil))
 
 	// Store the computed hash atomically
@@ -903,11 +942,17 @@ func (r *JsonRpcResponse) CanonicalHashWithIgnoredFields(ignoreFields []string, 
 	// Remove ignored fields before canonicalization
 	obj = removeFieldsByPaths(obj, ignoreFields)
 
-	h := sha256.New()
-	_, err := canonicalizeTo(h, obj)
-	if err != nil {
+	buf := canonicalHashBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	buf.Grow(len(resultCopy))
+	defer returnCanonicalHashBuf(buf)
+
+	if _, err := canonicalizeTo(buf, obj); err != nil {
 		return "", err
 	}
+
+	h := sha256.New()
+	_, _ = h.Write(buf.Bytes())
 	hash := hex.EncodeToString(h.Sum(nil))
 
 	// Store in cache
@@ -923,10 +968,151 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 	if isEmptyishValue(v) {
 		return false, nil
 	}
+	if buf, ok := w.(*bytes.Buffer); ok {
+		return canonicalizeToBuf(buf, v)
+	}
+	return canonicalizeToSlow(w, v)
+}
 
+// canonicalizeToBuf is the fast path for *bytes.Buffer writers. It writes the
+// canonical representation directly into the shared buffer, sorting object keys
+// and avoiding per-value child buffers. Rollbacks via Truncate keep the output
+// correct when a recursively-processed value turns out to be empty.
+func canonicalizeToBuf(w *bytes.Buffer, v interface{}) (bool, error) {
 	switch val := v.(type) {
 	case map[string]interface{}:
-		// Filter empties and precompute children
+		keys := make([]string, 0, len(val))
+		for k, vv := range val {
+			if isEmptyishValue(vv) {
+				continue
+			}
+			keys = append(keys, k)
+		}
+		if len(keys) == 0 {
+			return false, nil
+		}
+		sort.Strings(keys)
+
+		start := w.Len()
+		w.WriteByte('{')
+		first := true
+		for _, k := range keys {
+			keyStart := w.Len()
+			if !first {
+				w.WriteByte(',')
+			}
+			w.WriteByte('"')
+			w.WriteString(k)
+			w.WriteByte('"')
+			w.WriteByte(':')
+			wrote, err := canonicalizeToBuf(w, val[k])
+			if err != nil {
+				return false, err
+			}
+			if !wrote {
+				// Roll back the comma (if any), key and colon.
+				w.Truncate(keyStart)
+				continue
+			}
+			first = false
+		}
+		if first {
+			// Every value was empty; roll back the opening brace.
+			w.Truncate(start)
+			return false, nil
+		}
+		w.WriteByte('}')
+		return true, nil
+
+	case []interface{}:
+		start := w.Len()
+		w.WriteByte('[')
+		first := true
+		for _, item := range val {
+			if isEmptyishValue(item) {
+				continue
+			}
+			itemStart := w.Len()
+			if !first {
+				w.WriteByte(',')
+			}
+			wrote, err := canonicalizeToBuf(w, item)
+			if err != nil {
+				return false, err
+			}
+			if !wrote {
+				// Roll back the comma (if any); the item was empty.
+				w.Truncate(itemStart)
+				continue
+			}
+			first = false
+		}
+		if first {
+			// Every item was empty; roll back the opening bracket.
+			w.Truncate(start)
+			return false, nil
+		}
+		w.WriteByte(']')
+		return true, nil
+
+	case string:
+		b := removeLeadingZeroes(util.S2Bytes(val))
+		if len(b) == 0 {
+			return false, nil
+		}
+		w.Write(b)
+		return true, nil
+
+	case []byte:
+		b := removeLeadingZeroes(val)
+		if len(b) == 0 {
+			return false, nil
+		}
+		w.Write(b)
+		return true, nil
+
+	case float64:
+		w.WriteString(strconv.FormatFloat(val, 'f', -1, 64))
+		return true, nil
+
+	case int:
+		w.WriteString(strconv.FormatInt(int64(val), 10))
+		return true, nil
+	case int64:
+		w.WriteString(strconv.FormatInt(val, 10))
+		return true, nil
+	case int32:
+		w.WriteString(strconv.FormatInt(int64(val), 10))
+		return true, nil
+
+	case bool:
+		if val {
+			w.Write(trueBytes)
+		} else {
+			w.Write(falseBytes)
+		}
+		return true, nil
+
+	default:
+		b, err := SonicCfg.Marshal(val)
+		if err != nil {
+			return false, err
+		}
+		if util.IsBytesEmptyish(b) {
+			return false, nil
+		}
+		b = removeLeadingZeroes(b)
+		w.Write(b)
+		return true, nil
+	}
+}
+
+// canonicalizeToSlow handles non-buffer writers (e.g. sha256.Hash). It uses
+// intermediate child buffers so that empty values can be discarded without
+// corrupting the output.
+func canonicalizeToSlow(w io.Writer, v interface{}) (bool, error) {
+	switch val := v.(type) {
+	case map[string]interface{}:
 		keys := make([]string, 0, len(val))
 		children := make(map[string]*bytes.Buffer, len(val))
 		for k, vv := range val {
@@ -950,7 +1136,6 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 			return false, nil
 		}
 		sort.Strings(keys)
-		// Ensure all borrowed child buffers are returned to the pool even if any write below errors.
 		defer func() {
 			for _, cb := range children {
 				if cb != nil {
@@ -967,8 +1152,7 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 					return false, err
 				}
 			}
-			kj, _ := SonicCfg.Marshal(k)
-			if _, err := w.Write(kj); err != nil {
+			if err := writeQuotedKey(w, k); err != nil {
 				return false, err
 			}
 			if _, err := w.Write([]byte{':'}); err != nil {
@@ -977,7 +1161,6 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 			if _, err := w.Write(children[k].Bytes()); err != nil {
 				return false, err
 			}
-			// Return immediately and mark as nil so deferred cleanup skips it
 			util.ReturnBuf(children[k])
 			children[k] = nil
 		}
@@ -985,7 +1168,6 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 		return true, err
 
 	case []interface{}:
-		// Filter empties and stream elements
 		if _, err := w.Write([]byte{'['}); err != nil {
 			return false, err
 		}
@@ -1043,6 +1225,28 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 		_, err := w.Write(b)
 		return true, err
 
+	case float64:
+		_, err := io.WriteString(w, strconv.FormatFloat(val, 'f', -1, 64))
+		return true, err
+
+	case int:
+		_, err := io.WriteString(w, strconv.FormatInt(int64(val), 10))
+		return true, err
+	case int64:
+		_, err := io.WriteString(w, strconv.FormatInt(val, 10))
+		return true, err
+	case int32:
+		_, err := io.WriteString(w, strconv.FormatInt(int64(val), 10))
+		return true, err
+
+	case bool:
+		if val {
+			_, err := w.Write(trueBytes)
+			return true, err
+		}
+		_, err := w.Write(falseBytes)
+		return true, err
+
 	default:
 		b, err := SonicCfg.Marshal(val)
 		if err != nil {
@@ -1056,6 +1260,11 @@ func canonicalizeTo(w io.Writer, v interface{}) (bool, error) {
 		return true, err
 	}
 }
+
+var (
+	trueBytes  = []byte("true")
+	falseBytes = []byte("false")
+)
 
 // removeFieldsByPaths removes fields from an object based on dot-separated paths
 // Supports:
