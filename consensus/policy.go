@@ -40,6 +40,7 @@ func methodFields(defs map[string][]string, method string) ([]string, bool) {
 // config carries the consensus-policy configuration through the
 // builder-style API.
 type config struct {
+	key                     common.ConsensusKey
 	maxParticipants         int
 	agreementThreshold      int
 	disputeBehavior         common.ConsensusDisputeBehavior
@@ -83,6 +84,10 @@ func (b *builder) Build() *Consensus {
 	return &Consensus{policy: pol, logger: pol.logger}
 }
 
+func (b *builder) WithKey(k common.ConsensusKey) *builder {
+	b.cfg.key = k
+	return b
+}
 func (b *builder) WithMaxParticipants(n int) *builder {
 	b.cfg.maxParticipants = n
 	return b

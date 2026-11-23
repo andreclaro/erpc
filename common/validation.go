@@ -1452,6 +1452,9 @@ func lookupMethodFields(defs map[string][]string, method string) ([]string, stri
 }
 
 func (c *ConsensusPolicyConfig) Validate() error {
+	if _, err := NormalizeConsensusKey(string(c.Key)); err != nil {
+		return fmt.Errorf("consensus.key is invalid: %w", err)
+	}
 	if c.MaxParticipants <= 0 {
 		return fmt.Errorf("consensus.maxParticipants must be greater than 0")
 	}

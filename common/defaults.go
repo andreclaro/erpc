@@ -3058,6 +3058,11 @@ func (c *CircuitBreakerPolicyConfig) SetDefaults(defaults *CircuitBreakerPolicyC
 }
 
 func (c *ConsensusPolicyConfig) SetDefaults() error {
+	if key, err := NormalizeConsensusKey(string(c.Key)); err != nil {
+		return fmt.Errorf("consensus.key is invalid: %w", err)
+	} else {
+		c.Key = key
+	}
 	if c.MaxParticipants == 0 {
 		c.MaxParticipants = 5
 	}
@@ -3285,6 +3290,9 @@ func (c *ConsensusPolicyConfig) resolveNamedPolicyExtends() error {
 // []) as set; scalar zeros are treated as unset so an omitted field keeps the
 // base value.
 func overlayConsensusPolicy(base, child *ConsensusPolicyConfig) {
+	if child.Key != "" {
+		base.Key = child.Key
+	}
 	if child.MaxParticipants != 0 {
 		base.MaxParticipants = child.MaxParticipants
 	}

@@ -2048,6 +2048,11 @@ const (
 )
 
 type ConsensusPolicyConfig struct {
+	// Key selects how successful responses are reduced to comparable hashes.
+	// Supported values: canonical (default), blockhash, blockhashWithLink.
+	// Architecture packages register non-canonical extractors for the methods
+	// they own; an unsupported or unrecognized key is a validation error.
+	Key                     ConsensusKey                     `yaml:"key,omitempty" json:"key,omitempty"`
 	MaxParticipants         int                              `yaml:"maxParticipants" json:"maxParticipants"`
 	AgreementThreshold      int                              `yaml:"agreementThreshold,omitempty" json:"agreementThreshold"`
 	DisputeBehavior         ConsensusDisputeBehavior         `yaml:"disputeBehavior,omitempty" json:"disputeBehavior"`
