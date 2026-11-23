@@ -50,8 +50,8 @@ func messageWireBytes(m *parsedMessage) ([]byte, error) {
 		byte(m.NumReadonlySigned),
 		byte(m.NumReadonlyUnsigned),
 	)
-	buf = putU16(buf, len(m.AccountKeys))
-	for _, k := range m.AccountKeys {
+	buf = putU16(buf, len(m.StaticAccountKeys))
+	for _, k := range m.StaticAccountKeys {
 		key, err := base58DecodeLen(k, ed25519.PublicKeySize)
 		if err != nil {
 			return nil, fmt.Errorf("account key not a 32-byte base58 value: %w", err)
@@ -101,8 +101,8 @@ func verifyTxSignatures(tx *parsedTx) error {
 	if m.NumRequiredSignatures <= 0 {
 		return errors.New("message declares zero required signatures")
 	}
-	if len(m.AccountKeys) < m.NumRequiredSignatures {
-		return fmt.Errorf("required signatures %d exceed account keys %d", m.NumRequiredSignatures, len(m.AccountKeys))
+	if len(m.StaticAccountKeys) < m.NumRequiredSignatures {
+		return fmt.Errorf("required signatures %d exceed static account keys %d", m.NumRequiredSignatures, len(m.StaticAccountKeys))
 	}
 	if len(tx.Signatures) != m.NumRequiredSignatures {
 		return fmt.Errorf("signature count %d != numRequiredSignatures %d", len(tx.Signatures), m.NumRequiredSignatures)
@@ -116,12 +116,12 @@ func verifyTxSignatures(tx *parsedTx) error {
 		if err != nil {
 			return fmt.Errorf("signature %d not a 64-byte base58 value: %w", i, err)
 		}
-		key, err := base58DecodeLen(m.AccountKeys[i], ed25519.PublicKeySize)
+		key, err := base58DecodeLen(m.StaticAccountKeys[i], ed25519.PublicKeySize)
 		if err != nil {
 			return fmt.Errorf("signer key %d not a 32-byte base58 value: %w", i, err)
 		}
 		if !ed25519.Verify(ed25519.PublicKey(key), msg, sig) {
-			return fmt.Errorf("ed25519 signature %d does not verify against signer %s", i, m.AccountKeys[i])
+			return fmt.Errorf("ed25519 signature %d does not verify against signer %s", i, m.StaticAccountKeys[i])
 		}
 	}
 	return nil

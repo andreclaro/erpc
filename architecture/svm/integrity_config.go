@@ -146,6 +146,9 @@ func overlaySettings(base, over *common.IntegritySettings) {
 	if over.InvalidBehavior != nil {
 		base.InvalidBehavior = over.InvalidBehavior.Copy()
 	}
+	if over.ObserveOnly != nil {
+		base.ObserveOnly = over.ObserveOnly
+	}
 	if over.AutoCorrectWhenPossible != nil {
 		base.AutoCorrectWhenPossible = over.AutoCorrectWhenPossible
 	}

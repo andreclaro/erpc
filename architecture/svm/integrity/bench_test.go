@@ -110,12 +110,14 @@ func buildBenchVerifyTx(n int) *parsedTx {
 		NumRequiredSignatures: n,
 		NumReadonlyUnsigned:   2,
 		AccountKeys:           make([]string, len(keys)),
+		StaticAccountKeys:     make([]string, len(keys)),
 		RecentBlockhash:       base58Encode(recent),
 		Instructions:          []parsedInstr{{ProgramIDIndex: 1, Accounts: []byte{0}, Data: []byte{1, 2, 3}}},
 		Lookups:               []parsedLookup{{AccountKey: keys[n].b58, WritableIndexes: []byte{0}, ReadonlyIndexes: []byte{1}}},
 	}
 	for i, k := range keys {
 		msg.AccountKeys[i] = k.b58
+		msg.StaticAccountKeys[i] = k.b58
 	}
 	wire, err := messageWireBytes(&msg)
 	if err != nil {
@@ -211,6 +213,7 @@ func BenchmarkMessageWireBytes(b *testing.B) {
 		Version:               1,
 		NumRequiredSignatures: 2,
 		AccountKeys:           []string{key, key},
+		StaticAccountKeys:     []string{key, key},
 		RecentBlockhash:       recent,
 		Instructions:          []parsedInstr{{ProgramIDIndex: 1, Accounts: []byte{0}, Data: []byte{1, 2, 3}}},
 		Lookups:               []parsedLookup{{AccountKey: key, WritableIndexes: []byte{0}, ReadonlyIndexes: []byte{1}}},

@@ -27,6 +27,14 @@ func init() {
 	register(heightVsSlot)
 }
 
+// headKind tells whether a head method reports slots or block heights.
+func headKind(method string) string {
+	if method == "getblockheight" {
+		return "height"
+	}
+	return "slot"
+}
+
 // headSlot is the progression truth for the polled-head methods: the numeric
 // result for getSlot/getBlockHeight, absoluteSlot for getEpochInfo (whose
 // other slot-shaped fields are epoch-relative, not head positions).
@@ -38,6 +46,12 @@ func headSlot(d *Decoded) (int64, bool) {
 		}
 	}
 	return slot, ok
+}
+
+// headBucket returns the namespaced commitment bucket for a head method.
+// Slots and block heights are different counters and must not share state.
+func headBucket(method string, params []any) string {
+	return headKind(method) + ":" + commitmentOf(method, params)
 }
 
 // svm.cont.headProgression — getSlot/getBlockHeight/getEpochInfo heads move
@@ -57,18 +71,19 @@ var headProgression = &Check{
 		if !ok || slot < 0 || d.chain == nil {
 			return Skipped
 		}
-		bucket := commitmentOf(d.method, d.reqParams)
+		bucket := headBucket(d.method, d.reqParams)
+		kind := headKind(d.method)
 		if prev, seen := d.chain.LastHead(bucket); seen && slot < prev {
 			return failf("head regressed in %q bucket: %d after %d — reorg evidence", bucket, slot, prev)
 		}
 		// Cross-bucket monotonicity against the other observed buckets.
-		if bucket != "finalized" {
-			if f, seen := d.chain.LastHead("finalized"); seen && slot < f {
+		if bucket != kind+":finalized" {
+			if f, seen := d.chain.LastHead(kind + ":finalized"); seen && slot < f {
 				return failf("%q head %d sits below the observed finalized head %d — inverted finality", bucket, slot, f)
 			}
 		}
-		if bucket == "processed" {
-			if cf, seen := d.chain.LastHead("confirmed"); seen && slot < cf {
+		if bucket == kind+":processed" {
+			if cf, seen := d.chain.LastHead(kind + ":confirmed"); seen && slot < cf {
 				return failf("processed head %d sits below the observed confirmed head %d — inverted finality", slot, cf)
 			}
 		}
@@ -79,7 +94,7 @@ var headProgression = &Check{
 		if !ok || slot < 0 || d.chain == nil {
 			return
 		}
-		d.chain.NoteHead(commitmentOf(d.method, d.reqParams), slot)
+		d.chain.NoteHead(headBucket(d.method, d.reqParams), slot)
 	},
 }
 

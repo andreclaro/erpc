@@ -336,12 +336,12 @@ transaction-inspecting checks **skip, never false-flag**.
 | `svm.struct.sigUniqueness` | intrinsic | block | duplicate signatures inside one block |
 | `svm.struct.rewardsShape` | intrinsic | block | a rewards entry whose payee isn't decodable base58 or whose lamports aren't a signed integer (rent rewards go negative) |
 | `svm.struct.heightVsSlot` | intrinsic | block | `blockHeight` greater than the slot — more produced blocks than ticks |
-| `svm.struct.requestedSigMatch` | intrinsic | tx | the served transaction isn't the one asked for (no requested signature among the served ones) |
+| `svm.struct.requestedSigMatch` | intrinsic | tx | the served transaction isn't the one asked for (the requested signature is not the served transaction's first signature) |
 | `svm.struct.tokenMintShape` | intrinsic | `getAccountInfo` | a token-program-owned account with the canonical 82-byte payload that isn't a structurally valid mint |
 | `svm.struct.tokenAccountShape` | intrinsic | `getTokenAccountsByOwner`/`Delegate` | token-account entries whose binary payload isn't the base SPL token-account layout |
 | `svm.auth.signatureVerify` | intrinsic | block, tx | the recomputed v0/v1 wire message doesn't verify against the required signer keys' ed25519 signatures |
 | `svm.auth.genesisHash` | intrinsic | `getGenesisHash` | a genesis hash that doesn't match the network's known value |
-| `svm.auth.tokenProgram` | intrinsic | `getTokenAccountsByOwner`/`Delegate` | token accounts owned by a bogus program (synthesized token data) |
+| `svm.auth.tokenProgram` | intrinsic | `getTokenAccountsByOwner`/`Delegate` | token accounts owned by a bogus program, or a jsonParsed `program` that disagrees with the owner (synthesized token data) |
 | `svm.shape.magnitude` | intrinsic | block, `getBlockCommitment`, `getSignaturesForAddress` | implausible magnitudes — slots near the int64 ceiling, absurd balances |
 | `svm.shape.slotEncoding` | intrinsic | `getBlocks`, `getBlocksWithLimit`, `getSlot`, `getBlockHeight`, `getTransactionCount`, `getEpochInfo` | a slot/epoch/height field that isn't an integer |
 | `svm.shape.commitmentParam` | intrinsic | envelope | an unrecognized commitment vocabulary value |

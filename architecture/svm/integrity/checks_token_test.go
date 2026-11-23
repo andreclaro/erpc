@@ -130,7 +130,7 @@ func TestTokenProgram_PassesKnownOwners(t *testing.T) {
 }
 
 func TestTokenProgram_PassesParsedSplToken(t *testing.T) {
-	entry := `{"pubkey":"Addr1111111111111111111111111111111111111","account":{"owner":"` + splTokenProgramID + `","lamports":100,"data":{"program":"spl-token-2022","parsed":{"type":"account"},"space":165}}}`
+	entry := `{"pubkey":"Addr1111111111111111111111111111111111111","account":{"owner":"` + splTokenProgramID + `","lamports":100,"data":{"program":"spl-token","parsed":{"type":"account"},"space":165}}}`
 	res := validateToken(t, "getTokenAccountsByOwner", byOwnerResult(entry), intrinsicTokenSet(t))
 	assert.NoError(t, res.Err)
 }

@@ -36,9 +36,13 @@ func init() {
 }
 
 // Known SPL token program IDs (mainnet-beta stable, cluster-independent).
+// #nosec G101 -- public SPL Token program ID, not a credential.
+const splTokenProgramID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
+// #nosec G101 -- public Token-2022 program ID, not a credential.
+const token2022ProgramID = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEB"
+
 const (
-	splTokenProgramID   = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-	token2022ProgramID  = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEB"
 	parsedTokenProgram  = "spl-token"
 	parsedToken2022Prog = "spl-token-2022"
 )
@@ -196,14 +200,16 @@ var tokenProgram = &Check{
 			return Skipped
 		}
 		for i, v := range views {
-			switch {
-			case v.prog != "":
-				if !isParsedTokenProgram(v.prog) {
-					return failf("token account [%d]: jsonParsed names program %q — not an SPL token program", i, v.prog)
+			if v.owner == "" || !isTokenProgramOwner(v.owner) {
+				return failf("token account [%d]: owner %q is not an SPL token program (synthesized token data?)", i, v.owner)
+			}
+			if v.prog != "" {
+				want := parsedTokenProgram
+				if v.owner == token2022ProgramID {
+					want = parsedToken2022Prog
 				}
-			case v.owner != "":
-				if !isTokenProgramOwner(v.owner) {
-					return failf("token account [%d]: owner %q is not an SPL token program (synthesized token data?)", i, v.owner)
+				if v.prog != want {
+					return failf("token account [%d]: parsed program %q does not match owner %q", i, v.prog, v.owner)
 				}
 			}
 		}

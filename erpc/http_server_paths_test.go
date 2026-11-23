@@ -221,9 +221,11 @@ func TestHttpPaths_MainServerRouting(t *testing.T) {
 	t.Run("NetworkFromBodyAndAliasAndDomainRouting", func(t *testing.T) {
 		bodyWithNet := `{"jsonrpc":"2.0","id":7,"networkId":"evm:123","method":"eth_getBalance","params":["0x0000000000000000000000000000000000000001","latest"]}`
 		for name, call := range map[string]func() (int, http.Header, string){
-			"body":   func() (int, http.Header, string) { return post("/test_project", bodyWithNet, nil) },
-			"alias":  func() (int, http.Header, string) { return post("/test_project/main", httpPathsBalanceBody, nil) },
-			"domain": func() (int, http.Header, string) { return post("/123", httpPathsBalanceBody, map[string]string{"Host": "rpc.alias.test:8080"}) },
+			"body":  func() (int, http.Header, string) { return post("/test_project", bodyWithNet, nil) },
+			"alias": func() (int, http.Header, string) { return post("/test_project/main", httpPathsBalanceBody, nil) },
+			"domain": func() (int, http.Header, string) {
+				return post("/123", httpPathsBalanceBody, map[string]string{"Host": "rpc.alias.test:8080"})
+			},
 		} {
 			status, hdr, body := call()
 			assert.Equal(t, http.StatusOK, status, name)
@@ -445,12 +447,12 @@ func TestHttpPaths_ParseUrlPathAliasCombos(t *testing.T) {
 		}}},
 	}
 	cases := []struct {
-		name             string
-		method, path     string
-		pre              [3]string
-		want             [3]string
-		wantHealth       bool
-		errContains      string
+		name         string
+		method, path string
+		pre          [3]string
+		want         [3]string
+		wantHealth   bool
+		errContains  string
 	}{
 		{name: "project-only too many", method: "POST", path: "/a/b/c/d", pre: [3]string{"p", "", ""}, errContains: "for project-only alias must only provide"},
 		{name: "project-only explicit triple", method: "POST", path: "/q/evm/1", pre: [3]string{"p", "", ""}, want: [3]string{"q", "evm", "1"}},
@@ -916,12 +918,12 @@ func httpPathsWriteCert(t *testing.T) (certFile, keyFile string) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "localhost"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		IsCA:         true,
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "localhost"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		BasicConstraintsValid: true,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)

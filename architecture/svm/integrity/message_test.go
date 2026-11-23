@@ -30,12 +30,12 @@ func TestMessageWireBytes_V0PrefixIsSigned(t *testing.T) {
 	key := base58Encode(make([]byte, 32))
 	hash := base58Encode(make([]byte, 32))
 
-	legacy := parsedMessage{Version: 0, NumRequiredSignatures: 1, AccountKeys: []string{key}, RecentBlockhash: hash}
+	legacy := parsedMessage{Version: 0, NumRequiredSignatures: 1, AccountKeys: []string{key}, StaticAccountKeys: []string{key}, RecentBlockhash: hash}
 	buf, err := messageWireBytes(&legacy)
 	require.NoError(t, err)
 	assert.Equal(t, byte(1), buf[0], "legacy wire starts with the header byte — no version prefix")
 
-	v0 := parsedMessage{Version: 1, NumRequiredSignatures: 1, AccountKeys: []string{key}, RecentBlockhash: hash}
+	v0 := parsedMessage{Version: 1, NumRequiredSignatures: 1, AccountKeys: []string{key}, StaticAccountKeys: []string{key}, RecentBlockhash: hash}
 	buf, err = messageWireBytes(&v0)
 	require.NoError(t, err)
 	assert.Equal(t, byte(0x80), buf[0], "v0 signed payload MUST include the 0x80 prefix")
@@ -61,6 +61,7 @@ func TestMessageWireBytes_ReconstructsLayout(t *testing.T) {
 		NumReadonlySigned:     1,
 		NumReadonlyUnsigned:   3,
 		AccountKeys:           []string{key, key},
+		StaticAccountKeys:     []string{key, key},
 		RecentBlockhash:       hash,
 		Instructions:          []parsedInstr{{ProgramIDIndex: 4, Accounts: []byte{0, 1}, Data: []byte{0xde, 0xad}}},
 		Lookups:               []parsedLookup{{AccountKey: key, WritableIndexes: []byte{5}, ReadonlyIndexes: []byte{6}}},
@@ -103,7 +104,7 @@ func TestVerifyTxSignatures_Guards(t *testing.T) {
 	countMismatch := &parsedTx{
 		HasMessage: true,
 		Signatures: []string{"a", "b"},
-		Message:    parsedMessage{NumRequiredSignatures: 1, AccountKeys: []string{"k"}},
+		Message:    parsedMessage{NumRequiredSignatures: 1, AccountKeys: []string{"k"}, StaticAccountKeys: []string{"k"}},
 	}
 	assert.Error(t, verifyTxSignatures(countMismatch), "signature count must equal numRequiredSignatures")
 }

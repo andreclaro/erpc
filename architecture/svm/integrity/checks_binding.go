@@ -18,28 +18,32 @@ func init() {
 	register(rewardsShape)
 }
 
-// requestedSignatures extracts base58 signature strings from the request
-// params (position 0 for getTransaction-family; block hashes for getBlock).
-func requestedSignatures(d *Decoded) []string {
-	var out []string
-	for _, p := range d.reqParams {
-		s, ok := p.(string)
-		if !ok || s == "" {
-			continue
-		}
-		out = append(out, s)
+func firstSig(sigs []string) string {
+	if len(sigs) == 0 {
+		return ""
 	}
-	return out
+	return sigs[0]
+}
+
+// requestedSignatures extracts the base58 signature the getTransaction-family
+// request asked for. Only params[0] is the signature; later params are config
+// objects and must not be treated as signatures.
+func requestedSignatures(d *Decoded) []string {
+	if len(d.reqParams) == 0 {
+		return nil
+	}
+	s, ok := d.reqParams[0].(string)
+	if !ok || s == "" {
+		return nil
+	}
+	return []string{s}
 }
 
 // svm.struct.requestedSigMatch — getTransaction-family: the served
-// transaction must actually be the one the client asked for, so the requested
-// signature must appear among the served transaction's signatures. Index 0
-// is the common case, but signer order is a wallet detail, not tx identity —
-// any served signature matching any requested signature passes (multi-sig
-// wallets legitimately query by any member's signature). A match to none of
-// them means the upstream answered a different (cheaper, cached, or
-// invented) transaction.
+// transaction must actually be the one the client asked for. The request
+// signature is the query key, so it must match the served transaction's
+// first signature (the transaction's primary id). A mismatch means the
+// upstream answered a different (cheaper, cached, or invented) transaction.
 var requestedSigMatch = &Check{
 	ID:      "svm.struct.requestedSigMatch",
 	Family:  FamilyStructural,
@@ -63,14 +67,10 @@ var requestedSigMatch = &Check{
 		if err := json.Unmarshal(t.Transaction, &obj); err != nil || len(obj.Signatures) == 0 {
 			return Skipped
 		}
-		for _, got := range obj.Signatures {
-			for _, want := range reqSigs {
-				if got == want {
-					return nil
-				}
-			}
+		if len(obj.Signatures) == 0 || obj.Signatures[0] != reqSigs[0] {
+			return failf("served transaction signature %q is not the requested signature %q (answered a different transaction?)", firstSig(obj.Signatures), reqSigs[0])
 		}
-		return failf("served transaction signatures do not include the requested signature %s (answered a different transaction?)", reqSigs[0])
+		return nil
 	},
 }
 

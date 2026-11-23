@@ -288,10 +288,15 @@ type parsedMessage struct {
 	NumRequiredSignatures int
 	NumReadonlySigned     int
 	NumReadonlyUnsigned   int
-	AccountKeys           []string
-	RecentBlockhash       string
-	Instructions          []parsedInstr
-	Lookups               []parsedLookup
+	// AccountKeys is the full key list (static + any lookupTable-sourced keys
+	// the RPC resolves). Structural checks use it for index validation.
+	AccountKeys []string
+	// StaticAccountKeys are the keys that live in the signed message body.
+	// Wire-format reconstruction and signature verification use only these.
+	StaticAccountKeys []string
+	RecentBlockhash   string
+	Instructions      []parsedInstr
+	Lookups           []parsedLookup
 }
 
 type parsedInstr struct {
@@ -306,9 +311,13 @@ type parsedLookup struct {
 	ReadonlyIndexes []byte
 }
 
-// rawKey unmarshals a base58 string or a {pubkey: ...} object (jsonParsed).
+// rawKey unmarshals a base58 string or a {pubkey, source} object (jsonParsed).
+// Source distinguishes static message keys ("transaction" or absent) from
+// address-table-lookup resolved keys ("lookupTable"): only static keys are
+// part of the signed wire payload.
 type rawKey struct {
 	Pubkey string `json:"pubkey"`
+	Source string `json:"source"`
 }
 
 func parseTx(raw json.RawMessage) (*parsedTx, error) {
@@ -347,6 +356,7 @@ func parseTx(raw json.RawMessage) (*parsedTx, error) {
 	}
 	for _, rk := range obj.Message.AccountKeys {
 		var key string
+		var source string
 		trimmedKey := bytes.TrimSpace(rk)
 		if len(trimmedKey) > 0 && trimmedKey[0] == '{' {
 			var k rawKey
@@ -354,6 +364,7 @@ func parseTx(raw json.RawMessage) (*parsedTx, error) {
 				return nil, err
 			}
 			key = k.Pubkey
+			source = k.Source
 		} else {
 			if err := json.Unmarshal(trimmedKey, &key); err != nil {
 				return nil, err
@@ -363,6 +374,9 @@ func parseTx(raw json.RawMessage) (*parsedTx, error) {
 			return nil, errNotVerifiable
 		}
 		msg.AccountKeys = append(msg.AccountKeys, key)
+		if source != "lookupTable" {
+			msg.StaticAccountKeys = append(msg.StaticAccountKeys, key)
+		}
 	}
 	for _, ri := range obj.Message.Instructions {
 		inst, err := parseInstr(ri)
@@ -379,14 +393,33 @@ func parseTx(raw json.RawMessage) (*parsedTx, error) {
 		msg.Lookups = append(msg.Lookups, lk)
 	}
 	// Version: v0 iff the message carries address-table lookups, or the tx
-	// declares version 0 explicitly.
+	// declares version 0 explicitly. Any other explicit version carries a
+	// wire format this code cannot reconstruct, so it is unverifiable.
 	msg.Version = 0
+	switch v := obj.Version.(type) {
+	case float64:
+		if v == 0 {
+			msg.Version = 1
+		} else {
+			return nil, errNotVerifiable
+		}
+	case json.Number:
+		if n, err := v.Int64(); err == nil && n == 0 {
+			msg.Version = 1
+		} else {
+			return nil, errNotVerifiable
+		}
+	case string:
+		if v != "" && v != "legacy" {
+			return nil, errNotVerifiable
+		}
+	case nil:
+		// leave legacy
+	default:
+		return nil, errNotVerifiable
+	}
 	if len(msg.Lookups) > 0 {
 		msg.Version = 1
-	} else if v, ok := obj.Version.(float64); ok && v == 0 {
-		msg.Version = 1
-	} else if s, ok := obj.Version.(string); ok && s != "legacy" && s != "" {
-		return nil, errNotVerifiable
 	}
 	tx.HasMessage = true
 	return tx, nil
@@ -577,7 +610,7 @@ func (d *Decoded) Slot() (int64, bool) {
 		if l, err := d.BlocksList(); err == nil && len(l) > 0 {
 			return l[len(l)-1], true
 		}
-	case "getslot", "getblockheight", "gettransactioncount":
+	case "getslot", "gettransactioncount":
 		return d.SlotNumber()
 	case "getepochinfo":
 		if e, err := d.EpochInfo(); err == nil && e.AbsoluteSlot != nil {

@@ -18,7 +18,7 @@ type CachePolicy struct {
 	maxSize       *int
 	// readOnly is true when the connector only serves reads (ReadOnlyConnector);
 	// such a policy never matches for set.
-	readOnly      bool
+	readOnly bool
 }
 
 func NewCachePolicy(cfg *common.CachePolicyConfig, connector Connector) (*CachePolicy, error) {

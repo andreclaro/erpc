@@ -12,20 +12,20 @@ import (
 
 func TestHeadProgression_ForwardMovePasses(t *testing.T) {
 	chain := NewChainState()
-	chain.NoteHead("processed", 900)
+	chain.NoteHead("slot:processed", 900)
 	res := validateChain(t, "getSlot", `["processed"]`, `950`,
 		corroboratedSet("svm.cont.headProgression"), chain, nil)
 	assert.NoError(t, res.Err)
 	assert.Equal(t, "pass", outcomeOf(res, "svm.cont.headProgression"))
 	// The store advanced.
-	got, ok := chain.LastHead("processed")
+	got, ok := chain.LastHead("slot:processed")
 	require.True(t, ok)
 	assert.Equal(t, int64(950), got)
 }
 
 func TestHeadProgression_BackwardMoveRecords(t *testing.T) {
 	chain := NewChainState()
-	chain.NoteHead("processed", 950)
+	chain.NoteHead("slot:processed", 950)
 	res := validateChain(t, "getSlot", `["processed"]`, `900`,
 		corroboratedSet("svm.cont.headProgression"), chain, nil)
 	// ReorgSensitive default: recorded, never rejected.
@@ -33,13 +33,13 @@ func TestHeadProgression_BackwardMoveRecords(t *testing.T) {
 	require.Len(t, res.Recorded, 1)
 	assert.Equal(t, "svm.cont.headProgression", res.Recorded[0].CheckID)
 	// The store did NOT move backwards — the evidence stays observable.
-	got, _ := chain.LastHead("processed")
+	got, _ := chain.LastHead("slot:processed")
 	assert.Equal(t, int64(950), got)
 }
 
 func TestHeadProgression_BackwardMoveHardRejects(t *testing.T) {
 	chain := NewChainState()
-	chain.NoteHead("processed", 950)
+	chain.NoteHead("slot:processed", 950)
 	cs := corroboratedSet("svm.cont.headProgression")
 	enableHardReject(cs, "svm.cont.headProgression")
 	res := validateChain(t, "getSlot", `["processed"]`, `900`, cs, chain, nil)
@@ -49,7 +49,7 @@ func TestHeadProgression_BackwardMoveHardRejects(t *testing.T) {
 
 func TestHeadProgression_BucketsAreIndependent(t *testing.T) {
 	chain := NewChainState()
-	chain.NoteHead("finalized", 990)
+	chain.NoteHead("slot:finalized", 990)
 	// An explicitly-processed head below the finalized head is an inversion.
 	// (A BARE getSlot now defaults to the finalized bucket, where 950 < 990
 	// is a plain regression — see TestHeadProgression_BareHeadPollsDefaultToFinalized.)
@@ -61,14 +61,14 @@ func TestHeadProgression_BucketsAreIndependent(t *testing.T) {
 
 func TestHeadProgression_FinalizedBucketSkipsCrossCheck(t *testing.T) {
 	chain := NewChainState()
-	chain.NoteHead("processed", 950)
+	chain.NoteHead("slot:processed", 950)
 	// finalized naturally sits below processed — no inversion for the
 	// finalized bucket itself.
 	res := validateChain(t, "getSlot", `[{"commitment":"finalized"}]`, `940`,
 		corroboratedSet("svm.cont.headProgression"), chain, nil)
 	assert.NoError(t, res.Err)
 	assert.Equal(t, "pass", outcomeOf(res, "svm.cont.headProgression"))
-	assert.Equal(t, int64(940), chainMustLastHead(t, chain, "finalized"))
+	assert.Equal(t, int64(940), chainMustLastHead(t, chain, "slot:finalized"))
 }
 
 func chainMustLastHead(t *testing.T, c *ChainState, bucket string) int64 {
@@ -83,19 +83,19 @@ func TestHeadProgression_CommitmentStringParam(t *testing.T) {
 	res := validateChain(t, "getSlot", `["confirmed"]`, `940`,
 		corroboratedSet("svm.cont.headProgression"), chain, nil)
 	assert.NoError(t, res.Err)
-	assert.Equal(t, int64(940), chainMustLastHead(t, chain, "confirmed"))
+	assert.Equal(t, int64(940), chainMustLastHead(t, chain, "slot:confirmed"))
 }
 
 func TestHeadProgression_EpochInfoUsesAbsoluteSlot(t *testing.T) {
 	chain := NewChainState()
 	// A bare getEpochInfo defaults to the finalized commitment, so its
 	// absoluteSlot lands in the finalized bucket.
-	chain.NoteHead("finalized", 5*432000+200)
+	chain.NoteHead("slot:finalized", 5*432000+200)
 	res := validateChain(t, "getEpochInfo", `[]`,
 		epochInfoJSON(5, 300, 5*432000+300),
 		corroboratedSet("svm.cont.headProgression"), chain, nil)
 	assert.NoError(t, res.Err)
-	assert.Equal(t, int64(5*432000+300), chainMustLastHead(t, chain, "finalized"))
+	assert.Equal(t, int64(5*432000+300), chainMustLastHead(t, chain, "slot:finalized"))
 }
 
 func TestHeadProgression_BareHeadPollsDefaultToFinalized(t *testing.T) {
@@ -109,12 +109,12 @@ func TestHeadProgression_BareHeadPollsDefaultToFinalized(t *testing.T) {
 	res := validateChain(t, "getSlot", `[]`, `900`,
 		corroboratedSet("svm.cont.headProgression"), chain, tr)
 	assert.NoError(t, res.Err)
-	assert.Equal(t, int64(900), chainMustLastHead(t, chain, "finalized"))
+	assert.Equal(t, int64(900), chainMustLastHead(t, chain, "slot:finalized"))
 
 	res = validateChain(t, "getSlot", `["confirmed"]`, `950`,
 		corroboratedSet("svm.cont.headProgression"), chain, tr)
 	assert.NoError(t, res.Err, "confirmed-bucket slot above the finalized head is not a regression")
-	assert.Equal(t, int64(950), chainMustLastHead(t, chain, "confirmed"))
+	assert.Equal(t, int64(950), chainMustLastHead(t, chain, "slot:confirmed"))
 
 	// A bare poll BELOW its own previous sighting is a finalized regression.
 	res = validateChain(t, "getSlot", `[]`, `800`,
@@ -131,12 +131,16 @@ func TestHeadProgression_FinalizedAliasCommitsToFinalizedBucket(t *testing.T) {
 	res := validateChain(t, "getBlockHeight", `["max"]`, `900`,
 		corroboratedSet("svm.cont.headProgression"), chain, tr)
 	assert.NoError(t, res.Err)
-	assert.Equal(t, int64(900), chainMustLastHead(t, chain, "finalized"))
+	assert.Equal(t, int64(900), chainMustLastHead(t, chain, "height:finalized"))
 
+	// A block-height regression cannot be mapped to a slot finality, so the
+	// default policy records the evidence instead of rejecting.
 	res = validateChain(t, "getBlockHeight", `["root"]`, `800`,
 		corroboratedSet("svm.cont.headProgression"), chain, tr)
-	require.Error(t, res.Err, "alias regression in the finalized bucket must reject")
-	assert.Equal(t, "svm.cont.headProgression", res.RejectedCheckID)
+	assert.NoError(t, res.Err)
+	require.Len(t, res.Recorded, 1)
+	assert.Equal(t, "svm.cont.headProgression", res.Recorded[0].CheckID)
+	assert.Equal(t, int64(900), chainMustLastHead(t, chain, "height:finalized"))
 }
 
 func TestHeadProgression_NoChainSkips(t *testing.T) {
@@ -157,7 +161,7 @@ func TestHeadProgression_RejectedHeadNotCommitted(t *testing.T) {
 	res := validateChain(t, "getSlot", `[]`, `5000`, cs, chain, tr)
 	require.Error(t, res.Err)
 	assert.Equal(t, "svm.final.tipBound", res.RejectedCheckID)
-	_, seen := chain.LastHead("processed")
+	_, seen := chain.LastHead("slot:finalized")
 	assert.False(t, seen, "a rejected head must never enter the progression store")
 }
 
@@ -172,14 +176,14 @@ func TestHeadProgression_RecordedMismatchHeadNotCommitted(t *testing.T) {
 	res := validateChain(t, "getSlot", `[]`, `5000`, cs, chain, tr)
 	assert.NoError(t, res.Err)
 	require.Len(t, res.Recorded, 1)
-	_, seen := chain.LastHead("processed")
+	_, seen := chain.LastHead("slot:finalized")
 	assert.False(t, seen, "a recorded-mismatch head must not enter the store")
 	// Clean follow-up DOES commit — the gate is per-response, not a lockout.
 	// (A bare getSlot defaults to the finalized commitment, so the head lands
 	// in the finalized bucket.)
 	res = validateChain(t, "getSlot", `[]`, `900`, cs, chain, tr)
 	assert.NoError(t, res.Err)
-	assert.Equal(t, int64(900), chainMustLastHead(t, chain, "finalized"))
+	assert.Equal(t, int64(900), chainMustLastHead(t, chain, "slot:finalized"))
 }
 
 // ---- svm.cont.minContextSlot ----
