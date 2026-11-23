@@ -603,8 +603,10 @@ func TestCovTrace_ExecuteSubRequests_FailureModes(t *testing.T) {
 			wantErr: "trace_filter is not available",
 		},
 		{
-			name:    "result_clone_failure",
-			resp:    func() *common.NormalizedResponse { return common.NewNormalizedResponse().WithJsonRpcResponse(failingClone) },
+			name: "result_clone_failure",
+			resp: func() *common.NormalizedResponse {
+				return common.NewNormalizedResponse().WithJsonRpcResponse(failingClone)
+			},
 			wantErr: "result stream truncated",
 		},
 	}

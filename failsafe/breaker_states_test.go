@@ -311,7 +311,6 @@ func TestBreaker_UnknownStatePermits(t *testing.T) {
 	assert.Equal(t, "unknown", b.State().String())
 }
 
-
 func TestBreaker_StaleHalfOpenTrialIsRearmed(t *testing.T) {
 	b := NewBreaker(&common.CircuitBreakerPolicyConfig{
 		FailureThresholdCount:    1,

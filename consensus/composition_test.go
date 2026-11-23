@@ -712,9 +712,9 @@ func TestMissingDataWaiver_StgShape_TwoInternalsWrappedMissingData(t *testing.T)
 		requiredParticipants: []*common.ConsensusRequiredParticipant{
 			{
 				Tag: "type:internal", MinParticipants: 2, MinAgreement: 1,
-				WaiveAgreementOnMissingData:            true,
-				WaiveAgreementOnEmptyOutsideRetention:  true,
-				RetentionBlocks:                        2350000,
+				WaiveAgreementOnMissingData:           true,
+				WaiveAgreementOnEmptyOutsideRetention: true,
+				RetentionBlocks:                       2350000,
 			},
 			{Tag: "type:external", MinParticipants: 2, MinAgreement: 1},
 		},

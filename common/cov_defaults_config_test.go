@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	pb "github.com/envoyproxy/go-control-plane/envoy/service/ratelimit/v3"
 	"github.com/erpc/erpc/util"
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	pb "github.com/envoyproxy/go-control-plane/envoy/service/ratelimit/v3"
 	"gopkg.in/yaml.v3"
 )
 
@@ -436,10 +436,10 @@ func TestCovDefaults_UpstreamCopyIsDeep(t *testing.T) {
 	lbm := int64(5)
 	slot := int64(9)
 	src := &UpstreamConfig{
-		Id:                "u",
-		Evm:               &EvmUpstreamConfig{ChainId: 1, BlockAvailability: &EvmBlockAvailabilityConfig{Lower: &EvmAvailabilityBoundConfig{LatestBlockMinus: &lbm}}, SkipWhenSyncing: util.BoolPtr(true), SkipSyncingCheck: util.BoolPtr(true), PinLatestTag: util.BoolPtr(true), DeprecatedGetLogsSplitOnError: util.BoolPtr(true), QueryShim: &EvmQueryShimConfig{Enabled: util.BoolPtr(true), AllowedMethods: []string{"eth_queryBlocks"}}, DeprecatedIntegrity: &UpstreamIntegrityConfig{EthGetBlockReceipts: &UpstreamIntegrityEthGetBlockReceiptsConfig{Enabled: true, CheckLogIndexStrictIncrements: util.BoolPtr(true), CheckLogsBloom: util.BoolPtr(true)}}},
-		Svm:               &SvmUpstreamConfig{Chain: "solana", BlockAvailability: &SvmBlockAvailabilityConfig{Lower: &SvmAvailabilityBoundConfig{LatestSlotMinus: &slot, ExactSlot: &slot, FirstAvailableSlotPlus: &slot}, Upper: &SvmAvailabilityBoundConfig{}}},
-		Failsafe:          []*FailsafeConfig{{MatchFinality: []DataFinalityState{DataFinalityStateFinalized}, MatchCommitment: []string{"confirmed"}, Retry: &RetryPolicyConfig{MaxAttempts: 2}, CircuitBreaker: &CircuitBreakerPolicyConfig{FailureThresholdCount: 3}, Timeout: &TimeoutPolicyConfig{Duration: &AdaptiveDuration{Base: 1}}, Hedge: &HedgePolicyConfig{MaxCount: 2, Delay: &AdaptiveDuration{Base: 2}}, Consensus: &ConsensusPolicyConfig{
+		Id:  "u",
+		Evm: &EvmUpstreamConfig{ChainId: 1, BlockAvailability: &EvmBlockAvailabilityConfig{Lower: &EvmAvailabilityBoundConfig{LatestBlockMinus: &lbm}}, SkipWhenSyncing: util.BoolPtr(true), SkipSyncingCheck: util.BoolPtr(true), PinLatestTag: util.BoolPtr(true), DeprecatedGetLogsSplitOnError: util.BoolPtr(true), QueryShim: &EvmQueryShimConfig{Enabled: util.BoolPtr(true), AllowedMethods: []string{"eth_queryBlocks"}}, DeprecatedIntegrity: &UpstreamIntegrityConfig{EthGetBlockReceipts: &UpstreamIntegrityEthGetBlockReceiptsConfig{Enabled: true, CheckLogIndexStrictIncrements: util.BoolPtr(true), CheckLogsBloom: util.BoolPtr(true)}}},
+		Svm: &SvmUpstreamConfig{Chain: "solana", BlockAvailability: &SvmBlockAvailabilityConfig{Lower: &SvmAvailabilityBoundConfig{LatestSlotMinus: &slot, ExactSlot: &slot, FirstAvailableSlotPlus: &slot}, Upper: &SvmAvailabilityBoundConfig{}}},
+		Failsafe: []*FailsafeConfig{{MatchFinality: []DataFinalityState{DataFinalityStateFinalized}, MatchCommitment: []string{"confirmed"}, Retry: &RetryPolicyConfig{MaxAttempts: 2}, CircuitBreaker: &CircuitBreakerPolicyConfig{FailureThresholdCount: 3}, Timeout: &TimeoutPolicyConfig{Duration: &AdaptiveDuration{Base: 1}}, Hedge: &HedgePolicyConfig{MaxCount: 2, Delay: &AdaptiveDuration{Base: 2}}, Consensus: &ConsensusPolicyConfig{
 			MaxParticipants:         3,
 			PunishMisbehavior:       &PunishMisbehaviorConfig{DisputeThreshold: 4},
 			MisbehaviorsDestination: &MisbehaviorsDestinationConfig{Type: MisbehaviorsDestinationTypeS3, S3: &S3FlushConfig{MaxRecords: 1, Credentials: &AwsAuthConfig{Mode: "env"}}},

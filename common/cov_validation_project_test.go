@@ -282,7 +282,10 @@ func TestCovValidation_EvmUpstream(t *testing.T) {
 		{"unknown nodeType", func(e *EvmUpstreamConfig) { e.NodeType = "light" }, "upstream.*.evm.nodeType 'light' is invalid must be one of"},
 		{"invalid lower bound", func(e *EvmUpstreamConfig) { e.BlockAvailability.Lower = &EvmAvailabilityBoundConfig{} }, "upstream.*.evm.blockAvailability.lower is invalid: bound must set exactly one of"},
 		{"invalid upper bound", func(e *EvmUpstreamConfig) { e.BlockAvailability.Upper.Probe = "receipts" }, "upstream.*.evm.blockAvailability.upper is invalid: bound.probe 'receipts' is invalid"},
-		{"latestBlockMinus inverted", func(e *EvmUpstreamConfig) { e.BlockAvailability.Lower.LatestBlockMinus = i64(0); e.BlockAvailability.Upper.LatestBlockMinus = i64(5) }, "lower.latestBlockMinus must be >= upper.latestBlockMinus"},
+		{"latestBlockMinus inverted", func(e *EvmUpstreamConfig) {
+			e.BlockAvailability.Lower.LatestBlockMinus = i64(0)
+			e.BlockAvailability.Upper.LatestBlockMinus = i64(5)
+		}, "lower.latestBlockMinus must be >= upper.latestBlockMinus"},
 		{"exactBlock inverted", func(e *EvmUpstreamConfig) {
 			e.BlockAvailability.Lower = &EvmAvailabilityBoundConfig{ExactBlock: i64(10)}
 			e.BlockAvailability.Upper = &EvmAvailabilityBoundConfig{ExactBlock: i64(5)}

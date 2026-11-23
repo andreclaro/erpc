@@ -500,7 +500,7 @@ type shadowCmpWriter struct {
 }
 
 func (w *shadowCmpWriter) WriteTo(io.Writer, bool) (int64, error) { return 0, nil }
-func (w *shadowCmpWriter) IsResultEmptyish() bool                   { return false }
+func (w *shadowCmpWriter) IsResultEmptyish() bool                 { return false }
 func (w *shadowCmpWriter) Size(...context.Context) (int, error) {
 	if w.panicMsg != "" {
 		panic(w.panicMsg)

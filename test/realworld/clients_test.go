@@ -528,11 +528,11 @@ type logsClient struct {
 	clientBase
 	filter int
 
-	live  map[chainsim.LogKey]liveLog
-	ever  map[chainsim.LogKey]bool
+	live map[chainsim.LogKey]liveLog
+	ever map[chainsim.LogKey]bool
 	// removed are the logs the client was told removed:true.
 	removed map[chainsim.LogKey]bool
-	conns []*logsConn
+	conns   []*logsConn
 }
 
 type liveLog struct {
