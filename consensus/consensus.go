@@ -283,6 +283,7 @@ func CloseAll(ctx context.Context) {
 // once, at the top level.
 func buildPolicy(cfg *common.ConsensusPolicyConfig, logger *zerolog.Logger, policyName string) *consensusPolicy {
 	b := newBuilder().
+		WithKey(cfg.Key).
 		WithMaxParticipants(cfg.MaxParticipants).
 		WithAgreementThreshold(cfg.AgreementThreshold).
 		WithDisputeBehavior(cfg.DisputeBehavior).

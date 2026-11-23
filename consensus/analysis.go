@@ -659,9 +659,21 @@ func resultOrErrorToHash(r *execResult, ctx context.Context, config *config) (st
 		return "", errNoJsonRpcResponse
 	}
 
-	if config.ignoreFields != nil {
-		if originalReq, ok := ctx.Value(common.RequestContextKey).(*common.NormalizedRequest); ok {
-			if method, err := originalReq.Method(); err == nil {
+	if originalReq, ok := ctx.Value(common.RequestContextKey).(*common.NormalizedRequest); ok {
+		if method, err := originalReq.Method(); err == nil {
+			// If a non-canonical consensus key has a registered extractor for this
+			// method, use it. This lets architecture packages compare only the
+			// fields that identify the object (e.g. SVM getBlock blockhash).
+			if config.key != "" && config.key != common.ConsensusKeyCanonical {
+				if fn, ok := common.GetConsensusKeyExtractor(config.key, method); ok {
+					hash, extracted, err := fn(ctx, jr, method)
+					if extracted && err == nil {
+						return hash, nil
+					}
+					// Fall back to canonical on extraction error or missing fields.
+				}
+			}
+			if config.ignoreFields != nil {
 				if fields, ok := methodFields(config.ignoreFields, method); ok {
 					return jr.CanonicalHashWithIgnoredFields(fields, ctx)
 				}
