@@ -13,7 +13,48 @@
 
 eRPC is a fault-tolerant RPC proxy with **re-org-aware permanent caching**, serving both EVM chains and SVM (Solana) clusters. It sits in front of all your upstreams — managed providers and your own nodes — behind a single endpoint, and handles failover, retries, caching, and multi-chain routing automatically. Built for read-heavy workloads such as data indexing and high-load frontends.
 
-<img src="./assets/hla-diagram.svg" alt="Architecture Diagram" width="100%" />
+```mermaid
+flowchart LR
+    subgraph Clients
+        C1[Indexers & pipelines\nsubgraphs · ETL]
+        C2[Backends & APIs\nservices · jobs]
+        C3[Apps & frontends\ndApps · wallets]
+    end
+
+    subgraph eRPC["eRPC — fault-tolerant RPC proxy"]
+        direction TB
+        F1[Retries & failover]
+        F2[Consensus]
+        F3[Hedged requests]
+        F4[Integrity checks]
+        F5[Method routing]
+        F6[Selection policies]
+        F7[Rate limits]
+        F8[Smart batching]
+        FE[Unified errors · Observability]
+    end
+
+    Cache[(Re-org-aware cache\npermanent · read-through)]
+
+    subgraph Upstreams
+        U1[Provider A\npremium · active]
+        U2[Your node\narchive · full]
+        U3[Provider B\nrate-limited · deprioritized]
+        U4[Provider C\noffline · bypassed]
+    end
+
+    C1 & C2 & C3 -->|JSON-RPC · one URL| eRPC
+    eRPC <-->|read-through| Cache
+    eRPC -->|health-aware| U1
+    eRPC --> U2
+    eRPC --> U3
+    eRPC -.->|bypassed| U4
+
+    style U1 fill:#e8f5e9
+    style U2 fill:#e8f5e9
+    style U3 fill:#fff3e0
+    style U4 fill:#ffebee
+```
 
 ---
 
